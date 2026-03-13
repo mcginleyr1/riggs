@@ -1,0 +1,15 @@
+[package]
+name = "riggs-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "riggs"
+path = "src/main.rs"
+
+[dependencies]
+riggs-types = { workspace = true }
+riggs-comms = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "riggs-static-ai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riggs-types = { workspace = true }
+riggs-engine = { workspace = true }
+goblin = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

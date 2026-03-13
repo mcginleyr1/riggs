@@ -1,0 +1,12 @@
+[package]
+name = "riggs-sensor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riggs-types = { workspace = true }
+riggs-platform = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }

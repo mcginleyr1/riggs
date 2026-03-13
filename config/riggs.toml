@@ -1,0 +1,25 @@
+# Riggs Endpoint Protection - Configuration
+
+[sensor]
+enabled_sources = ["process", "file", "network", "dns", "auth"]
+poll_interval_ms = 100
+
+[engine]
+static_ai_enabled = true
+behavioral_ai_enabled = true
+rules_enabled = true
+
+[store]
+db_path = "/var/lib/riggs/riggs.db"
+retention_days = 90
+compression_enabled = true
+
+[comms]
+cloud_enabled = false
+# cloud_endpoint = "https://console.example.com"
+heartbeat_interval_secs = 60
+
+[response]
+auto_respond = true
+kill_on_critical = true
+quarantine_on_malicious = true

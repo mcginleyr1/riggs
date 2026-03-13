@@ -1,0 +1,18 @@
+[package]
+name = "riggs-response"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riggs-types = { workspace = true }
+riggs-platform = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+sha2 = "0.10"

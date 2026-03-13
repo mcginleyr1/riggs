@@ -1,0 +1,114 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/riggs-types",
+    "crates/riggs-platform",
+    "crates/riggs-platform-macos",
+    "crates/riggs-platform-linux",
+    "crates/riggs-platform-windows",
+    "crates/riggs-sensor",
+    "crates/riggs-engine",
+    "crates/riggs-static-ai",
+    "crates/riggs-behavioral-ai",
+    "crates/riggs-rules",
+    "crates/riggs-storyline",
+    "crates/riggs-response",
+    "crates/riggs-store",
+    "crates/riggs-comms",
+    "crates/riggs-discovery",
+    "crates/riggs-device-control",
+    "crates/riggs-vuln",
+    "crates/riggs-shell",
+    "crates/riggs-cli",
+    "crates/riggs-daemon",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mcginleyr1/riggs"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# IDs
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Binary parsing
+goblin = "0.9"
+
+# ML inference
+ort = { version = "2", features = ["load-dynamic"] }
+
+# YARA rules
+yara-x = "0.12"
+
+# Pattern matching
+aho-corasick = "1"
+
+# Local database
+redb = "2"
+
+# Compression
+zstd = "0.13"
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Network
+pnet = "0.35"
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["serde"] }
+
+# PTY
+portable-pty = "0.8"
+
+# Config
+toml = "0.8"
+
+# Filesystem monitoring
+notify = "7"
+
+# Async channels (beyond tokio built-in)
+async-trait = "0.1"
+
+# Internal crates
+riggs-types = { path = "crates/riggs-types" }
+riggs-platform = { path = "crates/riggs-platform" }
+riggs-platform-macos = { path = "crates/riggs-platform-macos" }
+riggs-platform-linux = { path = "crates/riggs-platform-linux" }
+riggs-platform-windows = { path = "crates/riggs-platform-windows" }
+riggs-sensor = { path = "crates/riggs-sensor" }
+riggs-engine = { path = "crates/riggs-engine" }
+riggs-static-ai = { path = "crates/riggs-static-ai" }
+riggs-behavioral-ai = { path = "crates/riggs-behavioral-ai" }
+riggs-rules = { path = "crates/riggs-rules" }
+riggs-storyline = { path = "crates/riggs-storyline" }
+riggs-response = { path = "crates/riggs-response" }
+riggs-store = { path = "crates/riggs-store" }
+riggs-comms = { path = "crates/riggs-comms" }
+riggs-discovery = { path = "crates/riggs-discovery" }
+riggs-device-control = { path = "crates/riggs-device-control" }
+riggs-vuln = { path = "crates/riggs-vuln" }
+riggs-shell = { path = "crates/riggs-shell" }
+riggs-cli = { path = "crates/riggs-cli" }
+riggs-daemon = { path = "crates/riggs-daemon" }
