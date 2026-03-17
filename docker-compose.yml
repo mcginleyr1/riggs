@@ -54,7 +54,7 @@ services:
       dockerfile: ../docker/Dockerfile.dev
     ports:
       - "4000:4000"   # Phoenix HTTP
-      - "4001:4001"   # gRPC (future)
+      - "4001:4001"   # gRPC (agent connections)
     environment:
       DATABASE_URL: ecto://postgres:postgres@postgres/murtaugh_meta
       TENANT_DATABASE_HOST: postgres
@@ -119,8 +119,27 @@ services:
     profiles:
       - sim
 
+  # ── Riggs Agent (real Rust agent, Linux build) ────────────────────
+  riggs-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    environment:
+      RIGGS_CONSOLE_URL: http://murtaugh:4001
+      RIGGS_ENROLL_TOKEN: dev-enroll-token-riggs-sim
+      RUST_LOG: info
+    volumes:
+      - riggs_data:/var/lib/riggs
+    depends_on:
+      murtaugh:
+        condition: service_started
+    restart: on-failure
+    profiles:
+      - agent
+
 volumes:
   pgdata:
   miniodata:
   mix_deps:
   mix_build:
+  riggs_data:

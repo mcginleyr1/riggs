@@ -1,0 +1,30 @@
+FROM rust:1.87-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+# Build only the daemon for Linux
+RUN cargo build --release -p riggs-daemon
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/riggs-daemon /usr/local/bin/riggs-daemon
+COPY --from=builder /build/config/riggs.toml /etc/riggs/riggs.toml
+COPY --from=builder /build/config/dlp-policy.toml /etc/riggs/dlp-policy.toml
+
+RUN mkdir -p /var/lib/riggs /var/run
+
+ENV RUST_LOG=info
+
+ENTRYPOINT ["/usr/local/bin/riggs-daemon"]

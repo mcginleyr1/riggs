@@ -74,6 +74,7 @@ pub struct CommsConfig {
     pub socket_path: String,
     pub cloud_enabled: bool,
     pub cloud_endpoint: Option<String>,
+    pub enrollment_token: Option<String>,
     pub heartbeat_interval_secs: u64,
 }
 
@@ -87,7 +88,8 @@ impl Default for CommsConfig {
             socket_path: default_socket_path(),
             cloud_enabled: false,
             cloud_endpoint: None,
-            heartbeat_interval_secs: 60,
+            enrollment_token: None,
+            heartbeat_interval_secs: 30,
         }
     }
 }

@@ -24,6 +24,7 @@ members = [
     "crates/riggs-intel",
     "crates/riggs-menubar",
     "crates/riggs-dlp",
+    "crates/riggs-cloud",
 ]
 
 [workspace.package]
@@ -128,3 +129,4 @@ riggs-daemon = { path = "crates/riggs-daemon" }
 riggs-intel = { path = "crates/riggs-intel" }
 riggs-menubar = { path = "crates/riggs-menubar" }
 riggs-dlp = { path = "crates/riggs-dlp" }
+riggs-cloud = { path = "crates/riggs-cloud" }

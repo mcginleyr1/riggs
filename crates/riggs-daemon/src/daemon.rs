@@ -85,31 +85,41 @@ impl RiggsDaemon {
     }
 
     fn load_config() -> Result<RiggsConfig, RiggsError> {
-        for config_path in CONFIG_PATHS {
-            let path = std::path::Path::new(config_path);
-            if path.exists() {
-                let contents = std::fs::read_to_string(path).map_err(|e| {
-                    RiggsError::Config(format!("failed to read {config_path}: {e}"))
-                })?;
-
-                let config: RiggsConfig = toml::from_str(&contents).map_err(|e| {
-                    RiggsError::Config(format!("failed to parse {config_path}: {e}"))
-                })?;
-
-                info!(path = config_path, "loaded configuration");
-                return Ok(config);
+        let mut config = 'file: {
+            for config_path in CONFIG_PATHS {
+                let path = std::path::Path::new(config_path);
+                if path.exists() {
+                    let contents = std::fs::read_to_string(path).map_err(|e| {
+                        RiggsError::Config(format!("failed to read {config_path}: {e}"))
+                    })?;
+                    let cfg: RiggsConfig = toml::from_str(&contents).map_err(|e| {
+                        RiggsError::Config(format!("failed to parse {config_path}: {e}"))
+                    })?;
+                    info!(path = config_path, "loaded configuration");
+                    break 'file cfg;
+                }
             }
+            info!("no config file found, using defaults");
+            RiggsConfig::default()
+        };
+
+        // Environment variable overrides (useful for Docker/container deployments)
+        if let Ok(url) = std::env::var("RIGGS_CONSOLE_URL") {
+            config.comms.cloud_enabled = true;
+            config.comms.cloud_endpoint = Some(url);
+        }
+        if let Ok(token) = std::env::var("RIGGS_ENROLL_TOKEN") {
+            config.comms.enrollment_token = Some(token);
         }
 
-        info!("no config file found, using defaults");
-        Ok(RiggsConfig::default())
+        Ok(config)
     }
 
     pub async fn run(&mut self) -> Result<(), RiggsError> {
         info!("initializing components...");
 
         let (event_tx, mut event_rx) = mpsc::channel::<RiggsEvent>(10_000);
-        let (verdict_tx, _verdict_rx) = mpsc::channel::<MergedVerdict>(10_000);
+        let (verdict_tx, verdict_rx) = mpsc::channel::<MergedVerdict>(10_000);
 
         // -- Shared daemon state (used by IPC server + feed dispatcher) --
         let daemon_state = Arc::new(riggs_comms::DaemonState::new());
@@ -374,7 +384,10 @@ impl RiggsDaemon {
         let mut correlator = StorylineCorrelator::new();
 
         // -- Sensor + collector --
+        #[cfg(target_os = "macos")]
         let sensor = Box::new(riggs_platform_macos::MacOsSensor::new());
+        #[cfg(not(target_os = "macos"))]
+        let sensor = Box::new(riggs_platform_linux::LinuxSensor::new());
         let mut collector = riggs_sensor::EventCollector::new(sensor, event_tx);
         collector.start().await?;
         info!("sensor and event collector started");
@@ -399,8 +412,14 @@ impl RiggsDaemon {
         let vault = riggs_response::QuarantineVault::new(PathBuf::from(
             "/var/lib/riggs/quarantine",
         ));
+        #[cfg(target_os = "macos")]
         let response_sensor_pc = Box::new(riggs_platform_macos::MacOsSensor::new());
+        #[cfg(target_os = "macos")]
         let response_sensor_nc = Box::new(riggs_platform_macos::MacOsSensor::new());
+        #[cfg(not(target_os = "macos"))]
+        let response_sensor_pc = Box::new(riggs_platform_linux::LinuxSensor::new());
+        #[cfg(not(target_os = "macos"))]
+        let response_sensor_nc = Box::new(riggs_platform_linux::LinuxSensor::new());
         let executor = Arc::new(riggs_response::ResponseExecutor::new(
             response_sensor_pc,
             response_sensor_nc,
@@ -460,6 +479,70 @@ impl RiggsDaemon {
                 })
             });
             info!("rule hot-reload watcher started");
+        }
+
+        // -- Cloud client (connects to Murtaugh console if configured) --
+        if self.config.comms.cloud_enabled {
+            match (
+                self.config.comms.cloud_endpoint.clone(),
+                self.config.comms.enrollment_token.clone(),
+            ) {
+                (Some(endpoint), Some(token)) => {
+                    let cloud_config = riggs_cloud::ConsoleConfig {
+                        endpoint,
+                        enrollment_token: token,
+                        heartbeat_interval_secs: self.config.comms.heartbeat_interval_secs,
+                    };
+                    let mut cc = riggs_cloud::ConsoleClient::new(cloud_config.clone());
+                    match cc.connect().await {
+                        Ok(()) => {
+                            match riggs_cloud::enroll(&mut cc).await {
+                                Ok(agent_id) => {
+                                    cc.agent_id = Some(agent_id.clone());
+                                    info!(agent_id = %agent_id, "enrolled with console");
+
+                                    // Heartbeat loop
+                                    let hb_client = cc.clone();
+                                    let hb_agent_id = agent_id.clone();
+                                    let hb_events = Arc::clone(&daemon_state.events_processed);
+                                    let hb_threats = Arc::clone(&daemon_state.threats_detected);
+                                    let hb_secs = self.config.comms.heartbeat_interval_secs;
+                                    self.supervisor.spawn("cloud-heartbeat", move || {
+                                        let client = hb_client.clone();
+                                        let id = hb_agent_id.clone();
+                                        let ev = Arc::clone(&hb_events);
+                                        let th = Arc::clone(&hb_threats);
+                                        Box::pin(async move {
+                                            riggs_cloud::run_heartbeat_loop(client, id, hb_secs, ev, th).await;
+                                        })
+                                    });
+
+                                    // Threat reporter
+                                    let rep_client = cc.clone();
+                                    let rep_agent_id = agent_id.clone();
+                                    tokio::spawn(async move {
+                                        riggs_cloud::run_threat_reporter(rep_client, rep_agent_id, verdict_rx).await;
+                                    });
+
+                                    info!("cloud heartbeat and threat reporter started");
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "enrollment failed, running without console");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "cannot connect to console, running without it");
+                        }
+                    }
+                }
+                _ => {
+                    warn!("cloud_enabled=true but cloud_endpoint or enrollment_token not set");
+                }
+            }
+        } else {
+            // Drop the receiver so the channel closes cleanly
+            drop(verdict_rx);
         }
 
         // -- Config for auto-respond, captured before entering the loop --
