@@ -40,7 +40,8 @@ defmodule MurtaughWeb.Router do
     pipe_through [:browser, :require_auth]
 
     live_session :org_scoped,
-      on_mount: [{MurtaughWeb.OrgHook, :default}] do
+      on_mount: [{MurtaughWeb.OrgHook, :default}],
+      layout: {MurtaughWeb.Layouts, :app} do
       live "/", DashboardLive, :index
       live "/threats", ThreatsLive, :index
       live "/threats/:id", ThreatDetailLive, :show
