@@ -5,7 +5,7 @@ defmodule MurtaughWeb.OrgHook do
   the socket. Redirects to login if no session user.
   """
   import Phoenix.LiveView
-  import Phoenix.Component, only: [assign: 3]
+  import Phoenix.Component, only: [assign: 2]
 
   alias Murtaugh.{Accounts, Org, Tenancy}
 
@@ -17,14 +17,12 @@ defmodule MurtaughWeb.OrgHook do
       current_user = load_user(user_id)
       {current_org, current_shard} = resolve_org(org_slug)
 
-      socket =
-        socket
-        |> assign(:org_slug, org_slug)
-        |> assign(:current_org, current_org)
-        |> assign(:current_user, current_user)
-        |> assign(:current_shard, current_shard)
-
-      {:cont, socket}
+      {:cont, assign(socket,
+        org_slug: org_slug,
+        current_org: current_org,
+        current_user: current_user,
+        current_shard: current_shard
+      )}
     else
       {:halt, redirect(socket, to: "/login")}
     end

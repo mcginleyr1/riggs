@@ -14,19 +14,17 @@ defmodule MurtaughWeb.EventsLive do
 
     shard = socket.assigns[:current_shard]
 
-    socket =
-      socket
-      |> assign(:page_title, "Events")
-      |> assign(:events, load_events(shard))
-      |> assign(:search, "")
-      |> assign(:filter_type, "all")
-      |> assign(:filter_severity, "all")
-      |> assign(:filter_time, "24h")
-      |> assign(:expanded_id, nil)
-      |> assign(:page, 1)
-      |> assign(:total_pages, 1)
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "Events",
+      events: load_events(shard),
+      search: "",
+      filter_type: "all",
+      filter_severity: "all",
+      filter_time: "24h",
+      expanded_id: nil,
+      page: 1,
+      total_pages: 1
+    )}
   end
 
   defp load_events(nil), do: placeholder_events()
@@ -43,14 +41,7 @@ defmodule MurtaughWeb.EventsLive do
   end
 
   def handle_event("filter", %{"type" => type, "severity" => severity, "time" => time}, socket) do
-    socket =
-      socket
-      |> assign(:filter_type, type)
-      |> assign(:filter_severity, severity)
-      |> assign(:filter_time, time)
-      |> assign(:page, 1)
-
-    {:noreply, socket}
+    {:noreply, assign(socket, filter_type: type, filter_severity: severity, filter_time: time, page: 1)}
   end
 
   def handle_event("toggle_expand", %{"id" => id}, socket) do

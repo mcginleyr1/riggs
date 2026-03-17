@@ -21,45 +21,31 @@ defmodule MurtaughWeb.DashboardLive do
      recent_threats, recent_dlp_blocks, dlp_blocks_today, events_per_sec} =
       load_dashboard_data(shard)
 
-    socket =
-      socket
-      |> assign(:page_title, "Dashboard")
-      |> assign(:agents_online, agents_online)
-      |> assign(:agents_offline, agents_offline)
-      |> assign(:agents_degraded, agents_degraded)
-      |> assign(:threats_today, threats_today)
-      |> assign(:dlp_blocks_today, dlp_blocks_today)
-      |> assign(:dlp_alerts_today, 0)
-      |> assign(:events_per_sec, events_per_sec)
-      |> assign(:recent_threats, recent_threats)
-      |> assign(:recent_dlp_blocks, recent_dlp_blocks)
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "Dashboard",
+      agents_online: agents_online,
+      agents_offline: agents_offline,
+      agents_degraded: agents_degraded,
+      threats_today: threats_today,
+      dlp_blocks_today: dlp_blocks_today,
+      dlp_alerts_today: 0,
+      events_per_sec: events_per_sec,
+      recent_threats: recent_threats,
+      recent_dlp_blocks: recent_dlp_blocks
+    )}
   end
 
   @impl true
   def handle_info({:new_threat, threat}, socket) do
     threats = [Presenters.present_threat(threat) | Enum.take(socket.assigns.recent_threats, 9)]
-
-    socket =
-      socket
-      |> update(:threats_today, &(&1 + 1))
-      |> assign(:recent_threats, threats)
-
-    {:noreply, socket}
+    {:noreply, assign(socket, threats_today: socket.assigns.threats_today + 1, recent_threats: threats)}
   end
 
   def handle_info({:threat_updated, _threat}, socket), do: {:noreply, socket}
 
   def handle_info({:dlp_event, event}, socket) do
     blocks = [Presenters.present_dlp_event(event) | Enum.take(socket.assigns.recent_dlp_blocks, 4)]
-
-    socket =
-      socket
-      |> update(:dlp_blocks_today, &(&1 + 1))
-      |> assign(:recent_dlp_blocks, blocks)
-
-    {:noreply, socket}
+    {:noreply, assign(socket, dlp_blocks_today: socket.assigns.dlp_blocks_today + 1, recent_dlp_blocks: blocks)}
   end
 
   def handle_info({:agent_online, _agent}, socket),

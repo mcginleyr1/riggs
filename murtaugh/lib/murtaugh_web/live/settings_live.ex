@@ -3,14 +3,12 @@ defmodule MurtaughWeb.SettingsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    socket =
-      socket
-      |> assign(:page_title, "Settings")
-      |> assign(:active_tab, "users")
-      |> assign(:users, placeholder_users())
-      |> assign(:enrollment_tokens, placeholder_tokens())
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "Settings",
+      active_tab: "users",
+      users: placeholder_users(),
+      enrollment_tokens: placeholder_tokens()
+    )}
   end
 
   @impl true

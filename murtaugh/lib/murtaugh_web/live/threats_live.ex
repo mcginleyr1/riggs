@@ -15,19 +15,17 @@ defmodule MurtaughWeb.ThreatsLive do
     shard = socket.assigns[:current_shard]
     threats = load_threats(shard)
 
-    socket =
-      socket
-      |> assign(:page_title, "Threats")
-      |> assign(:threats, threats)
-      |> assign(:filter_severity, "all")
-      |> assign(:filter_status, "all")
-      |> assign(:filter_time, "24h")
-      |> assign(:sort_by, :timestamp)
-      |> assign(:sort_dir, :desc)
-      |> assign(:page, 1)
-      |> assign(:total_pages, 1)
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "Threats",
+      threats: threats,
+      filter_severity: "all",
+      filter_status: "all",
+      filter_time: "24h",
+      sort_by: :timestamp,
+      sort_dir: :desc,
+      page: 1,
+      total_pages: 1
+    )}
   end
 
   defp load_threats(nil), do: placeholder_threats()
@@ -40,14 +38,7 @@ defmodule MurtaughWeb.ThreatsLive do
 
   @impl true
   def handle_event("filter", %{"severity" => severity, "status" => status, "time" => time}, socket) do
-    socket =
-      socket
-      |> assign(:filter_severity, severity)
-      |> assign(:filter_status, status)
-      |> assign(:filter_time, time)
-      |> assign(:page, 1)
-
-    {:noreply, socket}
+    {:noreply, assign(socket, filter_severity: severity, filter_status: status, filter_time: time, page: 1)}
   end
 
   def handle_event("sort", %{"field" => field}, socket) do

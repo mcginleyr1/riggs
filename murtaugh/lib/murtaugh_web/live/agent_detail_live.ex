@@ -15,14 +15,12 @@ defmodule MurtaughWeb.AgentDetailLive do
     shard = socket.assigns[:current_shard]
     {agent, recent_events, active_threats} = load_agent_data(shard, id)
 
-    socket =
-      socket
-      |> assign(:page_title, agent.hostname)
-      |> assign(:agent, agent)
-      |> assign(:recent_events, recent_events)
-      |> assign(:active_threats, active_threats)
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: agent.hostname,
+      agent: agent,
+      recent_events: recent_events,
+      active_threats: active_threats
+    )}
   end
 
   @impl true

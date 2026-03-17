@@ -3,13 +3,11 @@ defmodule MurtaughWeb.DlpPoliciesLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    socket =
-      socket
-      |> assign(:page_title, "DLP Policies")
-      |> assign(:policies, placeholder_policies())
-      |> assign(:selected_policy, nil)
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "DLP Policies",
+      policies: placeholder_policies(),
+      selected_policy: nil
+    )}
   end
 
   @impl true

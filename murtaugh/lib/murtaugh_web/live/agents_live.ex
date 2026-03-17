@@ -14,13 +14,11 @@ defmodule MurtaughWeb.AgentsLive do
 
     shard = socket.assigns[:current_shard]
 
-    socket =
-      socket
-      |> assign(:page_title, "Agents")
-      |> assign(:agents, load_agents(shard))
-      |> assign(:filter_status, "all")
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "Agents",
+      agents: load_agents(shard),
+      filter_status: "all"
+    )}
   end
 
   @impl true

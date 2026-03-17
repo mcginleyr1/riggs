@@ -15,28 +15,20 @@ defmodule MurtaughWeb.DlpLive do
     shard = socket.assigns[:current_shard]
     {events, blocks_today, alerts_today, top_domain} = load_dlp_data(shard)
 
-    socket =
-      socket
-      |> assign(:page_title, "DLP")
-      |> assign(:blocks_today, blocks_today)
-      |> assign(:alerts_today, alerts_today)
-      |> assign(:top_domain, top_domain)
-      |> assign(:total_agents_blocked, 0)
-      |> assign(:recent_events, events)
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "DLP",
+      blocks_today: blocks_today,
+      alerts_today: alerts_today,
+      top_domain: top_domain,
+      total_agents_blocked: 0,
+      recent_events: events
+    )}
   end
 
   @impl true
   def handle_info({:dlp_event, event}, socket) do
     events = [Presenters.present_dlp_event(event) | Enum.take(socket.assigns.recent_events, 19)]
-
-    socket =
-      socket
-      |> update(:blocks_today, &(&1 + 1))
-      |> assign(:recent_events, events)
-
-    {:noreply, socket}
+    {:noreply, assign(socket, blocks_today: socket.assigns.blocks_today + 1, recent_events: events)}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
