@@ -1,17 +1,22 @@
 alias Murtaugh.Repo
 alias Murtaugh.Org.{Node, Shard}
 alias Murtaugh.Accounts.User
+alias Murtaugh.Fleet.EnrollmentToken
 
 # Idempotent: only seed if no root node exists
 unless Repo.get_by(Node, node_type: "root") do
+  db_host = System.get_env("TENANT_DATABASE_HOST", "localhost")
+  db_user = System.get_env("TENANT_DATABASE_USER", "postgres")
+  db_pass = System.get_env("TENANT_DATABASE_PASSWORD", "postgres")
+
   # Create the demo tenant shard
   {:ok, shard} =
     %Shard{}
     |> Shard.changeset(%{
       name: "shard-demo",
-      database_url: "postgres://postgres:postgres@localhost:5432/murtaugh_tenant_demo",
+      database_url: "postgres://#{db_user}:#{db_pass}@#{db_host}:5432/murtaugh_tenant_demo",
       database_name: "murtaugh_tenant_demo",
-      host: "localhost",
+      host: db_host,
       port: 5432,
       pool_size: 10,
       status: "active",
@@ -19,7 +24,7 @@ unless Repo.get_by(Node, node_type: "root") do
     })
     |> Repo.insert()
 
-  # Create root org node (lft=1, rgt=6 to leave room for 2 children)
+  # Create root org node
   {:ok, root} =
     %Node{}
     |> Node.changeset(%{
@@ -33,7 +38,7 @@ unless Repo.get_by(Node, node_type: "root") do
     |> Repo.insert()
 
   # Create a demo account node under root
-  {:ok, _demo} =
+  {:ok, demo} =
     %Node{}
     |> Node.changeset(%{
       node_type: "account",
@@ -49,7 +54,7 @@ unless Repo.get_by(Node, node_type: "root") do
     |> Repo.insert()
 
   # Create superadmin user
-  {:ok, _admin} =
+  {:ok, admin} =
     %User{}
     |> User.registration_changeset(%{
       email: "admin@murtaugh.local",
@@ -59,5 +64,16 @@ unless Repo.get_by(Node, node_type: "root") do
     })
     |> Repo.insert()
 
-  IO.puts("Seeded: root node, demo account (shard-demo), superadmin (admin@murtaugh.local)")
+  # Create a dev enrollment token for the sim-agent
+  {:ok, _token} =
+    %EnrollmentToken{}
+    |> EnrollmentToken.changeset(%{
+      org_node_id: demo.id,
+      token: "dev-enroll-token-riggs-sim",
+      label: "Dev Sim Agent Token",
+      created_by: admin.id
+    })
+    |> Repo.insert()
+
+  IO.puts("Seeded: root node, demo account (shard-demo), superadmin, enrollment token")
 end

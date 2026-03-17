@@ -20,8 +20,15 @@ if System.get_env("PHX_SERVER") do
   config :murtaugh, MurtaughWeb.Endpoint, server: true
 end
 
+bind_ip =
+  case System.get_env("PHX_BIND", "127.0.0.1") do
+    "0.0.0.0" -> {0, 0, 0, 0}
+    "127.0.0.1" -> {127, 0, 0, 1}
+    other -> other |> String.split(".") |> Enum.map(&String.to_integer/1) |> List.to_tuple()
+  end
+
 config :murtaugh, MurtaughWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [ip: bind_ip, port: String.to_integer(System.get_env("PORT", "4000"))]
 
 # Archive storage — env vars override config.exs defaults
 if storage = System.get_env("ARCHIVE_STORAGE") do

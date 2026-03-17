@@ -62,6 +62,7 @@ services:
       TENANT_DATABASE_PASSWORD: postgres
       SECRET_KEY_BASE: dev-only-not-for-production-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       PHX_HOST: localhost
+      PHX_BIND: "0.0.0.0"
       PORT: "4000"
       PHX_SERVER: "true"
       MIX_ENV: dev
@@ -90,6 +91,33 @@ services:
         mix run priv/repo/seeds.exs &&
         mix phx.server
       "
+
+  # ── Sim Agent (fake Riggs agent for local dev) ────────────────────
+  sim-agent:
+    build:
+      context: ./murtaugh
+      dockerfile: ../docker/Dockerfile.dev
+    environment:
+      MIX_ENV: dev
+      GRPC_HOST: murtaugh
+      GRPC_PORT: "4001"
+      ENROLL_TOKEN: dev-enroll-token-riggs-sim
+    volumes:
+      - ./murtaugh:/app
+      - mix_deps:/app/deps
+      - mix_build:/app/_build
+    depends_on:
+      murtaugh:
+        condition: service_started
+    restart: on-failure
+    command: >
+      sh -c "
+        echo 'Waiting for gRPC server...' &&
+        sleep 15 &&
+        mix sim.agent
+      "
+    profiles:
+      - sim
 
 volumes:
   pgdata:
