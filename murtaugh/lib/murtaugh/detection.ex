@@ -56,6 +56,40 @@ defmodule Murtaugh.Detection do
   defp maybe_filter_level(query, nil), do: query
   defp maybe_filter_level(query, level), do: where(query, [t], t.threat_level == ^level)
 
+  def get_threat!(shard, threat_id) do
+    Tenancy.with_tenant(shard, fn ->
+      TenantRepo.get!(Threat, threat_id)
+    end)
+  end
+
+  def count_threats_today(shard) do
+    Tenancy.with_tenant(shard, fn ->
+      start_of_day =
+        DateTime.utc_now()
+        |> DateTime.to_date()
+        |> DateTime.new!(~T[00:00:00], "Etc/UTC")
+
+      from(t in Threat, where: t.timestamp >= ^start_of_day)
+      |> TenantRepo.aggregate(:count, :id)
+    end)
+  end
+
+  def list_events(shard, opts \\ []) do
+    Tenancy.with_tenant(shard, fn ->
+      limit = Keyword.get(opts, :limit, 100)
+      agent_id = Keyword.get(opts, :agent_id)
+
+      "events"
+      |> maybe_filter_agent_raw(agent_id)
+      |> order_by([e], desc: e.timestamp)
+      |> limit(^limit)
+      |> TenantRepo.all()
+    end)
+  end
+
+  defp maybe_filter_agent_raw(query, nil), do: from(e in query)
+  defp maybe_filter_agent_raw(query, agent_id), do: from(e in query, where: e.agent_id == ^agent_id)
+
   defp maybe_filter_agent(query, nil), do: query
   defp maybe_filter_agent(query, agent_id), do: where(query, [t], t.agent_id == ^agent_id)
 end

@@ -3,21 +3,38 @@ defmodule MurtaughWeb.EventsLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.Detection
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "events")
+    end
+
+    shard = socket.assigns[:current_shard]
+
     socket =
       socket
       |> assign(:page_title, "Events")
-      |> assign(:events, placeholder_events())
+      |> assign(:events, load_events(shard))
       |> assign(:search, "")
       |> assign(:filter_type, "all")
       |> assign(:filter_severity, "all")
       |> assign(:filter_time, "24h")
       |> assign(:expanded_id, nil)
       |> assign(:page, 1)
-      |> assign(:total_pages, 12)
+      |> assign(:total_pages, 1)
 
     {:ok, socket}
+  end
+
+  defp load_events(nil), do: placeholder_events()
+
+  defp load_events(shard) do
+    shard |> Detection.list_events(limit: 100) |> Enum.map(&Presenters.present_event/1)
+  rescue
+    _ -> placeholder_events()
   end
 
   @impl true
@@ -44,6 +61,14 @@ defmodule MurtaughWeb.EventsLive do
   def handle_event("page", %{"page" => page}, socket) do
     {:noreply, assign(socket, :page, String.to_integer(page))}
   end
+
+  @impl true
+  def handle_info({:new_event, event}, socket) do
+    events = [Presenters.present_event(event) | Enum.take(socket.assigns.events, 199)]
+    {:noreply, assign(socket, :events, events)}
+  end
+
+  def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do

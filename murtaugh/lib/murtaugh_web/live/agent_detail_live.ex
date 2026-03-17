@@ -3,29 +3,58 @@ defmodule MurtaughWeb.AgentDetailLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.{Detection, Fleet}
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "agent:#{id}")
     end
 
-    agent = placeholder_agent(id)
+    shard = socket.assigns[:current_shard]
+    {agent, recent_events, active_threats} = load_agent_data(shard, id)
 
     socket =
       socket
       |> assign(:page_title, agent.hostname)
       |> assign(:agent, agent)
-      |> assign(:recent_events, placeholder_events())
-      |> assign(:active_threats, placeholder_threats())
+      |> assign(:recent_events, recent_events)
+      |> assign(:active_threats, active_threats)
 
     {:ok, socket}
   end
 
   @impl true
-  def handle_info({:heartbeat, _health}, socket), do: {:noreply, socket}
+  def handle_info({:heartbeat, health}, socket) do
+    agent = update_agent_health(socket.assigns.agent, health)
+    {:noreply, assign(socket, :agent, agent)}
+  end
+
   def handle_info({:event, _event}, socket), do: {:noreply, socket}
   def handle_info({:command_ack, _ack}, socket), do: {:noreply, socket}
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp load_agent_data(nil, id), do: {placeholder_agent(id), placeholder_events(), placeholder_threats()}
+
+  defp load_agent_data(shard, id) do
+    agent = shard |> Fleet.get_agent!(id) |> Presenters.present_agent_detail()
+    events = shard |> Detection.list_events(agent_id: id, limit: 10) |> Enum.map(&Presenters.present_event/1)
+    threats = shard |> Detection.list_threats(agent_id: id, status: "open", limit: 10) |> Enum.map(&Presenters.present_threat/1)
+    {agent, events, threats}
+  rescue
+    _ -> {placeholder_agent(id), placeholder_events(), placeholder_threats()}
+  end
+
+  defp update_agent_health(agent, health) when is_nil(health), do: agent
+
+  defp update_agent_health(agent, health) do
+    %{agent |
+      uptime_secs: health.uptime_secs,
+      pipeline_latency_us: health.pipeline_latency_us,
+      sensor_healthy: health.sensor_healthy
+    }
+  end
 
   @impl true
   def render(assigns) do

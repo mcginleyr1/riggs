@@ -3,16 +3,21 @@ defmodule MurtaughWeb.AgentsLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.Fleet
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "fleet")
     end
 
+    shard = socket.assigns[:current_shard]
+
     socket =
       socket
       |> assign(:page_title, "Agents")
-      |> assign(:agents, placeholder_agents())
+      |> assign(:agents, load_agents(shard))
       |> assign(:filter_status, "all")
 
     {:ok, socket}
@@ -24,10 +29,33 @@ defmodule MurtaughWeb.AgentsLive do
   end
 
   @impl true
-  def handle_info({:agent_online, _agent}, socket), do: {:noreply, socket}
-  def handle_info({:agent_offline, _agent}, socket), do: {:noreply, socket}
-  def handle_info({:agent_status_change, _agent}, socket), do: {:noreply, socket}
+  def handle_info({:agent_online, agent}, socket) do
+    agents = [Presenters.present_agent(agent) | socket.assigns.agents]
+    {:noreply, assign(socket, :agents, agents)}
+  end
+
+  def handle_info({:agent_offline, agent}, socket) do
+    {:noreply, assign(socket, :agents, replace_agent(socket.assigns.agents, agent))}
+  end
+
+  def handle_info({:agent_status_change, agent}, socket) do
+    {:noreply, assign(socket, :agents, replace_agent(socket.assigns.agents, agent))}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp load_agents(nil), do: placeholder_agents()
+
+  defp load_agents(shard) do
+    shard |> Fleet.list_agents(limit: 200) |> Enum.map(&Presenters.present_agent/1)
+  rescue
+    _ -> placeholder_agents()
+  end
+
+  defp replace_agent(agents, updated) do
+    p = Presenters.present_agent(updated)
+    Enum.map(agents, fn a -> if a.id == p.id, do: p, else: a end)
+  end
 
   @impl true
   def render(assigns) do

@@ -59,6 +59,17 @@ defmodule Murtaugh.Fleet do
   defp maybe_filter_status(query, nil), do: query
   defp maybe_filter_status(query, status), do: where(query, [a], a.status == ^status)
 
+  def count_by_status(shard) do
+    Tenancy.with_tenant(shard, fn ->
+      from(a in Agent,
+        group_by: a.status,
+        select: {a.status, count(a.id)}
+      )
+      |> TenantRepo.all()
+      |> Map.new()
+    end)
+  end
+
   defp maybe_filter_org_node(query, nil), do: query
 
   defp maybe_filter_org_node(query, org_node_id),

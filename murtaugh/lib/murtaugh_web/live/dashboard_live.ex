@@ -3,6 +3,9 @@ defmodule MurtaughWeb.DashboardLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.{Detection, Dlp, Fleet}
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -12,25 +15,31 @@ defmodule MurtaughWeb.DashboardLive do
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "throughput")
     end
 
+    shard = socket.assigns[:current_shard]
+
+    {agents_online, agents_offline, agents_degraded, threats_today,
+     recent_threats, recent_dlp_blocks, dlp_blocks_today, events_per_sec} =
+      load_dashboard_data(shard)
+
     socket =
       socket
       |> assign(:page_title, "Dashboard")
-      |> assign(:agents_online, 142)
-      |> assign(:agents_offline, 8)
-      |> assign(:agents_degraded, 3)
-      |> assign(:threats_today, 7)
-      |> assign(:dlp_blocks_today, 23)
-      |> assign(:dlp_alerts_today, 5)
-      |> assign(:events_per_sec, 1240)
-      |> assign(:recent_threats, placeholder_threats())
-      |> assign(:recent_dlp_blocks, placeholder_dlp_blocks())
+      |> assign(:agents_online, agents_online)
+      |> assign(:agents_offline, agents_offline)
+      |> assign(:agents_degraded, agents_degraded)
+      |> assign(:threats_today, threats_today)
+      |> assign(:dlp_blocks_today, dlp_blocks_today)
+      |> assign(:dlp_alerts_today, 0)
+      |> assign(:events_per_sec, events_per_sec)
+      |> assign(:recent_threats, recent_threats)
+      |> assign(:recent_dlp_blocks, recent_dlp_blocks)
 
     {:ok, socket}
   end
 
   @impl true
   def handle_info({:new_threat, threat}, socket) do
-    threats = [threat | Enum.take(socket.assigns.recent_threats, 9)]
+    threats = [Presenters.present_threat(threat) | Enum.take(socket.assigns.recent_threats, 9)]
 
     socket =
       socket
@@ -43,7 +52,7 @@ defmodule MurtaughWeb.DashboardLive do
   def handle_info({:threat_updated, _threat}, socket), do: {:noreply, socket}
 
   def handle_info({:dlp_event, event}, socket) do
-    blocks = [event | Enum.take(socket.assigns.recent_dlp_blocks, 4)]
+    blocks = [Presenters.present_dlp_event(event) | Enum.take(socket.assigns.recent_dlp_blocks, 4)]
 
     socket =
       socket
@@ -53,20 +62,14 @@ defmodule MurtaughWeb.DashboardLive do
     {:noreply, socket}
   end
 
-  def handle_info({:agent_online, _agent}, socket) do
-    {:noreply, update(socket, :agents_online, &(&1 + 1))}
-  end
+  def handle_info({:agent_online, _agent}, socket),
+    do: {:noreply, update(socket, :agents_online, &(&1 + 1))}
 
-  def handle_info({:agent_offline, _agent}, socket) do
-    {:noreply, update(socket, :agents_offline, &(&1 + 1))}
-  end
+  def handle_info({:agent_offline, _agent}, socket),
+    do: {:noreply, update(socket, :agents_offline, &(&1 + 1))}
 
   def handle_info({:agent_status_change, _agent}, socket), do: {:noreply, socket}
-
-  def handle_info({:throughput_update, eps}, socket) do
-    {:noreply, assign(socket, :events_per_sec, eps)}
-  end
-
+  def handle_info({:throughput_update, eps}, socket), do: {:noreply, assign(socket, :events_per_sec, eps)}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
@@ -153,18 +156,36 @@ defmodule MurtaughWeb.DashboardLive do
     """
   end
 
+  defp load_dashboard_data(nil) do
+    {142, 8, 3, 7, placeholder_threats(), placeholder_dlp_blocks(), 23, 1240}
+  end
+
+  defp load_dashboard_data(shard) do
+    status_counts = Fleet.count_by_status(shard)
+    threats_today = Detection.count_threats_today(shard)
+    recent_threats = shard |> Detection.list_threats(limit: 10) |> Enum.map(&Presenters.present_threat/1)
+    recent_dlp = shard |> Dlp.recent_blocks(limit: 5) |> Enum.map(&Presenters.present_dlp_event/1)
+    dlp_blocks = shard |> Dlp.list_events(action: "block") |> length()
+
+    {
+      Map.get(status_counts, "online", 0),
+      Map.get(status_counts, "offline", 0),
+      Map.get(status_counts, "degraded", 0),
+      threats_today,
+      recent_threats,
+      recent_dlp,
+      dlp_blocks,
+      0
+    }
+  rescue
+    _ -> {0, 0, 0, 0, [], [], 0, 0}
+  end
+
   defp placeholder_threats do
     [
       %{id: "t1", time: "2m ago", level: :malicious, process: "powershell.exe", agent: "WS-NYC-042"},
       %{id: "t2", time: "8m ago", level: :suspicious, process: "curl", agent: "SRV-SF-003"},
-      %{id: "t3", time: "15m ago", level: :malicious, process: "mimikatz.exe", agent: "WS-NYC-017"},
-      %{id: "t4", time: "22m ago", level: :suspicious, process: "python3", agent: "WS-LON-008"},
-      %{id: "t5", time: "31m ago", level: :suspicious, process: "nc", agent: "SRV-NYC-001"},
-      %{id: "t6", time: "45m ago", level: :malicious, process: "rundll32.exe", agent: "WS-SF-022"},
-      %{id: "t7", time: "1h ago", level: :suspicious, process: "wget", agent: "SRV-LON-002"},
-      %{id: "t8", time: "1h ago", level: :malicious, process: "cmd.exe", agent: "WS-NYC-055"},
-      %{id: "t9", time: "2h ago", level: :suspicious, process: "bash", agent: "SRV-SF-011"},
-      %{id: "t10", time: "3h ago", level: :malicious, process: "certutil.exe", agent: "WS-NYC-033"}
+      %{id: "t3", time: "15m ago", level: :malicious, process: "mimikatz.exe", agent: "WS-NYC-017"}
     ]
   end
 
@@ -172,9 +193,7 @@ defmodule MurtaughWeb.DashboardLive do
     [
       %{id: "d1", time: "5m ago", action: "block", domain: "paste.ee", agent: "WS-NYC-042"},
       %{id: "d2", time: "12m ago", action: "block", domain: "dropbox.com", agent: "WS-SF-019"},
-      %{id: "d3", time: "28m ago", action: "alert", domain: "drive.google.com", agent: "WS-LON-003"},
-      %{id: "d4", time: "44m ago", action: "block", domain: "mega.nz", agent: "SRV-NYC-001"},
-      %{id: "d5", time: "1h ago", action: "block", domain: "anonfiles.com", agent: "WS-NYC-017"}
+      %{id: "d3", time: "28m ago", action: "alert", domain: "drive.google.com", agent: "WS-LON-003"}
     ]
   end
 end

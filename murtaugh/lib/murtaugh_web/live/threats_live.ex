@@ -3,25 +3,39 @@ defmodule MurtaughWeb.ThreatsLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.Detection
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "threats")
     end
 
+    shard = socket.assigns[:current_shard]
+    threats = load_threats(shard)
+
     socket =
       socket
       |> assign(:page_title, "Threats")
-      |> assign(:threats, placeholder_threats())
+      |> assign(:threats, threats)
       |> assign(:filter_severity, "all")
       |> assign(:filter_status, "all")
       |> assign(:filter_time, "24h")
       |> assign(:sort_by, :timestamp)
       |> assign(:sort_dir, :desc)
       |> assign(:page, 1)
-      |> assign(:total_pages, 4)
+      |> assign(:total_pages, 1)
 
     {:ok, socket}
+  end
+
+  defp load_threats(nil), do: placeholder_threats()
+
+  defp load_threats(shard) do
+    shard |> Detection.list_threats(limit: 100) |> Enum.map(&Presenters.present_threat/1)
+  rescue
+    _ -> placeholder_threats()
   end
 
   @impl true
@@ -56,7 +70,7 @@ defmodule MurtaughWeb.ThreatsLive do
 
   @impl true
   def handle_info({:new_threat, threat}, socket) do
-    threats = [threat | socket.assigns.threats]
+    threats = [Presenters.present_threat(threat) | socket.assigns.threats]
     {:noreply, assign(socket, :threats, threats)}
   end
 

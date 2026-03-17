@@ -3,27 +3,33 @@ defmodule MurtaughWeb.DlpLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.Dlp
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "dlp")
     end
 
+    shard = socket.assigns[:current_shard]
+    {events, blocks_today, alerts_today, top_domain} = load_dlp_data(shard)
+
     socket =
       socket
       |> assign(:page_title, "DLP")
-      |> assign(:blocks_today, 23)
-      |> assign(:alerts_today, 5)
-      |> assign(:top_domain, "paste.ee")
-      |> assign(:total_agents_blocked, 8)
-      |> assign(:recent_events, placeholder_dlp_events())
+      |> assign(:blocks_today, blocks_today)
+      |> assign(:alerts_today, alerts_today)
+      |> assign(:top_domain, top_domain)
+      |> assign(:total_agents_blocked, 0)
+      |> assign(:recent_events, events)
 
     {:ok, socket}
   end
 
   @impl true
   def handle_info({:dlp_event, event}, socket) do
-    events = [event | Enum.take(socket.assigns.recent_events, 19)]
+    events = [Presenters.present_dlp_event(event) | Enum.take(socket.assigns.recent_events, 19)]
 
     socket =
       socket
@@ -34,6 +40,18 @@ defmodule MurtaughWeb.DlpLive do
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp load_dlp_data(nil), do: {placeholder_dlp_events(), 23, 5, "paste.ee"}
+
+  defp load_dlp_data(shard) do
+    events = shard |> Dlp.list_events(limit: 20) |> Enum.map(&Presenters.present_dlp_event/1)
+    blocks = Enum.count(events, &(&1.action == "block"))
+    alerts = Enum.count(events, &(&1.action == "alert"))
+    top = events |> Enum.frequencies_by(& &1.domain) |> Enum.max_by(&elem(&1, 1), fn -> {"none", 0} end) |> elem(0)
+    {events, blocks, alerts, top}
+  rescue
+    _ -> {placeholder_dlp_events(), 0, 0, "none"}
+  end
 
   @impl true
   def render(assigns) do

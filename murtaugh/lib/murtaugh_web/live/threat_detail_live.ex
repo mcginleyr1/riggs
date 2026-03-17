@@ -3,39 +3,71 @@ defmodule MurtaughWeb.ThreatDetailLive do
 
   import MurtaughWeb.UIComponents
 
+  alias Murtaugh.{Detection}
+  alias MurtaughWeb.Presenters
+
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     if connected?(socket) do
-      # In production, subscribe to the agent's channel for live updates
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "threats")
     end
 
-    threat = placeholder_threat(id)
+    shard = socket.assigns[:current_shard]
+    {threat, verdicts, timeline} = load_threat_data(shard, id)
 
-    socket =
-      socket
-      |> assign(:page_title, "Threat #{id}")
-      |> assign(:threat, threat)
-      |> assign(:verdicts, placeholder_verdicts())
-      |> assign(:timeline, placeholder_timeline())
-
-    {:ok, socket}
+    {:ok, assign(socket,
+      page_title: "Threat",
+      threat: threat,
+      verdicts: verdicts,
+      timeline: timeline
+    )}
   end
 
   @impl true
   def handle_event("acknowledge", _params, socket) do
-    threat = Map.put(socket.assigns.threat, :status, "acknowledged")
-    {:noreply, assign(socket, :threat, threat)}
+    maybe_update_threat(socket, "investigating")
   end
 
   def handle_event("resolve", _params, socket) do
-    threat = Map.put(socket.assigns.threat, :status, "resolved")
-    {:noreply, assign(socket, :threat, threat)}
+    maybe_update_threat(socket, "resolved")
   end
 
   def handle_event("mark_false_positive", _params, socket) do
-    threat = Map.put(socket.assigns.threat, :status, "false_positive")
-    {:noreply, assign(socket, :threat, threat)}
+    maybe_update_threat(socket, "false_positive")
+  end
+
+  defp maybe_update_threat(socket, status) do
+    shard = socket.assigns[:current_shard]
+    threat = socket.assigns.threat
+
+    if shard && threat.id do
+      case Detection.update_threat_status(shard, threat.id, %{status: status}) do
+        {:ok, updated} ->
+          {:noreply, assign(socket, :threat, Presenters.present_threat(updated))}
+        _ ->
+          {:noreply, assign(socket, :threat, %{threat | status: status})}
+      end
+    else
+      {:noreply, assign(socket, :threat, %{threat | status: status})}
+    end
+  end
+
+  defp load_threat_data(nil, id), do: {placeholder_threat(id), placeholder_verdicts(), placeholder_timeline()}
+
+  defp load_threat_data(shard, id) do
+    threat_record = Detection.get_threat!(shard, id)
+    threat = Presenters.present_threat(threat_record)
+
+    verdicts =
+      (get_in(threat_record.verdicts, ["items"]) || [])
+      |> Enum.map(&Presenters.present_verdict/1)
+
+    timeline = Detection.list_events(shard, agent_id: threat_record.agent_id, limit: 20)
+               |> Enum.map(&Presenters.present_event/1)
+
+    {threat, verdicts, timeline}
+  rescue
+    _ -> {placeholder_threat(id), placeholder_verdicts(), placeholder_timeline()}
   end
 
   @impl true
