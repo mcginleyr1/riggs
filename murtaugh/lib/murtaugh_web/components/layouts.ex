@@ -4,11 +4,6 @@ defmodule MurtaughWeb.Layouts do
 
   embed_templates "layouts/*"
 
-  attr :flash, :map, required: true
-  attr :current_scope, :map, default: nil
-
-  slot :inner_block, required: true
-
   def app(assigns) do
     org_slug = assigns[:org_slug] || "demo"
     assigns = assign(assigns, :org_slug, org_slug)
@@ -95,7 +90,7 @@ defmodule MurtaughWeb.Layouts do
         </header>
 
         <main class="flex-1 overflow-y-auto p-6">
-          {render_slot(@inner_block)}
+          {@inner_content}
         </main>
       </div>
     </div>
