@@ -1,0 +1,51 @@
+<div class="min-h-screen flex items-center justify-center bg-gray-950">
+  <div class="w-full max-w-md">
+    <div class="bg-gray-900 border border-gray-800 rounded-xl shadow-2xl p-8">
+      <div class="text-center mb-8">
+        <h1 class="text-3xl font-bold text-white tracking-tight">Murtaugh</h1>
+        <p class="text-gray-400 mt-2 text-sm">Endpoint Protection Console</p>
+      </div>
+
+      <div :if={@error} class="mb-4 p-3 rounded-lg bg-red-900/40 border border-red-800 text-red-300 text-sm">
+        {@error}
+      </div>
+
+      <form action="/login" method="post" class="space-y-5">
+        <input type="hidden" name="_csrf_token" value={Phoenix.Controller.get_csrf_token()} />
+
+        <div>
+          <label for="email" class="block text-sm font-medium text-gray-300 mb-1.5">Email</label>
+          <input
+            type="email"
+            name="email"
+            id="email"
+            autocomplete="email"
+            required
+            class="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="operator@riggs.local"
+          />
+        </div>
+
+        <div>
+          <label for="password" class="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
+          <input
+            type="password"
+            name="password"
+            id="password"
+            autocomplete="current-password"
+            required
+            class="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="********"
+          />
+        </div>
+
+        <button
+          type="submit"
+          class="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900"
+        >
+          Sign in
+        </button>
+      </form>
+    </div>
+  </div>
+</div>

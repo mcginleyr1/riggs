@@ -1,0 +1,97 @@
+services:
+  # ── PostgreSQL (meta DB + tenant DBs on same instance for dev) ─────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── MinIO (S3-compatible object storage for archives) ──────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: murtaugh
+      MINIO_ROOT_PASSWORD: murtaugh-dev
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Create the archive bucket on startup ───────────────────────────
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 murtaugh murtaugh-dev &&
+        mc mb --ignore-existing local/murtaugh-archive &&
+        echo 'Bucket murtaugh-archive ready'
+      "
+
+  # ── Murtaugh (Phoenix app) ────────────────────────────────────────
+  murtaugh:
+    build:
+      context: ./murtaugh
+      dockerfile: ../docker/Dockerfile.dev
+    ports:
+      - "4000:4000"   # Phoenix HTTP
+      - "4001:4001"   # gRPC (future)
+    environment:
+      DATABASE_URL: ecto://postgres:postgres@postgres/murtaugh_meta
+      TENANT_DATABASE_HOST: postgres
+      TENANT_DATABASE_USER: postgres
+      TENANT_DATABASE_PASSWORD: postgres
+      SECRET_KEY_BASE: dev-only-not-for-production-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      PHX_HOST: localhost
+      PORT: "4000"
+      PHX_SERVER: "true"
+      MIX_ENV: dev
+      # Archive storage (MinIO as S3-compatible)
+      ARCHIVE_STORAGE: s3
+      ARCHIVE_BUCKET: murtaugh-archive
+      ARCHIVE_S3_ENDPOINT: http://minio:9000
+      ARCHIVE_S3_REGION: us-east-1
+      ARCHIVE_S3_ACCESS_KEY: murtaugh
+      ARCHIVE_S3_SECRET_KEY: murtaugh-dev
+    volumes:
+      - ./murtaugh:/app
+      - mix_deps:/app/deps
+      - mix_build:/app/_build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    command: >
+      sh -c "
+        mix deps.get &&
+        mix ecto.create &&
+        mix ecto.migrate &&
+        mix run priv/repo/seeds.exs &&
+        mix phx.server
+      "
+
+volumes:
+  pgdata:
+  miniodata:
+  mix_deps:
+  mix_build:

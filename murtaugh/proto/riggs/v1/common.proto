@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package riggs.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_multiple_files = true;
+option java_package = "com.riggs.v1";
+
+message ProcessContext {
+    uint32 pid = 1;
+    uint32 ppid = 2;
+    string name = 3;
+    string path = 4;
+    string cmdline = 5;
+    string user = 6;
+    string storyline_id = 7;
+}

@@ -1,0 +1,246 @@
+syntax = "proto3";
+
+package riggs.v1;
+
+import "google/protobuf/timestamp.proto";
+import "riggs/v1/common.proto";
+import "riggs/v1/command_service.proto";
+
+option java_multiple_files = true;
+option java_package = "com.riggs.v1";
+
+// Agent -> Console service.
+// Agents call these RPCs to enroll, send heartbeats, stream telemetry,
+// and report threats, DLP events, vulnerability scans, device events,
+// network maps, and storyline updates.
+service AgentService {
+    // Enrollment: agent registers itself with the console
+    rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+    // Heartbeat stream: agent sends health, console sends ack or commands
+    rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+
+    // Telemetry stream: agent pushes batched events
+    rpc StreamEvents(stream EventBatch) returns (stream EventAck);
+
+    // Immediate threat report (not batched)
+    rpc ReportThreat(ThreatReport) returns (ThreatAck);
+
+    // DLP event report
+    rpc ReportDlpEvent(DlpEventReport) returns (DlpEventAck);
+
+    // Vulnerability scan results
+    rpc ReportVulnScan(VulnScanReport) returns (VulnScanAck);
+
+    // Device event report
+    rpc ReportDeviceEvent(DeviceEventReport) returns (DeviceEventAck);
+
+    // Network map update
+    rpc UpdateNetworkMap(NetworkMapUpdate) returns (NetworkMapAck);
+
+    // Storyline update
+    rpc UpdateStoryline(StorylineUpdate) returns (StorylineAck);
+}
+
+// ---- Enrollment ----
+
+message EnrollRequest {
+    string hostname = 1;
+    string os = 2;
+    string os_version = 3;
+    string arch = 4;
+    string agent_version = 5;
+    string ip_address = 6;
+    string mac_address = 7;
+    string enrollment_token = 8;  // pre-shared token for auth
+}
+
+message EnrollResponse {
+    string agent_id = 1;          // assigned UUID
+    bytes  client_cert = 2;       // mTLS client certificate
+    bytes  client_key = 3;        // mTLS client private key
+    bytes  ca_cert = 4;           // CA certificate for verification
+    int32  heartbeat_interval_secs = 5;
+    int32  event_batch_size = 6;
+    int32  event_flush_interval_ms = 7;
+}
+
+// ---- Heartbeat ----
+
+message HeartbeatRequest {
+    string agent_id = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    AgentHealth health = 3;
+}
+
+message AgentHealth {
+    uint64 events_processed = 1;
+    uint64 threats_detected = 2;
+    uint64 dlp_blocks = 3;
+    bool   sensor_healthy = 4;
+    uint64 pipeline_latency_us = 5;
+    uint64 store_size_bytes = 6;
+    uint64 uptime_secs = 7;
+    string agent_version = 8;
+    int32  config_version = 9;
+}
+
+message HeartbeatResponse {
+    bool accepted = 1;
+    // Piggyback lightweight commands on heartbeat responses
+    repeated AgentCommand commands = 2;
+}
+
+// ---- Events ----
+
+message EventBatch {
+    string agent_id = 1;
+    repeated Event events = 2;
+    int32  batch_seq = 3;         // for ordering / gap detection
+}
+
+message Event {
+    string event_id = 1;          // UUID v7
+    string storyline_id = 2;
+    string event_type = 3;        // process, file, network, dns, auth, kernel
+    string severity = 4;
+    google.protobuf.Timestamp timestamp = 5;
+    ProcessContext process_context = 6;
+    bytes  payload_json = 7;      // event-specific fields as JSON
+}
+
+message EventAck {
+    int32 batch_seq = 1;
+    bool  accepted = 2;
+}
+
+// ---- Threats ----
+
+message ThreatReport {
+    string agent_id = 1;
+    string event_id = 2;
+    string storyline_id = 3;
+    string threat_level = 4;      // suspicious, malicious
+    float  final_score = 5;
+    google.protobuf.Timestamp timestamp = 6;
+    repeated VerdictDetail verdicts = 7;
+    string process_name = 8;
+    string process_path = 9;
+    string summary = 10;
+}
+
+message VerdictDetail {
+    string source = 1;            // StaticAI, BehavioralAI, YaraRule, etc.
+    string threat_level = 2;
+    float  confidence = 3;
+    string description = 4;
+}
+
+message ThreatAck {
+    bool accepted = 1;
+    string threat_id = 2;         // console-assigned ID
+}
+
+// ---- DLP ----
+
+message DlpEventReport {
+    string agent_id = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    string action = 3;            // block, alert
+    uint32 pid = 4;
+    string process_name = 5;
+    string file_path = 6;
+    string file_type = 7;
+    string domain = 8;
+    string domain_category = 9;
+    string username = 10;
+}
+
+message DlpEventAck {
+    bool accepted = 1;
+}
+
+// ---- Vulnerability ----
+
+message VulnScanReport {
+    string agent_id = 1;
+    google.protobuf.Timestamp scan_timestamp = 2;
+    repeated VulnFinding findings = 3;
+}
+
+message VulnFinding {
+    string cve_id = 1;
+    string package_name = 2;
+    string package_version = 3;
+    string package_source = 4;
+    float  cvss_score = 5;
+    string severity = 6;
+    string fixed_version = 7;
+}
+
+message VulnScanAck {
+    bool accepted = 1;
+    int32 findings_stored = 2;
+}
+
+// ---- Device Control ----
+
+message DeviceEventReport {
+    string agent_id = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    string device_type = 3;       // usb, bluetooth
+    string action = 4;            // connected, disconnected, blocked
+    uint32 vendor_id = 5;
+    uint32 product_id = 6;
+    string serial_number = 7;
+    string device_class = 8;
+    string manufacturer = 9;
+    string product_name = 10;
+    string policy_decision = 11;
+}
+
+message DeviceEventAck {
+    bool accepted = 1;
+}
+
+// ---- Network Discovery ----
+
+message NetworkMapUpdate {
+    string agent_id = 1;
+    repeated DiscoveredHost hosts = 2;
+}
+
+message DiscoveredHost {
+    string ip_address = 1;
+    string mac_address = 2;
+    string hostname = 3;
+    string vendor = 4;
+    google.protobuf.Timestamp first_seen = 5;
+    google.protobuf.Timestamp last_seen = 6;
+    repeated uint32 open_ports = 7;
+}
+
+message NetworkMapAck {
+    bool accepted = 1;
+}
+
+// ---- Storylines ----
+
+message StorylineUpdate {
+    string agent_id = 1;
+    string storyline_id = 2;
+    string status = 3;            // active, completed, mitigated
+    string max_severity = 4;
+    int32  threat_count = 5;
+    int32  event_count = 6;
+    google.protobuf.Timestamp first_seen = 7;
+    google.protobuf.Timestamp last_seen = 8;
+    uint32 root_pid = 9;
+    string root_process = 10;
+    string root_path = 11;
+    bytes  process_tree_json = 12;
+}
+
+message StorylineAck {
+    bool accepted = 1;
+}

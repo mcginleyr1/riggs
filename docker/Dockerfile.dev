@@ -1,0 +1,19 @@
+FROM elixir:1.19-otp-28-alpine
+
+RUN apk add --no-cache build-base git postgresql-client inotify-tools
+
+WORKDIR /app
+
+# Install hex and rebar
+RUN mix local.hex --force && mix local.rebar --force
+
+# Copy mix files first for dependency caching
+COPY mix.exs mix.lock ./
+RUN mix deps.get
+
+# Copy everything else
+COPY . .
+
+EXPOSE 4000 4001
+
+CMD ["mix", "phx.server"]

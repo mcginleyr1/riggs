@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package riggs.v1;
+
+option java_multiple_files = true;
+option java_package = "com.riggs.v1";
+
+// Console -> Agent service.
+// The console opens a long-lived command stream to push commands to agents.
+// Agents acknowledge each command with a CommandAck.
+service CommandService {
+    // Long-lived command stream: console pushes commands, agent acks
+    rpc CommandStream(stream CommandAck) returns (stream AgentCommand);
+}
+
+// ---- Commands ----
+
+message AgentCommand {
+    string command_id = 1;        // for ack correlation
+    oneof command {
+        KillProcess kill_process = 10;
+        SuspendProcess suspend_process = 11;
+        QuarantineFile quarantine_file = 12;
+        ContainNetwork contain_network = 13;
+        ReleaseNetwork release_network = 14;
+        UpdatePolicy update_policy = 15;
+        UpdateConfig update_config = 16;
+        TriggerScan trigger_scan = 17;
+        RefreshFeeds refresh_feeds = 18;
+        OpenShell open_shell = 19;
+    }
+}
+
+message KillProcess {
+    uint32 pid = 1;
+    string reason = 2;
+}
+
+message SuspendProcess {
+    uint32 pid = 1;
+    string reason = 2;
+}
+
+message QuarantineFile {
+    string path = 1;
+    string reason = 2;
+}
+
+message ContainNetwork {
+    repeated string allowed_ips = 1;  // only these IPs allowed during containment
+    string reason = 2;
+}
+
+message ReleaseNetwork {
+    string reason = 1;
+}
+
+message UpdatePolicy {
+    string policy_type = 1;       // dlp, response, detection, device
+    string policy_name = 2;
+    bytes  content = 3;           // TOML body
+    int32  version = 4;
+}
+
+message UpdateConfig {
+    string key = 1;
+    string value = 2;
+}
+
+message TriggerScan {
+    string path = 1;
+}
+
+message RefreshFeeds {}
+
+message OpenShell {
+    string session_id = 1;
+    uint32 port = 2;              // agent opens listener on this port
+}
+
+message CommandAck {
+    string command_id = 1;
+    bool   success = 2;
+    string detail = 3;
+}
