@@ -1,0 +1,88 @@
+# DLP Policy: Cloud Storage & File Sharing
+#
+# Monitors uploads to cloud storage, file sharing, and collaboration platforms.
+# Useful for preventing accidental sharing of sensitive documents outside
+# approved channels.
+#
+# Install: cp config/policies/cloud-storage.toml /etc/riggs/dlp-policy.toml
+
+action = "block"
+correlation_window_secs = 45
+
+# ── Cloud Storage ────────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "drive.google.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "*.dropbox.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "*.box.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "onedrive.live.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "*.sharepoint.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "*.icloud.com"
+category = "cloud-storage"
+
+# ── File Sharing ─────────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "wetransfer.com"
+category = "file-sharing"
+
+[[watched_domains]]
+pattern = "*.sendgb.com"
+category = "file-sharing"
+
+[[watched_domains]]
+pattern = "send.firefox.com"
+category = "file-sharing"
+
+# ── Paste Sites ──────────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "pastebin.com"
+category = "paste"
+
+[[watched_domains]]
+pattern = "gist.github.com"
+category = "paste"
+
+[[watched_domains]]
+pattern = "paste.debian.net"
+category = "paste"
+
+# ── File Types ───────────────────────────────────────────────────────
+
+[file_types]
+block = [
+    "pptx", "xlsx", "docx",
+    "ppt",  "xls",  "doc",
+    "pdf",
+    "pem",  "key",  "p12", "pfx",
+    "sql",  "sqlite", "db",
+]
+alert = [
+    "csv",
+    "json",
+]
+
+# ── Excluded Processes ───────────────────────────────────────────────
+
+[excluded_processes]
+names = [
+    "softwareupdated",
+    "nsurlsessiond",
+    "Finder",
+]

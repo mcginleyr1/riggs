@@ -1,0 +1,80 @@
+# DLP Policy: AI Service Lockdown
+#
+# Blocks sensitive document uploads to all major AI assistants and coding tools.
+# Use this if your concern is preventing proprietary data from reaching
+# third-party AI services.
+#
+# Install: cp config/policies/ai-lockdown.toml /etc/riggs/dlp-policy.toml
+
+action = "block"
+correlation_window_secs = 30
+
+# ── AI Assistants ────────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "claude.ai"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.anthropic.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "chatgpt.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.openai.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "gemini.google.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.deepseek.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "copilot.microsoft.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.perplexity.ai"
+category = "ai-assistant"
+
+# ── AI Coding Tools ──────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "*.cursor.sh"
+category = "ai-coding"
+
+[[watched_domains]]
+pattern = "*.codeium.com"
+category = "ai-coding"
+
+[[watched_domains]]
+pattern = "*.tabnine.com"
+category = "ai-coding"
+
+# ── File Types ───────────────────────────────────────────────────────
+
+[file_types]
+block = [
+    "pptx", "xlsx", "docx",
+    "ppt",  "xls",  "doc",
+    "pdf",  "csv",
+]
+alert = [
+    "json",
+    "sql", "sqlite", "db",
+    "pem", "key", "p12",
+]
+
+# ── Excluded Processes ───────────────────────────────────────────────
+
+[excluded_processes]
+names = [
+    "softwareupdated",
+    "nsurlsessiond",
+]

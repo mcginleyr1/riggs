@@ -1,0 +1,74 @@
+# DLP Policy: Alert Only (Monitor Mode)
+#
+# Logs all sensitive file uploads but never blocks traffic.
+# Use this to audit what's leaving the machine before enabling enforcement.
+#
+# Install: cp config/policies/alert-only.toml /etc/riggs/dlp-policy.toml
+
+action = "alert"
+correlation_window_secs = 60
+
+# ── Watched Domains ──────────────────────────────────────────────────
+# Wide net — monitor everything interesting.
+
+[[watched_domains]]
+pattern = "claude.ai"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.anthropic.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "chatgpt.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.openai.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "gemini.google.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "drive.google.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "*.dropbox.com"
+category = "cloud-storage"
+
+[[watched_domains]]
+pattern = "*.slack-files.com"
+category = "messaging"
+
+[[watched_domains]]
+pattern = "pastebin.com"
+category = "paste"
+
+[[watched_domains]]
+pattern = "gist.github.com"
+category = "paste"
+
+# ── File Types ───────────────────────────────────────────────────────
+# Everything is alert-only in this policy.
+
+[file_types]
+block = []
+alert = [
+    "pptx", "xlsx", "docx",
+    "ppt",  "xls",  "doc",
+    "pdf",  "csv",  "json",
+    "rs", "py", "go", "js", "ts", "java", "c", "cpp", "h",
+    "pem", "key", "p12",
+    "sql", "sqlite", "db",
+]
+
+# ── Excluded Processes ───────────────────────────────────────────────
+
+[excluded_processes]
+names = [
+    "softwareupdated",
+    "nsurlsessiond",
+]

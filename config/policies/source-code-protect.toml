@@ -1,0 +1,86 @@
+# DLP Policy: Source Code Protection
+#
+# Focused on preventing source code and secrets from leaving the machine
+# via AI tools, paste sites, or public repositories. Alerts on document
+# uploads but blocks code and credentials.
+#
+# Install: cp config/policies/source-code-protect.toml /etc/riggs/dlp-policy.toml
+
+action = "block"
+correlation_window_secs = 30
+
+# ── AI Assistants ────────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "claude.ai"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.anthropic.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "chatgpt.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.openai.com"
+category = "ai-assistant"
+
+# ── Paste Sites ──────────────────────────────────────────────────────
+
+[[watched_domains]]
+pattern = "pastebin.com"
+category = "paste"
+
+[[watched_domains]]
+pattern = "gist.github.com"
+category = "paste"
+
+[[watched_domains]]
+pattern = "paste.debian.net"
+category = "paste"
+
+[[watched_domains]]
+pattern = "dpaste.org"
+category = "paste"
+
+# ── Public Repos ─────────────────────────────────────────────────────
+# Note: only blocks if source code files were recently opened.
+# Normal browsing of github.com is unaffected.
+
+[[watched_domains]]
+pattern = "github.com"
+category = "code-hosting"
+
+[[watched_domains]]
+pattern = "gitlab.com"
+category = "code-hosting"
+
+[[watched_domains]]
+pattern = "bitbucket.org"
+category = "code-hosting"
+
+# ── File Types ───────────────────────────────────────────────────────
+# Source code and secrets are blocked. Documents are alert-only.
+
+[file_types]
+block = [
+    "rs", "py", "go", "js", "ts", "java", "c", "cpp", "h", "rb", "ex", "exs",
+    "pem", "key", "p12", "pfx",
+    "sql", "sqlite", "db", "sqlite3",
+]
+alert = [
+    "pptx", "xlsx", "docx",
+    "pdf",  "csv",  "json",
+]
+
+# ── Excluded Processes ───────────────────────────────────────────────
+
+[excluded_processes]
+names = [
+    "softwareupdated",
+    "nsurlsessiond",
+    "git",
+    "gh",
+]
