@@ -13,6 +13,8 @@ defmodule Murtaugh.Application do
       {DNSCluster, query: Application.get_env(:murtaugh, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Murtaugh.PubSub},
       Murtaugh.ShardManager,
+      Murtaugh.Ingest.AgentRegistry,
+      {GRPC.Server.Supervisor, endpoint: Murtaugh.Grpc.Endpoint, port: 4001},
       # Start to serve requests, typically the last entry
       MurtaughWeb.Endpoint
     ]

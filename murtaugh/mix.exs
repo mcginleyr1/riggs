@@ -70,7 +70,10 @@ defmodule Murtaugh.MixProject do
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
       {:sweet_xml, "~> 0.7"},
-      {:csv, "~> 3.2"}
+      {:csv, "~> 3.2"},
+      # gRPC server for agent communication
+      {:grpc, "~> 0.9"},
+      {:protobuf, "~> 0.14"}
     ]
   end
 
