@@ -81,6 +81,15 @@ impl CveDatabase {
         self.total_cves
     }
 
+    pub fn replace_all(&mut self, cves: Vec<Cve>) {
+        self.entries.clear();
+        self.total_cves = 0;
+        for cve in cves {
+            self.add(cve);
+        }
+        info!("CVE database replaced: {} CVEs across {} packages", self.total_cves, self.entries.len());
+    }
+
     pub fn package_count(&self) -> usize {
         self.entries.len()
     }

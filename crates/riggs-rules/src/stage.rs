@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use async_trait::async_trait;
 use chrono::Utc;
 
@@ -12,8 +14,8 @@ use crate::ioc::IocMatcher;
 use crate::yara::YaraEngine;
 
 pub struct RulesStage {
-    _yara: Option<YaraEngine>,
-    ioc: Option<IocMatcher>,
+    yara: Option<YaraEngine>,
+    ioc: Arc<RwLock<Option<IocMatcher>>>,
     custom: Option<CustomRuleEngine>,
 }
 
@@ -24,10 +26,26 @@ impl RulesStage {
         custom: Option<CustomRuleEngine>,
     ) -> Self {
         Self {
-            _yara: yara,
+            yara,
+            ioc: Arc::new(RwLock::new(ioc)),
+            custom,
+        }
+    }
+
+    pub fn new_with_shared_ioc(
+        yara: Option<YaraEngine>,
+        ioc: Arc<RwLock<Option<IocMatcher>>>,
+        custom: Option<CustomRuleEngine>,
+    ) -> Self {
+        Self {
+            yara,
             ioc,
             custom,
         }
+    }
+
+    pub fn ioc_handle(&self) -> Arc<RwLock<Option<IocMatcher>>> {
+        Arc::clone(&self.ioc)
     }
 }
 
@@ -70,36 +88,38 @@ impl DetectionStage for RulesStage {
         let eid = event_id(event);
 
         // Run IOC matching
-        if let Some(ioc_matcher) = &self.ioc {
-            let ioc_hits = ioc_matcher.check_event(event);
-            if !ioc_hits.is_empty() {
-                let worst_severity = ioc_hits
-                    .iter()
-                    .map(|ioc| ioc.severity)
-                    .max()
-                    .unwrap_or(Severity::Low);
+        if let Ok(guard) = self.ioc.read() {
+            if let Some(ioc_matcher) = guard.as_ref() {
+                let ioc_hits = ioc_matcher.check_event(event);
+                if !ioc_hits.is_empty() {
+                    let worst_severity = ioc_hits
+                        .iter()
+                        .map(|ioc| ioc.severity)
+                        .max()
+                        .unwrap_or(Severity::Low);
 
-                let descriptions: Vec<String> = ioc_hits
-                    .iter()
-                    .map(|ioc| format!("{}: {}", ioc.value, ioc.description))
-                    .collect();
+                    let descriptions: Vec<String> = ioc_hits
+                        .iter()
+                        .map(|ioc| format!("{}: {}", ioc.value, ioc.description))
+                        .collect();
 
-                let threat_level = severity_to_threat_level(worst_severity);
-                let confidence = severity_to_confidence(worst_severity);
+                    let threat_level = severity_to_threat_level(worst_severity);
+                    let confidence = severity_to_confidence(worst_severity);
 
-                let verdict = Verdict {
-                    event_id: eid.clone(),
-                    threat_level,
-                    confidence,
-                    source: DetectionSource::IocMatch,
-                    description: format!("IOC matches: {}", descriptions.join("; ")),
-                    timestamp: Utc::now(),
-                };
+                    let verdict = Verdict {
+                        event_id: eid.clone(),
+                        threat_level,
+                        confidence,
+                        source: DetectionSource::IocMatch,
+                        description: format!("IOC matches: {}", descriptions.join("; ")),
+                        timestamp: Utc::now(),
+                    };
 
-                return match threat_level {
-                    ThreatLevel::Malicious => Ok(StageVerdict::Malicious(verdict)),
-                    _ => Ok(StageVerdict::Suspicious(verdict)),
-                };
+                    return match threat_level {
+                        ThreatLevel::Malicious => Ok(StageVerdict::Malicious(verdict)),
+                        _ => Ok(StageVerdict::Suspicious(verdict)),
+                    };
+                }
             }
         }
 
@@ -119,8 +139,36 @@ impl DetectionStage for RulesStage {
             }
         }
 
-        // YARA scanning is not yet wired (YaraEngine::new still uses todo!())
-        // Once implemented, it would scan file events here.
+        // YARA scanning — only applies to file events with existing paths
+        if let Some(ref yara) = self.yara {
+            if let RiggsEvent::File(fe) = event {
+                let path = std::path::Path::new(&fe.path);
+                if path.exists() && path.is_file() {
+                    match yara.scan_file(path) {
+                        Ok(matches) if !matches.is_empty() => {
+                            let rule_names: Vec<&str> =
+                                matches.iter().map(|m| m.rule_name.as_str()).collect();
+                            let verdict = Verdict {
+                                event_id: eid,
+                                threat_level: ThreatLevel::Malicious,
+                                confidence: 0.9,
+                                source: DetectionSource::YaraRule,
+                                description: format!(
+                                    "YARA rules matched: {}",
+                                    rule_names.join(", ")
+                                ),
+                                timestamp: Utc::now(),
+                            };
+                            return Ok(StageVerdict::Malicious(verdict));
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, path = %fe.path, "YARA scan failed");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         Ok(StageVerdict::Clean)
     }

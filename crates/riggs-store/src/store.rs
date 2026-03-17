@@ -156,6 +156,69 @@ impl RiggsStore {
         Ok(results)
     }
 
+    pub fn get_recent_events(&self, limit: usize) -> Result<Vec<RiggsEvent>, RiggsError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let table = read_txn
+            .open_table(EVENTS_TABLE)
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+
+        let mut events = Vec::new();
+        let iter = table
+            .iter()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+
+        // UUIDv7 keys are time-ordered, so iterating gives chronological order.
+        // Collect all then take the last N for "most recent".
+        let all: Vec<_> = iter.collect();
+        let start = all.len().saturating_sub(limit);
+
+        for entry in &all[start..] {
+            let (_, value) = entry.as_ref().map_err(|e| RiggsError::Store(e.to_string()))?;
+            let compressed = value.value();
+            if let Ok(decompressed) = zstd::decode_all(compressed) {
+                if let Ok(event) = serde_json::from_slice::<RiggsEvent>(&decompressed) {
+                    events.push(event);
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
+    pub fn get_verdicts_above_clean(&self, limit: usize) -> Result<Vec<MergedVerdict>, RiggsError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let table = read_txn
+            .open_table(VERDICTS_TABLE)
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+
+        let mut verdicts = Vec::new();
+        let iter = table
+            .iter()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+
+        for entry in iter {
+            let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
+            let compressed = value.value();
+            if let Ok(decompressed) = zstd::decode_all(compressed) {
+                if let Ok(verdict) = serde_json::from_slice::<MergedVerdict>(&decompressed) {
+                    if verdict.final_threat_level > riggs_types::verdict::ThreatLevel::Clean {
+                        verdicts.push(verdict);
+                    }
+                }
+            }
+        }
+
+        // Return the most recent ones
+        let start = verdicts.len().saturating_sub(limit);
+        Ok(verdicts[start..].to_vec())
+    }
+
     pub fn store_response_record(
         &self,
         record: &riggs_response_record::ResponseRecordData,

@@ -318,3 +318,172 @@ pub async fn quarantine(socket_path: &Path, args: &[String]) -> Result<(), Riggs
 
     Ok(())
 }
+
+pub async fn intel(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
+    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    let mut client = connect(socket_path).await?;
+
+    match subcmd {
+        "update" => {
+            println!("{BOLD}Refreshing threat intelligence feeds...{RESET}");
+            let response = send(&mut client, &ClientMessage::RefreshFeeds).await?;
+            match response {
+                DaemonMessage::Ok => println!("{GREEN}Feed refresh initiated.{RESET}"),
+                DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+                _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+            }
+        }
+        "status" => {
+            let response = send(&mut client, &ClientMessage::IntelStatus).await?;
+            match response {
+                DaemonMessage::IntelStatus { bloom_size, cache_entries, feeds_last_updated } => {
+                    println!("{BOLD}Threat Intelligence{RESET}");
+                    println!("{DIM}────────────────────────────────────{RESET}");
+                    println!("  {BOLD}Bloom filter:{RESET}   {bloom_size} hashes");
+                    println!("  {BOLD}Cache entries:{RESET}  {cache_entries}");
+                    if let Some(last) = feeds_last_updated {
+                        println!("  {BOLD}Last updated:{RESET}   {last}");
+                    } else {
+                        println!("  {BOLD}Last updated:{RESET}   {DIM}never{RESET}");
+                    }
+                }
+                DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+                _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+            }
+        }
+        cmd => {
+            eprintln!("Unknown intel subcommand: {cmd}");
+            println!("Usage: riggs intel [update|status]");
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn dlp(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
+    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    match subcmd {
+        "status" => {
+            let mut client = connect(socket_path).await?;
+            let response = send(&mut client, &ClientMessage::DlpStatus).await?;
+            match response {
+                DaemonMessage::DlpStatus {
+                    enabled,
+                    tracked_pids,
+                    tracked_accesses,
+                    watched_domains,
+                } => {
+                    let status_color = if enabled { GREEN } else { DIM };
+                    let status_text = if enabled { "active" } else { "disabled" };
+
+                    println!("{BOLD}DLP Module{RESET}");
+                    println!("{DIM}────────────────────────────────────{RESET}");
+                    println!("  {BOLD}Status:{RESET}           {status_color}{status_text}{RESET}");
+                    println!("  {BOLD}Watched domains:{RESET}  {watched_domains}");
+                    println!("  {BOLD}Tracked PIDs:{RESET}     {tracked_pids}");
+                    println!("  {BOLD}File accesses:{RESET}    {tracked_accesses}");
+                }
+                DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+                _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+            }
+        }
+        "policy" => {
+            // Read and display the DLP policy file directly
+            let policy_paths = [
+                "/etc/riggs/dlp-policy.toml",
+                "config/dlp-policy.toml",
+            ];
+            let policy_path = policy_paths.iter().find(|p| Path::new(p).exists());
+
+            match policy_path {
+                Some(path) => {
+                    let contents = std::fs::read_to_string(path).map_err(|e| {
+                        RiggsError::Io(format!("failed to read {path}: {e}"))
+                    })?;
+                    let config: serde_json::Value = toml::from_str(&contents).map_err(|e| {
+                        RiggsError::Config(format!("failed to parse {path}: {e}"))
+                    })?;
+
+                    println!("{BOLD}DLP Policy{RESET} {DIM}({path}){RESET}");
+                    println!("{DIM}────────────────────────────────────{RESET}");
+
+                    if let Some(action) = config.get("action").and_then(|v| v.as_str()) {
+                        let action_color = if action == "block" { RED } else { YELLOW };
+                        println!("  {BOLD}Action:{RESET}           {action_color}{action}{RESET}");
+                    }
+                    if let Some(window) = config.get("correlation_window_secs").and_then(|v| v.as_i64()) {
+                        println!("  {BOLD}Window:{RESET}           {window}s");
+                    }
+
+                    println!();
+                    println!("  {BOLD}Watched Domains:{RESET}");
+                    if let Some(domains) = config.get("watched_domains").and_then(|v| v.as_array()) {
+                        for d in domains {
+                            let pattern = d.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+                            let category = d.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("    {CYAN}{pattern:<30}{RESET} {DIM}{category}{RESET}");
+                        }
+                    }
+
+                    println!();
+                    if let Some(ft) = config.get("file_types") {
+                        if let Some(block) = ft.get("block").and_then(|v| v.as_array()) {
+                            let types: Vec<&str> = block.iter().filter_map(|v| v.as_str()).collect();
+                            println!("  {BOLD}Blocked types:{RESET}    {RED}{}{RESET}", types.join(", "));
+                        }
+                        if let Some(alert) = ft.get("alert").and_then(|v| v.as_array()) {
+                            let types: Vec<&str> = alert.iter().filter_map(|v| v.as_str()).collect();
+                            println!("  {BOLD}Alert types:{RESET}      {YELLOW}{}{RESET}", types.join(", "));
+                        }
+                    }
+
+                    println!();
+                    if let Some(excluded) = config.get("excluded_processes") {
+                        if let Some(names) = excluded.get("names").and_then(|v| v.as_array()) {
+                            let procs: Vec<&str> = names.iter().filter_map(|v| v.as_str()).collect();
+                            println!("  {BOLD}Excluded:{RESET}         {DIM}{}{RESET}", procs.join(", "));
+                        }
+                    }
+                }
+                None => {
+                    println!("{DIM}No DLP policy file found.{RESET}");
+                    println!();
+                    println!("Create one at /etc/riggs/dlp-policy.toml or config/dlp-policy.toml");
+                    println!("See config/dlp-policy.toml in the repository for a template.");
+                }
+            }
+        }
+        cmd => {
+            eprintln!("Unknown dlp subcommand: {cmd}");
+            println!("Usage: riggs dlp [status|policy]");
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn vuln(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
+    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    let mut client = connect(socket_path).await?;
+
+    match subcmd {
+        "update" => {
+            println!("{BOLD}Refreshing vulnerability database from OSV.dev...{RESET}");
+            let response = send(&mut client, &ClientMessage::VulnUpdate).await?;
+            match response {
+                DaemonMessage::Ok => println!("{GREEN}Vulnerability database update initiated.{RESET}"),
+                DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+                _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+            }
+        }
+        cmd => {
+            eprintln!("Unknown vuln subcommand: {cmd}");
+            println!("Usage: riggs vuln update");
+        }
+    }
+
+    Ok(())
+}

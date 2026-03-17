@@ -10,6 +10,9 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+libc = "0.2"
+sysinfo = "0.32"
+notify = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # endpoint-sec requires macOS - we'll add it when available

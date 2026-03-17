@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 
 type TaskFactory = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+#[allow(dead_code)]
 struct TaskEntry {
     handle: JoinHandle<()>,
     factory: TaskFactory,
@@ -45,6 +46,7 @@ impl Supervisor {
         );
     }
 
+    #[allow(dead_code)]
     pub async fn check_health(&mut self) {
         let mut to_restart = Vec::new();
 

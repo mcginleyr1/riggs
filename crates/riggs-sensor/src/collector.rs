@@ -25,10 +25,14 @@ impl EventCollector {
         self.sensor.start(internal_tx).await?;
         info!("event collector started");
 
-        let _tx = self.tx.clone();
+        let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
-            while let Some(_event) = internal_rx.recv().await {
-                todo!("forward event through normalization and send via tx")
+            while let Some(event) = internal_rx.recv().await {
+                let normalized = crate::normalizer::EventNormalizer::normalize(event);
+                if let Err(e) = tx.send(normalized).await {
+                    tracing::error!("event forward failed: {e}");
+                    break;
+                }
             }
             info!("event forwarding loop exited");
         });

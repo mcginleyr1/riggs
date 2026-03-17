@@ -23,6 +23,9 @@ pub enum RiggsError {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("intel error: {0}")]
+    Intel(String),
+
     #[error("io error: {0}")]
     Io(String),
 

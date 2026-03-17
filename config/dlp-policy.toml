@@ -1,0 +1,85 @@
+# Riggs DLP Policy
+#
+# This file controls which file uploads get blocked or flagged.
+# Changes are picked up automatically (hot-reload) — no daemon restart needed.
+#
+# How it works:
+#   1. Riggs watches which files each process opens
+#   2. When that process connects to a watched domain, Riggs checks
+#      if the file type is blocked or flagged
+#   3. The flow is blocked (or an alert is raised) based on the action
+#
+# Copy this file to /etc/riggs/dlp-policy.toml to customize.
+
+# Global action: "block" drops the network flow, "alert" allows but logs.
+action = "block"
+
+# How long (seconds) to remember a file access before it expires.
+# If a process opens a .pptx and connects to claude.ai within this window,
+# the flow is blocked.
+correlation_window_secs = 30
+
+# ── Watched Domains ──────────────────────────────────────────────────
+#
+# Domains to monitor for sensitive file uploads.
+# Supports exact match and wildcard (*.example.com).
+
+[[watched_domains]]
+pattern = "claude.ai"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.anthropic.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "chatgpt.com"
+category = "ai-assistant"
+
+[[watched_domains]]
+pattern = "*.openai.com"
+category = "ai-assistant"
+
+# Uncomment to add more:
+# [[watched_domains]]
+# pattern = "*.slack-files.com"
+# category = "messaging"
+#
+# [[watched_domains]]
+# pattern = "drive.google.com"
+# category = "cloud-storage"
+
+# ── File Types ───────────────────────────────────────────────────────
+#
+# "block" types will be blocked (or alerted, depending on the action above).
+# "alert" types will always alert but never block, regardless of the action.
+#
+# Supported types: pptx, xlsx, docx, ppt, xls, doc, pdf, csv, json,
+#                  rs, py, go, js, ts, java, c, cpp, h, rb, ex, exs,
+#                  pem, key, p12, pfx, sql, sqlite, db, sqlite3
+
+[file_types]
+block = [
+    "pptx",
+    "xlsx",
+    "docx",
+    "ppt",
+    "xls",
+    "doc",
+    "pdf",
+]
+alert = [
+    "csv",
+    "json",
+]
+
+# ── Excluded Processes ───────────────────────────────────────────────
+#
+# Processes that are allowed to upload to watched domains without restriction.
+# Use this for system daemons or trusted tools.
+
+[excluded_processes]
+names = [
+    "softwareupdated",
+    "nsurlsessiond",
+]

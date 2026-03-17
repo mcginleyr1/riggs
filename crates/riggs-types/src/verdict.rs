@@ -29,6 +29,8 @@ pub enum DetectionSource {
     YaraRule,
     IocMatch,
     CustomRule,
+    ThreatIntel,
+    Dlp,
 }
 
 impl fmt::Display for DetectionSource {
@@ -39,6 +41,8 @@ impl fmt::Display for DetectionSource {
             DetectionSource::YaraRule => write!(f, "YaraRule"),
             DetectionSource::IocMatch => write!(f, "IocMatch"),
             DetectionSource::CustomRule => write!(f, "CustomRule"),
+            DetectionSource::ThreatIntel => write!(f, "ThreatIntel"),
+            DetectionSource::Dlp => write!(f, "DLP"),
         }
     }
 }

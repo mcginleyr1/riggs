@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use riggs_types::RiggsError;
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YaraMatch {
@@ -12,28 +13,100 @@ pub struct YaraMatch {
 
 pub struct YaraEngine {
     rules_dir: PathBuf,
-    // Will hold compiled yara-x rules once loaded
-    // compiled_rules: Option<yara_x::Rules>,
+    compiled_rules: Option<yara_x::Rules>,
 }
 
 impl YaraEngine {
-    /// Create a new YaraEngine pointing at the given rules directory.
     pub fn new(rules_dir: PathBuf) -> Result<Self, RiggsError> {
-        // TODO: use yara_x::Compiler to initialize
-        todo!("initialize YaraEngine with yara-x crate; compile rules from {rules_dir:?}")
+        if !rules_dir.is_dir() {
+            return Err(RiggsError::Config(format!(
+                "YARA rules directory does not exist: {}",
+                rules_dir.display()
+            )));
+        }
+        let mut engine = Self {
+            rules_dir,
+            compiled_rules: None,
+        };
+        engine.load_rules()?;
+        Ok(engine)
     }
 
-    /// Load (or reload) all .yar files from the rules directory into a compiled ruleset.
     pub fn load_rules(&mut self) -> Result<(), RiggsError> {
-        // TODO: walk rules_dir for *.yar files, feed each into yara_x::Compiler,
-        // then call compiler.build() to produce compiled Rules
-        todo!("load .yar files from {:?} using yara-x compiler", self.rules_dir)
+        let mut compiler = yara_x::Compiler::new();
+        let mut count = 0;
+
+        let entries = std::fs::read_dir(&self.rules_dir)
+            .map_err(|e| RiggsError::Io(format!("failed to read rules dir: {e}")))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| RiggsError::Io(format!("dir entry error: {e}")))?;
+            let path = entry.path();
+
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext == "yar" || ext == "yara" {
+                        let source = std::fs::read_to_string(&path).map_err(|e| {
+                            RiggsError::Io(format!("failed to read {}: {e}", path.display()))
+                        })?;
+
+                        match compiler.add_source(source.as_str()) {
+                            Ok(_) => {
+                                count += 1;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    path = %path.display(),
+                                    error = %e,
+                                    "failed to compile YARA rule, skipping"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let rules = compiler.build();
+        self.compiled_rules = Some(rules);
+        info!(count, dir = %self.rules_dir.display(), "YARA rules compiled");
+        Ok(())
     }
 
-    /// Scan a single file against the compiled YARA rules.
     pub fn scan_file(&self, path: &Path) -> Result<Vec<YaraMatch>, RiggsError> {
-        // TODO: read file bytes, create yara_x::Scanner from compiled rules,
-        // call scanner.scan(&bytes), convert matching rules into Vec<YaraMatch>
-        todo!("scan {path:?} with yara-x scanner and return matches")
+        let rules = self.compiled_rules.as_ref().ok_or_else(|| {
+            RiggsError::Engine("YARA rules not compiled yet".to_string())
+        })?;
+
+        let data = std::fs::read(path)
+            .map_err(|e| RiggsError::Io(format!("failed to read {}: {e}", path.display())))?;
+
+        let mut scanner = yara_x::Scanner::new(rules);
+        let results = scanner
+            .scan(&data)
+            .map_err(|e| RiggsError::Engine(format!("YARA scan error: {e}")))?;
+
+        let matches: Vec<YaraMatch> = results
+            .matching_rules()
+            .map(|rule| {
+                let patterns: Vec<String> = rule
+                    .patterns()
+                    .flat_map(|p| {
+                        let ident = p.identifier().to_string();
+                        p.matches().map(move |m| {
+                            format!("0x{:x}:{}", m.range().start, ident)
+                        })
+                    })
+                    .collect();
+
+                YaraMatch {
+                    rule_name: rule.identifier().to_string(),
+                    tags: rule.tags().map(|t| t.identifier().to_string()).collect(),
+                    matched_strings: patterns,
+                }
+            })
+            .collect();
+
+        Ok(matches)
     }
 }

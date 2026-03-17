@@ -12,4 +12,5 @@ riggs-types = { workspace = true }
 riggs-comms = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }

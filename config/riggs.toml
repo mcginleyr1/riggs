@@ -14,7 +14,11 @@ db_path = "/var/lib/riggs/riggs.db"
 retention_days = 90
 compression_enabled = true
 
+[rules]
+rules_dir = "/etc/riggs/rules"
+
 [comms]
+socket_path = "/var/run/riggs.sock"
 cloud_enabled = false
 # cloud_endpoint = "https://console.example.com"
 heartbeat_interval_secs = 60
@@ -23,3 +27,54 @@ heartbeat_interval_secs = 60
 auto_respond = true
 kill_on_critical = true
 quarantine_on_malicious = true
+
+[intel]
+enabled = true
+cache_path = "/var/lib/riggs/intel_cache.db"
+cache_ttl_clean_hours = 24
+cache_ttl_malicious_hours = 168
+
+[intel.virustotal]
+enabled = false
+api_key = ""
+
+[intel.abuseipdb]
+enabled = false
+api_key = ""
+
+[intel.feeds]
+malwarebazaar_enabled = true
+malwarebazaar_interval_hours = 24
+urlhaus_enabled = true
+urlhaus_interval_hours = 1
+osv_enabled = true
+osv_interval_hours = 24
+
+# Data Loss Prevention
+[dlp]
+enabled = true
+action = "block"            # "block" or "alert"
+correlation_window_secs = 30
+
+[[dlp.watched_domains]]
+pattern = "claude.ai"
+category = "ai-assistant"
+
+[[dlp.watched_domains]]
+pattern = "*.anthropic.com"
+category = "ai-assistant"
+
+[[dlp.watched_domains]]
+pattern = "chatgpt.com"
+category = "ai-assistant"
+
+[[dlp.watched_domains]]
+pattern = "*.openai.com"
+category = "ai-assistant"
+
+[dlp.file_types]
+block = ["pptx", "xlsx", "docx", "pdf", "ppt", "xls", "doc"]
+alert = ["csv", "json"]
+
+[dlp.excluded_processes]
+names = ["softwareupdated", "nsurlsessiond"]

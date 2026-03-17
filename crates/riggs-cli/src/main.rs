@@ -9,7 +9,9 @@ const DEFAULT_SOCKET_PATH: &str = "/var/run/riggs.sock";
 async fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mut socket_path = PathBuf::from(DEFAULT_SOCKET_PATH);
+    let mut socket_path = PathBuf::from(
+        env::var("RIGGS_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string()),
+    );
     let mut cmd_args: Vec<String> = Vec::new();
     let mut found_command = false;
 
@@ -46,6 +48,9 @@ async fn main() {
         "config" => commands::config(&socket_path, &cmd_args[1..]).await,
         "scan" => commands::scan(&socket_path, &cmd_args[1..]).await,
         "quarantine" => commands::quarantine(&socket_path, &cmd_args[1..]).await,
+        "intel" => commands::intel(&socket_path, &cmd_args[1..]).await,
+        "dlp" => commands::dlp(&socket_path, &cmd_args[1..]).await,
+        "vuln" => commands::vuln(&socket_path, &cmd_args[1..]).await,
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -78,5 +83,8 @@ fn print_usage() {
     println!("  config       View/update configuration");
     println!("  scan <path>  Trigger on-demand scan");
     println!("  quarantine   Manage quarantined files");
+    println!("  intel        Threat intelligence management");
+    println!("  dlp          Data loss prevention status and policy");
+    println!("  vuln         Vulnerability feed management");
     println!("  help         Show this help message");
 }

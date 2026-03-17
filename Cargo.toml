@@ -21,6 +21,9 @@ members = [
     "crates/riggs-shell",
     "crates/riggs-cli",
     "crates/riggs-daemon",
+    "crates/riggs-intel",
+    "crates/riggs-menubar",
+    "crates/riggs-dlp",
 ]
 
 [workspace.package]
@@ -76,6 +79,9 @@ prost = "0.13"
 # Network
 pnet = "0.35"
 
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+
 # Crypto
 ed25519-dalek = { version = "2", features = ["serde"] }
 
@@ -85,8 +91,15 @@ portable-pty = "0.8"
 # Config
 toml = "0.8"
 
+# Concurrent collections
+dashmap = "6"
+
 # Filesystem monitoring
 notify = "7"
+
+# System
+libc = "0.2"
+sysinfo = "0.32"
 
 # Async channels (beyond tokio built-in)
 async-trait = "0.1"
@@ -112,3 +125,6 @@ riggs-vuln = { path = "crates/riggs-vuln" }
 riggs-shell = { path = "crates/riggs-shell" }
 riggs-cli = { path = "crates/riggs-cli" }
 riggs-daemon = { path = "crates/riggs-daemon" }
+riggs-intel = { path = "crates/riggs-intel" }
+riggs-menubar = { path = "crates/riggs-menubar" }
+riggs-dlp = { path = "crates/riggs-dlp" }

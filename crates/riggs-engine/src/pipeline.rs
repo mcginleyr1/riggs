@@ -33,6 +33,7 @@ struct TrackedStage {
 
 pub struct DetectionPipeline {
     stages: Vec<Arc<TrackedStage>>,
+    #[allow(dead_code)]
     verdict_tx: mpsc::Sender<MergedVerdict>,
     events_processed: AtomicU64,
     verdicts_issued: AtomicU64,

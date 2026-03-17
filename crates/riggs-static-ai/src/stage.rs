@@ -62,10 +62,34 @@ impl DetectionStage for StaticAiStage {
             }
         };
 
+        // Only scan newly created files — modifications/deletes don't introduce new binaries
+        if file_event.action != riggs_types::events::FileAction::Create {
+            return Ok(StageVerdict::Clean);
+        }
+
         let path = Path::new(&file_event.path);
         if !path.exists() {
             debug!(path = %file_event.path, "file does not exist, skipping");
             return Ok(StageVerdict::Clean);
+        }
+
+        // Skip non-regular files (sockets, pipes, directories, symlinks)
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return Ok(StageVerdict::Clean),
+        };
+        if !metadata.is_file() || metadata.len() < 64 {
+            return Ok(StageVerdict::Clean);
+        }
+
+        // Skip files that are clearly not executables
+        let skip_extensions = ["txt", "log", "json", "toml", "yaml", "yml", "xml",
+            "csv", "md", "rst", "html", "css", "js", "ts", "py", "rb", "sh",
+            "conf", "cfg", "ini", "lock", "pid", "sock", "tmp"];
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if skip_extensions.iter().any(|&s| s.eq_ignore_ascii_case(ext)) {
+                return Ok(StageVerdict::Clean);
+            }
         }
 
         let confidence = match self.analyzer.analyze_file(path) {

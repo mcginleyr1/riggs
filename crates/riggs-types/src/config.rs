@@ -1,24 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RiggsConfig {
     pub sensor: SensorConfig,
     pub engine: EngineConfig,
     pub store: StoreConfig,
     pub comms: CommsConfig,
     pub response: ResponseConfig,
-}
-
-impl Default for RiggsConfig {
-    fn default() -> Self {
-        Self {
-            sensor: SensorConfig::default(),
-            engine: EngineConfig::default(),
-            store: StoreConfig::default(),
-            comms: CommsConfig::default(),
-            response: ResponseConfig::default(),
-        }
-    }
+    #[serde(default)]
+    pub intel: IntelConfig,
+    #[serde(default)]
+    pub dlp: DlpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,14 +70,21 @@ impl Default for StoreConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommsConfig {
+    #[serde(default = "default_socket_path")]
+    pub socket_path: String,
     pub cloud_enabled: bool,
     pub cloud_endpoint: Option<String>,
     pub heartbeat_interval_secs: u64,
 }
 
+fn default_socket_path() -> String {
+    "/var/run/riggs.sock".into()
+}
+
 impl Default for CommsConfig {
     fn default() -> Self {
         Self {
+            socket_path: default_socket_path(),
             cloud_enabled: false,
             cloud_endpoint: None,
             heartbeat_interval_secs: 60,
@@ -106,6 +105,151 @@ impl Default for ResponseConfig {
             auto_respond: true,
             kill_on_critical: true,
             quarantine_on_malicious: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntelConfig {
+    pub enabled: bool,
+    pub cache_path: String,
+    pub cache_ttl_clean_hours: u32,
+    pub cache_ttl_malicious_hours: u32,
+    pub virustotal: VtConfig,
+    pub abuseipdb: AbuseIpdbConfig,
+    pub feeds: FeedsConfig,
+}
+
+impl Default for IntelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_path: "/var/lib/riggs/intel_cache.db".into(),
+            cache_ttl_clean_hours: 24,
+            cache_ttl_malicious_hours: 168,
+            virustotal: VtConfig::default(),
+            abuseipdb: AbuseIpdbConfig::default(),
+            feeds: FeedsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VtConfig {
+    pub enabled: bool,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AbuseIpdbConfig {
+    pub enabled: bool,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedsConfig {
+    pub malwarebazaar_enabled: bool,
+    pub malwarebazaar_interval_hours: u32,
+    pub urlhaus_enabled: bool,
+    pub urlhaus_interval_hours: u32,
+    pub osv_enabled: bool,
+    pub osv_interval_hours: u32,
+}
+
+impl Default for FeedsConfig {
+    fn default() -> Self {
+        Self {
+            malwarebazaar_enabled: true,
+            malwarebazaar_interval_hours: 24,
+            urlhaus_enabled: true,
+            urlhaus_interval_hours: 1,
+            osv_enabled: true,
+            osv_interval_hours: 24,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlpConfig {
+    pub enabled: bool,
+    pub action: String,
+    pub correlation_window_secs: u64,
+    #[serde(default)]
+    pub watched_domains: Vec<WatchedDomain>,
+    #[serde(default)]
+    pub file_types: DlpFileTypes,
+    #[serde(default)]
+    pub excluded_processes: DlpExclusions,
+}
+
+impl Default for DlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            action: "block".into(),
+            correlation_window_secs: 30,
+            watched_domains: vec![
+                WatchedDomain {
+                    pattern: "claude.ai".into(),
+                    category: "ai-assistant".into(),
+                },
+                WatchedDomain {
+                    pattern: "*.anthropic.com".into(),
+                    category: "ai-assistant".into(),
+                },
+                WatchedDomain {
+                    pattern: "chatgpt.com".into(),
+                    category: "ai-assistant".into(),
+                },
+                WatchedDomain {
+                    pattern: "*.openai.com".into(),
+                    category: "ai-assistant".into(),
+                },
+            ],
+            file_types: DlpFileTypes::default(),
+            excluded_processes: DlpExclusions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchedDomain {
+    pub pattern: String,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlpFileTypes {
+    pub block: Vec<String>,
+    pub alert: Vec<String>,
+}
+
+impl Default for DlpFileTypes {
+    fn default() -> Self {
+        Self {
+            block: vec![
+                "pptx".into(),
+                "xlsx".into(),
+                "docx".into(),
+                "pdf".into(),
+                "ppt".into(),
+                "xls".into(),
+                "doc".into(),
+            ],
+            alert: vec!["csv".into(), "json".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlpExclusions {
+    pub names: Vec<String>,
+}
+
+impl Default for DlpExclusions {
+    fn default() -> Self {
+        Self {
+            names: vec!["softwareupdated".into(), "nsurlsessiond".into()],
         }
     }
 }

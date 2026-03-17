@@ -1,0 +1,22 @@
+[package]
+name = "riggs-menubar"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "riggs-menubar"
+path = "src/main.rs"
+
+[dependencies]
+riggs-types = { workspace = true }
+riggs-comms = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSImage", "NSRunningApplication", "NSEvent", "NSButton", "NSControl", "NSResponder", "NSView"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSThread", "NSRunLoop", "NSDate", "NSTimer"] }
+objc2-core-foundation = "0.3"

@@ -12,3 +12,4 @@ ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+portable-pty = { workspace = true }
