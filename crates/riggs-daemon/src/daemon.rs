@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use riggs_behavioral_ai::BehavioralAiStage;
 use riggs_dlp::{DlpCorrelator, DlpPolicy, DlpStage};
+use riggs_dlp::stage::DlpDetection;
 use riggs_engine::DetectionPipeline;
 use riggs_intel::clients::abuseipdb::AbuseIpdbClient;
 use riggs_intel::clients::virustotal::VtClient;
@@ -120,6 +121,7 @@ impl RiggsDaemon {
 
         let (event_tx, mut event_rx) = mpsc::channel::<RiggsEvent>(10_000);
         let (verdict_tx, verdict_rx) = mpsc::channel::<MergedVerdict>(10_000);
+        let (dlp_tx, dlp_rx) = mpsc::channel::<DlpDetection>(1_000);
 
         // -- Shared daemon state (used by IPC server + feed dispatcher) --
         let daemon_state = Arc::new(riggs_comms::DaemonState::new());
@@ -229,7 +231,10 @@ impl RiggsDaemon {
                 dlp_config.correlation_window_secs as i64,
             ));
 
-            pipeline.add_stage(Box::new(DlpStage::new(Arc::clone(&dlp_correlator))));
+            pipeline.add_stage(Box::new(
+                DlpStage::new(Arc::clone(&dlp_correlator))
+                    .with_detection_channel(dlp_tx.clone()),
+            ));
 
             // Register DLP query handler for filter extension IPC
             if let Ok(mut guard) = daemon_state.dlp.write() {
@@ -524,7 +529,14 @@ impl RiggsDaemon {
                                         riggs_cloud::run_threat_reporter(rep_client, rep_agent_id, verdict_rx).await;
                                     });
 
-                                    info!("cloud heartbeat and threat reporter started");
+                                    // DLP event reporter
+                                    let dlp_client = cc.clone();
+                                    let dlp_agent_id = agent_id.clone();
+                                    tokio::spawn(async move {
+                                        riggs_cloud::run_dlp_reporter(dlp_client, dlp_agent_id, dlp_rx).await;
+                                    });
+
+                                    info!("cloud heartbeat, threat reporter, and DLP reporter started");
                                 }
                                 Err(e) => {
                                     warn!(error = %e, "enrollment failed, running without console");
@@ -541,8 +553,9 @@ impl RiggsDaemon {
                 }
             }
         } else {
-            // Drop the receiver so the channel closes cleanly
+            // Drop receivers so channels close cleanly
             drop(verdict_rx);
+            drop(dlp_rx);
         }
 
         // -- Config for auto-respond, captured before entering the loop --

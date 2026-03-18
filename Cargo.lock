@@ -3073,6 +3073,7 @@ dependencies = [
  "chrono",
  "prost",
  "prost-types",
+ "riggs-dlp",
  "riggs-types",
  "serde_json",
  "sysinfo",

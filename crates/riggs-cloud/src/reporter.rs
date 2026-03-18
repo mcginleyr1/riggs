@@ -1,10 +1,12 @@
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use riggs_dlp::stage::DlpDetection;
+use riggs_dlp::FlowAction;
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 
 use crate::client::ConsoleClient;
-use crate::proto::{ThreatReport, VerdictDetail};
+use crate::proto::{DlpEventReport, ThreatReport, VerdictDetail};
 
 pub async fn run_threat_reporter(
     client: ConsoleClient,
@@ -52,11 +54,7 @@ pub async fn run_threat_reporter(
             verdicts,
             process_name: String::new(),
             process_path: String::new(),
-            summary: format!(
-                "{} detected by {} engines",
-                threat_level,
-                verdict.verdicts.len()
-            ),
+            summary: format!("{} detected by {} engines", threat_level, verdict.verdicts.len()),
         };
 
         match grpc.report_threat(report).await {
@@ -67,6 +65,43 @@ pub async fn run_threat_reporter(
                 }
             }
             Err(e) => warn!(error = %e, "threat report failed"),
+        }
+    }
+}
+
+pub async fn run_dlp_reporter(
+    client: ConsoleClient,
+    agent_id: String,
+    mut dlp_rx: mpsc::Receiver<DlpDetection>,
+) {
+    while let Some(det) = dlp_rx.recv().await {
+        let Some(mut grpc) = client.grpc_client() else {
+            warn!("no gRPC channel, dropping DLP event");
+            continue;
+        };
+
+        let action = match det.action {
+            FlowAction::Block => "block",
+            FlowAction::Alert => "alert",
+            FlowAction::Allow => continue,
+        };
+
+        let domain = det.domain.clone();
+        let report = DlpEventReport {
+            agent_id: agent_id.clone(),
+            timestamp: None,
+            action: action.into(),
+            pid: det.pid,
+            process_name: det.process_name,
+            file_path: det.file_path,
+            file_type: det.file_type,
+            domain: det.domain,
+            domain_category: String::new(),
+            username: det.username,
+        };
+        match grpc.report_dlp_event(report).await {
+            Ok(_) => info!(action, %domain, "DLP event reported to console"),
+            Err(e) => warn!(error = %e, "DLP event report failed"),
         }
     }
 }

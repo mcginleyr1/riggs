@@ -10,4 +10,4 @@ mod reporter;
 pub use client::{ConsoleClient, ConsoleConfig};
 pub use enroll::enroll;
 pub use heartbeat::run_heartbeat_loop;
-pub use reporter::run_threat_reporter;
+pub use reporter::{run_dlp_reporter, run_threat_reporter};

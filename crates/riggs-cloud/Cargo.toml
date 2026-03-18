@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 riggs-types = { workspace = true }
+riggs-dlp = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = "0.13"

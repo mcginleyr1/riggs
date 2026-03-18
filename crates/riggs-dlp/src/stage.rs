@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use tokio::sync::mpsc;
 use tracing::debug;
 
 use riggs_engine::{DetectionStage, StageVerdict};
@@ -13,13 +14,35 @@ use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
 use crate::correlator::{DlpCorrelator, FlowAction};
 use crate::magic;
 
+/// Structured DLP detection event emitted when a block or alert fires.
+/// Sent over a dedicated channel so the cloud reporter can forward it as
+/// a `DlpEventReport` gRPC call with all fields intact.
+#[derive(Debug, Clone)]
+pub struct DlpDetection {
+    pub action: FlowAction,
+    pub pid: u32,
+    pub process_name: String,
+    pub file_path: String,
+    pub file_type: String,
+    pub domain: String,
+    pub username: String,
+}
+
 pub struct DlpStage {
     correlator: Arc<DlpCorrelator>,
+    /// When set, structured DLP detections are sent here for cloud reporting.
+    detection_tx: Option<mpsc::Sender<DlpDetection>>,
 }
 
 impl DlpStage {
     pub fn new(correlator: Arc<DlpCorrelator>) -> Self {
-        Self { correlator }
+        Self { correlator, detection_tx: None }
+    }
+
+    /// Attach a channel to receive structured DLP detection events.
+    pub fn with_detection_channel(mut self, tx: mpsc::Sender<DlpDetection>) -> Self {
+        self.detection_tx = Some(tx);
+        self
     }
 }
 
@@ -33,7 +56,6 @@ impl DetectionStage for DlpStage {
         match event {
             RiggsEvent::File(fe) if fe.action == FileAction::Open => {
                 let path = Path::new(&fe.path);
-
                 let header = magic::read_file_header(path, 16).await;
 
                 self.correlator.record_file_access(
@@ -60,14 +82,22 @@ impl DetectionStage for DlpStage {
 
                 match verdict.action {
                     FlowAction::Block => {
+                        let file_type = verdict.file_type.as_deref().unwrap_or("unknown");
                         let description = format!(
                             "DLP block: {} upload to {} by {} (PID {})",
-                            verdict.file_type.as_deref().unwrap_or("unknown"),
-                            ne.dst_addr,
-                            ne.process_context.name,
-                            ne.process_context.pid,
+                            file_type, ne.dst_addr, ne.process_context.name, ne.process_context.pid,
                         );
                         debug!("{}", description);
+
+                        self.emit_detection(DlpDetection {
+                            action: FlowAction::Block,
+                            pid: ne.process_context.pid,
+                            process_name: ne.process_context.name.clone(),
+                            file_path: verdict.file_path.clone().unwrap_or_default(),
+                            file_type: file_type.to_string(),
+                            domain: ne.dst_addr.clone(),
+                            username: ne.process_context.user.clone(),
+                        });
 
                         Ok(StageVerdict::Malicious(Verdict {
                             event_id: ne.event_id.clone(),
@@ -79,14 +109,22 @@ impl DetectionStage for DlpStage {
                         }))
                     }
                     FlowAction::Alert => {
+                        let file_type = verdict.file_type.as_deref().unwrap_or("unknown");
                         let description = format!(
                             "DLP alert: {} upload to {} by {} (PID {})",
-                            verdict.file_type.as_deref().unwrap_or("unknown"),
-                            ne.dst_addr,
-                            ne.process_context.name,
-                            ne.process_context.pid,
+                            file_type, ne.dst_addr, ne.process_context.name, ne.process_context.pid,
                         );
                         debug!("{}", description);
+
+                        self.emit_detection(DlpDetection {
+                            action: FlowAction::Alert,
+                            pid: ne.process_context.pid,
+                            process_name: ne.process_context.name.clone(),
+                            file_path: verdict.file_path.clone().unwrap_or_default(),
+                            file_type: file_type.to_string(),
+                            domain: ne.dst_addr.clone(),
+                            username: ne.process_context.user.clone(),
+                        });
 
                         Ok(StageVerdict::Suspicious(Verdict {
                             event_id: ne.event_id.clone(),
@@ -102,6 +140,16 @@ impl DetectionStage for DlpStage {
             }
 
             _ => Ok(StageVerdict::Clean),
+        }
+    }
+}
+
+impl DlpStage {
+    fn emit_detection(&self, detection: DlpDetection) {
+        if let Some(tx) = &self.detection_tx {
+            // Non-blocking — drop if consumer is behind. DLP reporting is
+            // best-effort; the verdict is already enforced at the network layer.
+            let _ = tx.try_send(detection);
         }
     }
 }
@@ -181,8 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_with_fd_blocks() {
-        let c = test_correlator();
-        let s = DlpStage::new(c);
+        let s = DlpStage::new(test_correlator());
         s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Malicious(_)));
@@ -190,37 +237,53 @@ mod tests {
 
     #[tokio::test]
     async fn close_removes_fd_but_fallback_catches() {
-        let c = test_correlator();
-        let s = DlpStage::new(c);
+        let s = DlpStage::new(test_correlator());
         s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
         s.analyze(&file_close(1234, 5)).await.unwrap();
-
-        // Fallback window (10s) still active — should still block
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Malicious(_)));
     }
 
     #[tokio::test]
     async fn no_fd_sensor_still_blocks() {
-        let c = test_correlator();
-        let s = DlpStage::new(c);
+        let s = DlpStage::new(test_correlator());
         s.analyze(&file_open(1234, "/docs/earnings.pptx", None)).await.unwrap();
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Malicious(_)));
     }
 
     #[tokio::test]
+    async fn detection_emitted_on_block() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let s = DlpStage::new(test_correlator()).with_detection_channel(tx);
+
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
+        s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
+
+        let det = rx.try_recv().expect("detection should have been emitted");
+        assert_eq!(det.action, FlowAction::Block);
+        assert_eq!(det.domain, "claude.ai");
+        assert_eq!(det.pid, 1234);
+    }
+
+    #[tokio::test]
+    async fn no_detection_emitted_on_allow() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let s = DlpStage::new(test_correlator()).with_detection_channel(tx);
+        s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
+        assert!(rx.try_recv().is_err(), "no detection for clean flow");
+    }
+
+    #[tokio::test]
     async fn network_without_file_open_allows() {
-        let c = test_correlator();
-        let s = DlpStage::new(c);
+        let s = DlpStage::new(test_correlator());
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Clean));
     }
 
     #[tokio::test]
     async fn inbound_traffic_ignored() {
-        let c = test_correlator();
-        let s = DlpStage::new(c);
+        let s = DlpStage::new(test_correlator());
         s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(3))).await.unwrap();
 
         let r = s.analyze(&RiggsEvent::Network(NetworkEvent {
