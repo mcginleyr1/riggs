@@ -34,12 +34,11 @@ impl DetectionStage for DlpStage {
             RiggsEvent::File(fe) if fe.action == FileAction::Open => {
                 let path = Path::new(&fe.path);
 
-                // Try to read file header for magic byte detection.
-                // Non-blocking, fail gracefully if file is gone or unreadable.
                 let header = magic::read_file_header(path, 16).await;
 
                 self.correlator.record_file_access(
                     fe.process_context.pid,
+                    fe.fd,
                     path,
                     &fe.process_context.name,
                     fe.timestamp,
@@ -49,10 +48,15 @@ impl DetectionStage for DlpStage {
                 Ok(StageVerdict::Clean)
             }
 
+            RiggsEvent::File(fe) if fe.action == FileAction::Close => {
+                if let Some(fd) = fe.fd {
+                    self.correlator.record_file_close(fe.process_context.pid, fd);
+                }
+                Ok(StageVerdict::Clean)
+            }
+
             RiggsEvent::Network(ne) if ne.direction == NetworkDirection::Outbound => {
-                let verdict =
-                    self.correlator
-                        .check_flow(ne.process_context.pid, &ne.dst_addr);
+                let verdict = self.correlator.check_flow(ne.process_context.pid, &ne.dst_addr);
 
                 match verdict.action {
                     FlowAction::Block => {
@@ -63,7 +67,6 @@ impl DetectionStage for DlpStage {
                             ne.process_context.name,
                             ne.process_context.pid,
                         );
-
                         debug!("{}", description);
 
                         Ok(StageVerdict::Malicious(Verdict {
@@ -83,7 +86,6 @@ impl DetectionStage for DlpStage {
                             ne.process_context.name,
                             ne.process_context.pid,
                         );
-
                         debug!("{}", description);
 
                         Ok(StageVerdict::Suspicious(Verdict {
@@ -124,12 +126,12 @@ mod tests {
             excluded_processes: vec![],
             action: DlpAction::Block,
         });
-        Arc::new(DlpCorrelator::new(policy, 30))
+        Arc::new(DlpCorrelator::new(policy, 10))
     }
 
-    fn test_process_context() -> ProcessContext {
+    fn process(pid: u32) -> ProcessContext {
         ProcessContext {
-            pid: 1234,
+            pid,
             ppid: 1,
             name: "Google Chrome".into(),
             path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
@@ -139,97 +141,100 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn file_open_records_access() {
-        let correlator = test_correlator();
-        let stage = DlpStage::new(correlator.clone());
-
-        let event = RiggsEvent::File(FileEvent {
+    fn file_open(pid: u32, path: &str, fd: Option<u32>) -> RiggsEvent {
+        RiggsEvent::File(FileEvent {
             event_id: EventId::new(),
             timestamp: Utc::now(),
-            process_context: test_process_context(),
+            process_context: process(pid),
             action: FileAction::Open,
-            path: "/Users/test/earnings.pptx".into(),
+            path: path.into(),
             hash: None,
-        });
-
-        let result = stage.analyze(&event).await.unwrap();
-        assert!(matches!(result, StageVerdict::Clean));
-        assert_eq!(correlator.total_tracked_accesses(), 1);
+            fd,
+        })
     }
 
-    #[tokio::test]
-    async fn network_after_file_open_blocks() {
-        let correlator = test_correlator();
-        let stage = DlpStage::new(correlator.clone());
-
-        // Step 1: file open
-        let file_event = RiggsEvent::File(FileEvent {
+    fn file_close(pid: u32, fd: u32) -> RiggsEvent {
+        RiggsEvent::File(FileEvent {
             event_id: EventId::new(),
             timestamp: Utc::now(),
-            process_context: test_process_context(),
-            action: FileAction::Open,
-            path: "/Users/test/earnings.pptx".into(),
+            process_context: process(pid),
+            action: FileAction::Close,
+            path: String::new(),
             hash: None,
-        });
-        stage.analyze(&file_event).await.unwrap();
+            fd: Some(fd),
+        })
+    }
 
-        // Step 2: network connection to watched domain
-        let net_event = RiggsEvent::Network(NetworkEvent {
+    fn net_out(pid: u32, dst: &str) -> RiggsEvent {
+        RiggsEvent::Network(NetworkEvent {
             event_id: EventId::new(),
             timestamp: Utc::now(),
-            process_context: test_process_context(),
+            process_context: process(pid),
             direction: NetworkDirection::Outbound,
             src_addr: "192.168.1.100".into(),
-            dst_addr: "claude.ai".into(),
+            dst_addr: dst.into(),
             src_port: 54321,
             dst_port: 443,
             protocol: "tcp".into(),
-        });
+        })
+    }
 
-        let result = stage.analyze(&net_event).await.unwrap();
-        assert!(matches!(result, StageVerdict::Malicious(_)));
+    #[tokio::test]
+    async fn open_with_fd_blocks() {
+        let c = test_correlator();
+        let s = DlpStage::new(c);
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
+        let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
+        assert!(matches!(r, StageVerdict::Malicious(_)));
+    }
+
+    #[tokio::test]
+    async fn close_removes_fd_but_fallback_catches() {
+        let c = test_correlator();
+        let s = DlpStage::new(c);
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
+        s.analyze(&file_close(1234, 5)).await.unwrap();
+
+        // Fallback window (10s) still active — should still block
+        let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
+        assert!(matches!(r, StageVerdict::Malicious(_)));
+    }
+
+    #[tokio::test]
+    async fn no_fd_sensor_still_blocks() {
+        let c = test_correlator();
+        let s = DlpStage::new(c);
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", None)).await.unwrap();
+        let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
+        assert!(matches!(r, StageVerdict::Malicious(_)));
     }
 
     #[tokio::test]
     async fn network_without_file_open_allows() {
-        let correlator = test_correlator();
-        let stage = DlpStage::new(correlator);
-
-        let net_event = RiggsEvent::Network(NetworkEvent {
-            event_id: EventId::new(),
-            timestamp: Utc::now(),
-            process_context: test_process_context(),
-            direction: NetworkDirection::Outbound,
-            src_addr: "192.168.1.100".into(),
-            dst_addr: "claude.ai".into(),
-            src_port: 54321,
-            dst_port: 443,
-            protocol: "tcp".into(),
-        });
-
-        let result = stage.analyze(&net_event).await.unwrap();
-        assert!(matches!(result, StageVerdict::Clean));
+        let c = test_correlator();
+        let s = DlpStage::new(c);
+        let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
+        assert!(matches!(r, StageVerdict::Clean));
     }
 
     #[tokio::test]
     async fn inbound_traffic_ignored() {
-        let correlator = test_correlator();
-        let stage = DlpStage::new(correlator);
+        let c = test_correlator();
+        let s = DlpStage::new(c);
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(3))).await.unwrap();
 
-        let net_event = RiggsEvent::Network(NetworkEvent {
+        let r = s.analyze(&RiggsEvent::Network(NetworkEvent {
             event_id: EventId::new(),
             timestamp: Utc::now(),
-            process_context: test_process_context(),
+            process_context: process(1234),
             direction: NetworkDirection::Inbound,
             src_addr: "claude.ai".into(),
             dst_addr: "192.168.1.100".into(),
             src_port: 443,
             dst_port: 54321,
             protocol: "tcp".into(),
-        });
+        })).await.unwrap();
 
-        let result = stage.analyze(&net_event).await.unwrap();
-        assert!(matches!(result, StageVerdict::Clean));
+        assert!(matches!(r, StageVerdict::Clean));
     }
 }

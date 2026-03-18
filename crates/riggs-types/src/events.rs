@@ -156,7 +156,7 @@ impl RiggsEvent {
                 ProcessAction::Exit => Severity::Info,
             },
             RiggsEvent::File(e) => match e.action {
-                FileAction::Open => Severity::Info,
+                FileAction::Open | FileAction::Close => Severity::Info,
                 FileAction::Create | FileAction::Modify | FileAction::Rename => Severity::Low,
                 FileAction::Delete => Severity::Medium,
             },
@@ -205,6 +205,25 @@ impl RiggsEvent {
             action,
             path: path.into(),
             hash,
+            fd: None,
+        })
+    }
+
+    pub fn new_file_with_fd(
+        action: FileAction,
+        process_context: ProcessContext,
+        path: impl Into<String>,
+        hash: Option<String>,
+        fd: u32,
+    ) -> Self {
+        RiggsEvent::File(FileEvent {
+            event_id: EventId::new(),
+            timestamp: Utc::now(),
+            process_context,
+            action,
+            path: path.into(),
+            hash,
+            fd: Some(fd),
         })
     }
 
@@ -299,6 +318,7 @@ impl fmt::Display for RiggsEvent {
                     FileAction::Delete => "delete",
                     FileAction::Rename => "rename",
                     FileAction::Open => "open",
+                    FileAction::Close => "close",
                 };
                 write!(
                     f,
@@ -385,6 +405,9 @@ pub enum FileAction {
     Delete,
     Rename,
     Open,
+    /// File descriptor closed by the process.
+    /// Only emitted by sensors that have fd-level visibility (macOS ES, eBPF).
+    Close,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +418,10 @@ pub struct FileEvent {
     pub action: FileAction,
     pub path: String,
     pub hash: Option<String>,
+    /// File descriptor number, when available from the sensor.
+    /// Present on Open and Close events from sensors with fd visibility.
+    /// None on Linux notify-based sensors and synthetic events.
+    pub fd: Option<u32>,
 }
 
 // --- Network ---
