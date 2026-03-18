@@ -75,6 +75,7 @@ defmodule Murtaugh.Tenancy do
       case Postgrex.query(conn, "SELECT 1 FROM pg_database WHERE datname = $1", [db_name]) do
         {:ok, %{num_rows: 0}} ->
           Postgrex.query!(conn, "CREATE DATABASE \"#{db_name}\"", [])
+          enable_timescaledb(database_url)
           :created
 
         {:ok, _} ->
@@ -85,6 +86,18 @@ defmodule Murtaugh.Tenancy do
     end
 
     run_tenant_migrations(shard)
+  end
+
+  # Enable the TimescaleDB extension in a freshly created tenant database.
+  # Must run before migrations because create_hypertable requires it.
+  defp enable_timescaledb(database_url) do
+    {:ok, conn} = Postgrex.start_link(url: database_url)
+
+    try do
+      Postgrex.query!(conn, "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE", [])
+    after
+      GenServer.stop(conn)
+    end
   end
 
   @doc """
