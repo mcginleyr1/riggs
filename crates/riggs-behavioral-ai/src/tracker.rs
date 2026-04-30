@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Duration;
 use riggs_types::events::{
-    FileAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
+    FileAction, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
 };
 
 use crate::patterns::BehaviorPattern;
@@ -99,9 +99,18 @@ impl BehaviorTracker {
         None
     }
 
-    fn check_process_injection(&self, _events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // TODO: detect WriteProcessMemory + CreateRemoteThread patterns
-        // or ptrace attach + mmap + mprotect sequences
+    fn check_process_injection(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Signal 1: KernelEvent::MemoryExec — shellcode execution in memory
+        // This is the kernel telling us a process executed code that wasn't
+        // mapped from a file (i.e., dynamically generated shellcode).
+        // Immediate critical signal — no threshold needed.
+        for event in events {
+            if let RiggsEvent::Kernel(k) = event {
+                if k.action == KernelAction::MemoryExec {
+                    return Some(BehaviorPattern::ProcessInjection);
+                }
+            }
+        }
         None
     }
 
@@ -223,5 +232,90 @@ fn extract_storyline_id(event: &RiggsEvent) -> StorylineId {
         RiggsEvent::Dns(e) => e.process_context.storyline_id.clone(),
         RiggsEvent::Auth(e) => e.process_context.storyline_id.clone(),
         RiggsEvent::Kernel(e) => e.process_context.storyline_id.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ctx(pid: u32, name: &str) -> ProcessContext {
+        ProcessContext::new(
+            pid, 0, name, format!("/usr/bin/{}", name), "",
+            "user",
+            StorylineId::new(),
+        )
+    }
+
+    #[test]
+    fn test_memory_exec_detected() {
+        let ctx = make_ctx(1234, "suspicious");
+        let kernel_event = RiggsEvent::new_kernel(
+            KernelAction::MemoryExec,
+            ctx.clone(),
+            "shellcode executed in anonymous memory mapping",
+        );
+        let events = vec![kernel_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::ProcessInjection));
+    }
+
+    #[test]
+    fn test_no_memory_exec_returns_none() {
+        let ctx = make_ctx(1234, "bash");
+        let process_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx.clone(),
+            None,
+        );
+        let events = vec![process_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_memory_exec_mixed_with_other_events() {
+        let ctx = make_ctx(5678, "python3");
+        let normal_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx.clone(),
+            None,
+        );
+        let kernel_event = RiggsEvent::new_kernel(
+            KernelAction::MemoryExec,
+            ctx,
+            "mmap+exec memory region",
+        );
+        let events = vec![normal_event, kernel_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::ProcessInjection));
+    }
+
+    #[test]
+    fn test_other_kernel_actions_not_flagged() {
+        let ctx = make_ctx(9999, "kernel_task");
+        let module_load = RiggsEvent::new_kernel(
+            KernelAction::ModuleLoad,
+            ctx,
+            "loaded /System/Library/Extensions/foo.kext",
+        );
+        let events = vec![module_load];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // ModuleLoad alone should not trigger process injection
+        assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
     }
 }
