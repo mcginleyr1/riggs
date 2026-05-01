@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Duration;
 use riggs_types::events::{
-    FileAction, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
+    AuthAction, FileAction, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
 };
 
 use crate::patterns::BehaviorPattern;
@@ -114,8 +114,78 @@ impl BehaviorTracker {
         None
     }
 
-    fn check_privilege_escalation(&self, _events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // TODO: detect uid changes, sudo invocations, setuid calls
+    fn check_privilege_escalation(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Signal 1: AuthEvent::Escalation — direct privilege escalation attempt
+        // The OS auth subsystem reported an escalation (sudo, su, pkexec, etc.)
+        for event in events {
+            if let RiggsEvent::Auth(ae) = event {
+                if ae.action == AuthAction::Escalation {
+                    return Some(BehaviorPattern::PrivilegeEscalation);
+                }
+            }
+        }
+
+        // Signal 2: AuthEvent::Failed followed by AuthEvent::Login from same process
+        // Brute-force pattern: failed auth attempt succeeded shortly after
+        let auth_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Auth(ae) => Some((ae.timestamp, &ae.action, &ae.user)),
+                _ => None,
+            })
+            .collect();
+
+        if auth_events.len() >= 2 {
+            for i in 0..auth_events.len() {
+                if auth_events[i].1 == &AuthAction::Failed {
+                    // Look for a successful login from the same user within 60 seconds
+                    for j in (i + 1)..auth_events.len() {
+                        if auth_events[j].1 == &AuthAction::Login
+                            && auth_events[i].2 == &auth_events[j].2 // same user
+                            && (auth_events[j].0 - auth_events[i].0) <= Duration::seconds(60)
+                        {
+                            return Some(BehaviorPattern::PrivilegeEscalation);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Signal 3: Process cmdline contains privilege escalation tools
+        // Tools like sudo, su, pkexec, doas, runuser are used to gain elevated privileges
+        const ESCALATION_COMMANDS: &[&str] = &["sudo ", "sudo\t", " pkexec", " doas", " runuser"];
+
+        for event in events {
+            if let RiggsEvent::Process(pe) = event {
+                if pe.action == ProcessAction::Exec {
+                    let cmdline_lower = pe.process_context.cmdline.to_lowercase();
+                    if ESCALATION_COMMANDS
+                        .iter()
+                        .any(|cmd| cmdline_lower.contains(cmd))
+                    {
+                        return Some(BehaviorPattern::PrivilegeEscalation);
+                    }
+                }
+            }
+        }
+
+        // Signal 4: Process running as root with non-root parent
+        // A process spawned as root when its parent is not root is suspicious
+        for event in events {
+            if let RiggsEvent::Process(pe) = event {
+                if pe.action == ProcessAction::Exec {
+                    let is_root = pe.process_context.user == "root"
+                        || pe.process_context.user == "0";
+                    if let Some(parent) = &pe.parent_context {
+                        let parent_is_root = parent.user == "root" || parent.user == "0";
+                        if is_root && !parent_is_root {
+                            return Some(BehaviorPattern::PrivilegeEscalation);
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -317,5 +387,200 @@ mod tests {
 
         // ModuleLoad alone should not trigger process injection
         assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
+    }
+
+    // --- Privilege Escalation Tests ---
+
+    fn make_auth_event(
+        action: AuthAction,
+        pid: u32,
+        user: &str,
+        method: &str,
+    ) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, "auth_service", "/usr/sbin/authserv", "",
+            user,
+            StorylineId::new(),
+        );
+        RiggsEvent::new_auth(action, ctx, user, method)
+    }
+
+    #[test]
+    fn test_auth_escalation_detected() {
+        let auth_event = make_auth_event(
+            AuthAction::Escalation,
+            1001,
+            "user",
+            "sudo",
+        );
+        let events = vec![auth_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_brute_force_success_detected() {
+        let failed = make_auth_event(
+            AuthAction::Failed,
+            2001,
+            "user",
+            "password",
+        );
+        let success = make_auth_event(
+            AuthAction::Login,
+            2001,
+            "user",
+            "password",
+        );
+        let events = vec![failed, success];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_brute_force_different_users_not_flagged() {
+        let failed = make_auth_event(
+            AuthAction::Failed,
+            3001,
+            "user",
+            "password",
+        );
+        let success = make_auth_event(
+            AuthAction::Login,
+            3001,
+            "admin",
+            "password",
+        );
+        let events = vec![failed, success];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        // Different users — not a brute force pattern
+        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_sudo_in_cmdline_detected() {
+        let ctx = ProcessContext::new(
+            4001, 0, "bash", "/bin/bash",
+            "sudo apt update",
+            "user",
+            StorylineId::new(),
+        );
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx,
+            None,
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_pkexec_in_cmdline_detected() {
+        let ctx = ProcessContext::new(
+            5001, 0, "pkexec", "/usr/bin/pkexec",
+            "pkexec /usr/bin/systemctl restart nginx",
+            "user",
+            StorylineId::new(),
+        );
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx,
+            None,
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_root_process_from_nonroot_parent_detected() {
+        let parent_ctx = ProcessContext::new(
+            6001, 0, "firefox", "/usr/bin/firefox",
+            "",
+            "user",
+            StorylineId::new(),
+        );
+        let child_ctx = ProcessContext::new(
+            6002, 6001, "suid_exploit", "/tmp/exploit",
+            "",
+            "root",
+            StorylineId::new(),
+        );
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            child_ctx,
+            Some(parent_ctx),
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_root_from_root_parent_not_flagged() {
+        let parent_ctx = ProcessContext::new(
+            7001, 0, "sshd", "/usr/sbin/sshd",
+            "",
+            "root",
+            StorylineId::new(),
+        );
+        let child_ctx = ProcessContext::new(
+            7002, 7001, "bash", "/bin/bash",
+            "",
+            "root",
+            StorylineId::new(),
+        );
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            child_ctx,
+            Some(parent_ctx),
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Normal: root spawning root (e.g., ssh session)
+        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_no_privilege_escalation_in_normal_events() {
+        let ctx = make_ctx(8001, "normal_app");
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx,
+            None,
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
     }
 }
