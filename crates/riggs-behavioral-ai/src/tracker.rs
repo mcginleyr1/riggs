@@ -189,10 +189,140 @@ impl BehaviorTracker {
         None
     }
 
-    fn check_lateral_movement(&self, _events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // TODO: detect SSH/RDP/SMB connections to internal hosts
-        // combined with credential access
+    fn check_lateral_movement(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Signal 1: Outbound connections to internal IPs on lateral movement ports
+        // Internal ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        // Ports: 22 (SSH), 135 (DCOM), 445 (SMB), 3389 (RDP), 5985 (WinRM), 5986 (WinRM-SSL)
+        const LATERAL_PORTS: &[u16] = &[22, 135, 445, 3389, 5985, 5986];
+
+        for event in events {
+            if let RiggsEvent::Network(ne) = event {
+                if ne.direction != NetworkDirection::Outbound {
+                    continue;
+                }
+                if !LATERAL_PORTS.contains(&ne.dst_port) {
+                    continue;
+                }
+                if Self::is_internal_ip(&ne.dst_addr) {
+                    return Some(BehaviorPattern::LateralMovement);
+                }
+            }
+        }
+
+        // Signal 2: DNS query for internal hostname followed by network connection
+        // Detects DNS reconnaissance → exploitation pattern
+        let dns_queries: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Dns(de) => Some((de.timestamp, &de.query)),
+                _ => None,
+            })
+            .collect();
+
+        let network_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Network(ne) if ne.direction == NetworkDirection::Outbound => {
+                    Some((ne.timestamp, &ne.dst_addr))
+                }
+                _ => None,
+            })
+            .collect();
+
+        for (dns_ts, dns_query) in &dns_queries {
+            for (net_ts, net_dst) in &network_events {
+                // DNS query happened before the network connection
+                if *net_ts < *dns_ts {
+                    continue;
+                }
+                // Within 30-second window
+                if *net_ts - *dns_ts > Duration::seconds(30) {
+                    continue;
+                }
+                // DNS query resolved to the destination IP
+                if dns_query == net_dst || dns_query.trim_end_matches('.') == net_dst {
+                    return Some(BehaviorPattern::LateralMovement);
+                }
+            }
+        }
+
+        // Signal 3: AuthEvent (Failed/Login) combined with outbound network to internal host
+        // Credential access + lateral movement from same process
+        let auth_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Auth(ae) => Some((ae.timestamp, &ae.action, ae.process_context.pid)),
+                _ => None,
+            })
+            .collect();
+
+        let outbound_internal: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Network(ne)
+                    if ne.direction == NetworkDirection::Outbound
+                        && Self::is_internal_ip(&ne.dst_addr) =>
+                {
+                    Some((ne.timestamp, ne.process_context.pid))
+                }
+                _ => None,
+            })
+            .collect();
+
+        for (auth_ts, auth_action, pid) in &auth_events {
+            if !matches!(auth_action, AuthAction::Failed | AuthAction::Login) {
+                continue;
+            }
+            for (net_ts, net_pid) in &outbound_internal {
+                if pid != net_pid {
+                    continue;
+                }
+                // Auth event within 60 seconds of network connection
+                let time_diff = if *net_ts > *auth_ts {
+                    *net_ts - *auth_ts
+                } else {
+                    *auth_ts - *net_ts
+                };
+                if time_diff <= Duration::seconds(60) {
+                    return Some(BehaviorPattern::LateralMovement);
+                }
+            }
+        }
+
         None
+    }
+
+    fn is_internal_ip(addr: &str) -> bool {
+        // Check if address is in private/internal IP ranges
+        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8
+        let parts: Vec<&str> = addr.split('.').collect();
+        if parts.len() != 4 {
+            return false;
+        }
+
+        let octets: Result<Vec<u8>, _> = parts.iter().map(|p| p.parse::<u8>()).collect();
+        let Ok(octets) = octets else {
+            return false;
+        };
+
+        // 10.0.0.0/8
+        if octets[0] == 10 {
+            return true;
+        }
+        // 172.16.0.0/12 (172.16.0.0 - 172.31.255.255)
+        if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+            return true;
+        }
+        // 192.168.0.0/16
+        if octets[0] == 192 && octets[1] == 168 {
+            return true;
+        }
+        // 127.0.0.0/8 (loopback)
+        if octets[0] == 127 {
+            return true;
+        }
+
+        false
     }
 
     fn check_data_exfiltration(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
@@ -571,6 +701,286 @@ mod tests {
     #[test]
     fn test_no_privilege_escalation_in_normal_events() {
         let ctx = make_ctx(8001, "normal_app");
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx,
+            None,
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    // --- Lateral Movement Tests ---
+
+    fn make_network_event(
+        direction: NetworkDirection,
+        pid: u32,
+        dst_addr: &str,
+        dst_port: u16,
+    ) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, "ssh", "/usr/bin/ssh", "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_network(
+            direction,
+            ctx,
+            "192.168.1.100",
+            dst_addr,
+            52000,
+            dst_port,
+            "tcp",
+        )
+    }
+
+    fn make_dns_event(pid: u32, query: &str, response: &str) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, "curl", "/usr/bin/curl", "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_dns(ctx, query, response, "A")
+    }
+
+    #[test]
+    fn test_ssh_to_internal_ip_detected() {
+        let event = make_network_event(
+            NetworkDirection::Outbound,
+            9001,
+            "192.168.1.50",
+            22, // SSH
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_rdp_to_internal_ip_detected() {
+        let event = make_network_event(
+            NetworkDirection::Outbound,
+            9002,
+            "10.0.0.50",
+            3389, // RDP
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_smb_to_internal_ip_detected() {
+        let event = make_network_event(
+            NetworkDirection::Outbound,
+            9003,
+            "172.16.5.10",
+            445, // SMB
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_winrm_to_internal_ip_detected() {
+        let event = make_network_event(
+            NetworkDirection::Outbound,
+            9004,
+            "10.10.0.20",
+            5985, // WinRM
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_outbound_to_public_ip_not_flagged() {
+        let event = make_network_event(
+            NetworkDirection::Outbound,
+            9005,
+            "8.8.8.8",
+            443,
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_inbound_to_internal_ip_not_flagged() {
+        let event = make_network_event(
+            NetworkDirection::Inbound,
+            9006,
+            "192.168.1.50",
+            22,
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Inbound connections are not lateral movement
+        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_outbound_to_internal_on_web_port_not_flagged() {
+        let event = make_network_event(
+            NetworkDirection::Outbound,
+            9007,
+            "192.168.1.50",
+            443, // HTTPS, not a lateral movement port
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_dns_recon_to_connection_detected() {
+        // DNS query for internal host, then network connection to that host
+        let dns_event = make_dns_event(10001, "192.168.1.50", "192.168.1.50");
+        let net_event = make_network_event(
+            NetworkDirection::Outbound,
+            10001,
+            "192.168.1.50",
+            22,
+        );
+        let events = vec![dns_event, net_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_auth_failed_with_internal_network_detected() {
+        let auth_event = make_auth_event(
+            AuthAction::Failed,
+            11001,
+            "admin",
+            "password",
+        );
+        let net_event = make_network_event(
+            NetworkDirection::Outbound,
+            11001,
+            "10.0.0.100",
+            445,
+        );
+        let events = vec![auth_event, net_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_auth_login_with_internal_network_detected() {
+        let auth_event = make_auth_event(
+            AuthAction::Login,
+            12001,
+            "admin",
+            "ssh",
+        );
+        let net_event = make_network_event(
+            NetworkDirection::Outbound,
+            12001,
+            "172.16.0.5",
+            3389,
+        );
+        let events = vec![auth_event, net_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_auth_with_different_pid_not_flagged() {
+        let auth_event = make_auth_event(
+            AuthAction::Failed,
+            13001,
+            "admin",
+            "password",
+        );
+        let net_event = make_network_event(
+            NetworkDirection::Outbound,
+            13002, // Different PID
+            "10.0.0.100",
+            445,
+        );
+        let events = vec![auth_event, net_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        // Different PIDs — not from the same process
+        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+    }
+
+    #[test]
+    fn test_internal_ip_detection() {
+        // 10.x.x.x
+        assert!(BehaviorTracker::is_internal_ip("10.0.0.1"));
+        assert!(BehaviorTracker::is_internal_ip("10.255.255.255"));
+        // 172.16-31.x.x
+        assert!(BehaviorTracker::is_internal_ip("172.16.0.1"));
+        assert!(BehaviorTracker::is_internal_ip("172.31.255.255"));
+        assert!(!BehaviorTracker::is_internal_ip("172.15.0.1"));
+        assert!(!BehaviorTracker::is_internal_ip("172.32.0.1"));
+        // 192.168.x.x
+        assert!(BehaviorTracker::is_internal_ip("192.168.0.1"));
+        assert!(BehaviorTracker::is_internal_ip("192.168.255.255"));
+        assert!(!BehaviorTracker::is_internal_ip("192.169.0.1"));
+        // 127.x.x.x
+        assert!(BehaviorTracker::is_internal_ip("127.0.0.1"));
+        assert!(BehaviorTracker::is_internal_ip("127.255.255.255"));
+        // Public IPs
+        assert!(!BehaviorTracker::is_internal_ip("8.8.8.8"));
+        assert!(!BehaviorTracker::is_internal_ip("1.1.1.1"));
+        assert!(!BehaviorTracker::is_internal_ip("203.0.113.50"));
+        // Invalid
+        assert!(!BehaviorTracker::is_internal_ip("not-an-ip"));
+        assert!(!BehaviorTracker::is_internal_ip("192.168.1"));
+    }
+
+    #[test]
+    fn test_no_lateral_movement_in_normal_events() {
+        let ctx = make_ctx(14001, "web_browser");
         let exec_event = RiggsEvent::new_process(
             ProcessAction::Exec,
             ctx,
