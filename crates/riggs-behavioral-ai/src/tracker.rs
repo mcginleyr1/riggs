@@ -411,10 +411,176 @@ impl BehaviorTracker {
         None
     }
 
-    fn check_crypto_mining(&self, _events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // TODO: detect connections to known mining pools
-        // combined with high CPU process events
-        None
+    fn check_crypto_mining(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Crypto mining detection (MITRE T1496 — Resource Hijacking)
+        // Uses multi-signal scoring to reduce false positives.
+        // No single signal is definitive — we look for combinations.
+
+        let mut score = 0;
+        let mut signals = Vec::new();
+
+        // === Signal 1: Outbound connections to mining pool ports ===
+        // Ports used by Stratum protocol and mining pool proxies
+        const MINING_PORTS: &[u16] = &[
+            3333, 443, 4433, 4444, 5555, 6666, 7777, 8333,
+            8888, 9999, 14444, 14445, 45700, 55555,
+        ];
+
+        let mining_port_connections: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Network(ne)
+                    if ne.direction == NetworkDirection::Outbound
+                        && MINING_PORTS.contains(&ne.dst_port) =>
+                {
+                    Some((ne.timestamp, &ne.dst_addr, ne.dst_port))
+                }
+                _ => None,
+            })
+            .collect();
+
+        if !mining_port_connections.is_empty() {
+            score += 1;
+            signals.push("mining_port".to_string());
+        }
+
+        // === Signal 2: DNS queries to mining pool domains ===
+        // Curated list of known mining pool domains
+        const MINING_DOMAINS: &[&str] = &[
+            "f2pool.com",
+            "nicehash.com",
+            "pool.ethermine.org",
+            "solo.ethermine.org",
+            "ethermine.org",
+            "2miners.com",
+            "herominers.com",
+            "miningpoolhub.com",
+            "coinhive.com",
+            "minexmr.com",
+            "coinpot.co",
+            "miningrigrentals.com",
+            "poolin.com",
+            "antpool.com",
+            "pool.btc.com",
+            "btc.com",
+            "slushpool.com",
+            "wafflepool.com",
+            "hashvault.pro",
+            "hashflare.io",
+            "genuinevesta.com",
+            "pool.bitcoin.com",
+            "navpool.com",
+        ];
+
+        let mining_domain_queries: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Dns(de) => {
+                    let query_lower = de.query.to_lowercase();
+                    let response_lower = de.response.to_lowercase();
+                    if MINING_DOMAINS
+                        .iter()
+                        .any(|domain| query_lower.contains(domain) || response_lower.contains(domain))
+                    {
+                        Some((de.timestamp, &de.query))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+
+        if !mining_domain_queries.is_empty() {
+            score += 1;
+            signals.push("mining_domain".to_string());
+        }
+
+        // === Signal 3: Known miner binary/process name ===
+        // Detect execution of known mining software by name or path
+        const MINER_NAMES: &[&str] = &[
+            "xmrig", "cpuminer", "minerd", "ethminer", "ethdcrminer",
+            "ccminer", "bfgminer", "cgminer", "lolminers", "t-rex",
+            "minergate", "cryptonight", "randomx",
+        ];
+
+        let miner_process_detected = events.iter().any(|e| {
+            if let RiggsEvent::Process(pe) = e {
+                let name_lower = pe.process_context.name.to_lowercase();
+                let path_lower = pe.process_context.path.to_lowercase();
+                let cmdline_lower = pe.process_context.cmdline.to_lowercase();
+
+                MINER_NAMES.iter().any(|miner| {
+                    name_lower.contains(miner)
+                        || path_lower.contains(miner)
+                        || cmdline_lower.contains(miner)
+                })
+            } else {
+                false
+            }
+        });
+
+        if miner_process_detected {
+            score += 1;
+            signals.push("miner_binary".to_string());
+        }
+
+        // === Signal 4: High CPU heuristic (fork/exec storm) ===
+        // Mining processes often spawn child processes rapidly to distribute work.
+        // We detect this via rapid exec events in the storyline.
+        const CHILD_EXEC_THRESHOLD: usize = 10;
+        const EXEC_WINDOW_SECS: i64 = 60;
+
+        let exec_timestamps: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Process(pe) if pe.action == ProcessAction::Exec => {
+                    Some(pe.timestamp)
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut fork_exec_storm = false;
+        if exec_timestamps.len() >= CHILD_EXEC_THRESHOLD {
+            for i in 0..exec_timestamps.len() {
+                let mut count = 0;
+                for j in i..exec_timestamps.len() {
+                    if (exec_timestamps[j] - exec_timestamps[i]).num_seconds() <= EXEC_WINDOW_SECS {
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if count >= CHILD_EXEC_THRESHOLD {
+                    fork_exec_storm = true;
+                    break;
+                }
+            }
+        }
+
+        if fork_exec_storm {
+            score += 1;
+            signals.push("fork_exec_storm".to_string());
+        }
+
+        // === Decision: multi-signal scoring ===
+        // 1 signal alone = Suspicious (conflict with legitimate uses)
+        // 2+ signals = Malicious (strong indicator of mining)
+        // Miner binary + mining port = Malicious (very strong indicator)
+        match score {
+            0 => None,
+            1 => {
+                // Single signal — suspicious but not conclusive
+                // Port-only without domain correlation is weak (443 is common)
+                if signals == vec!["mining_port"] {
+                    None // Too weak alone — port 443 is too noisy
+                } else {
+                    Some(BehaviorPattern::CryptoMining)
+                }
+            }
+            2.. => Some(BehaviorPattern::CryptoMining),
+        }
     }
 }
 
@@ -991,6 +1157,331 @@ mod tests {
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
+        assert!(patterns.is_empty());
+    }
+
+    // --- Crypto Mining Tests ---
+
+    fn make_mining_network_event(pid: u32, dst_addr: &str, dst_port: u16) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, "miner", "/tmp/xmrig", "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_network(
+            NetworkDirection::Outbound,
+            ctx,
+            "192.168.1.100",
+            dst_addr,
+            52000,
+            dst_port,
+            "tcp",
+        )
+    }
+
+    fn make_mining_dns_event(pid: u32, query: &str, response: &str) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, "miner", "/tmp/xmrig", "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_dns(ctx, query, response, "A")
+    }
+
+    fn make_mining_process_event(pid: u32, name: &str, path: &str, cmdline: &str) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, name, path, cmdline,
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_process(ProcessAction::Exec, ctx, None)
+    }
+
+    #[test]
+    fn test_mining_port_connection_detected() {
+        let event = make_mining_network_event(20001, "pool.example.com", 3333);
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Mining port alone is suspicious but not conclusive (443 is noisy)
+        // Port 3333 should trigger detection
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_port_4444_detected() {
+        let event = make_mining_network_event(20002, "f2pool.com", 4444);
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_port_14444_detected() {
+        let event = make_mining_network_event(20003, "ethermine.org", 14444);
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_port_45700_detected() {
+        let event = make_mining_network_event(20004, "nicehash.com", 45700);
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_port_443_alone_not_flagged() {
+        // Port 443 is common for HTTPS — too noisy alone
+        let event = make_mining_network_event(20005, "example.com", 443);
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Port 443 alone is intentionally not flagged (too many legitimate uses)
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_outbound_not_flagged_on_non_mining_port() {
+        let event = make_mining_network_event(20006, "example.com", 8080);
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_inbound_to_mining_port_not_flagged() {
+        let event = make_mining_network_event(20007, "192.168.1.50");
+        // Note: this helper uses Outbound direction, so we need to create manually
+        let ctx = ProcessContext::new(
+            20007, 0, "server", "/usr/bin/server", "",
+            "user",
+            StorylineId::new(),
+        );
+        let inbound_event = RiggsEvent::new_network(
+            NetworkDirection::Inbound,
+            ctx,
+            "192.168.1.50",
+            "192.168.1.50",
+            52000,
+            3333,
+            "tcp",
+        );
+        let events = vec![inbound_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Inbound connections are not mining
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_mining_domain_dns_detected() {
+        let event = make_mining_dns_event(21001, "pool.ethermine.org", "146.190.28.145");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_domain_nicehash_detected() {
+        let event = make_mining_dns_event(21002, "www.nicehash.com", "185.177.150.207");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_domain_in_response_detected() {
+        let event = make_mining_dns_event(21003, "random-lookup.com", "f2pool.com");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Domain in response also triggers detection
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_normal_dns_not_flagged() {
+        let event = make_mining_dns_event(21004, "www.google.com", "142.250.80.46");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_mining_binary_name_detected() {
+        let event = make_mining_process_event(22001, "xmrig", "/tmp/xmrig", "./xmrig -o pool.example.com");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_cpuminer_binary_detected() {
+        let event = make_mining_process_event(22002, "cpuminer", "/usr/local/bin/cpuminer", "./cpuminer -a sha256d");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_ethminer_binary_detected() {
+        let event = make_mining_process_event(22003, "ethminer", "/usr/bin/ethminer", "ethminer -G");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_name_in_cmdline_detected() {
+        let event = make_mining_process_event(22004, "bash", "/bin/bash", "./start_mining.sh");
+        // "xmrig" not in name/path, but mining script implies it
+        // Actually, let's test with xmrig in cmdline
+        let event = make_mining_process_event(22004, "bash", "/bin/bash", "./xmrig -o pool.example.com");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_normal_process_not_flagged() {
+        let event = make_mining_process_event(22005, "firefox", "/usr/bin/firefox", "firefox");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_mining_port_plus_domain_detected() {
+        // Two signals: mining port + mining domain = strong indicator
+        let net_event = make_mining_network_event(23001, "pool.ethermine.org", 3333);
+        let dns_event = make_mining_dns_event(23001, "pool.ethermine.org", "146.190.28.145");
+        let events = vec![net_event, dns_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_binary_plus_port_detected() {
+        // Two signals: miner binary + mining port = strong indicator
+        let proc_event = make_mining_process_event(23002, "xmrig", "/tmp/xmrig", "./xmrig");
+        let net_event = make_mining_network_event(23002, "pool.example.com", 3333);
+        let events = vec![proc_event, net_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_mining_binary_plus_domain_detected() {
+        // Two signals: miner binary + mining domain = strong indicator
+        let proc_event = make_mining_process_event(23003, "xmrig", "/tmp/xmrig", "./xmrig");
+        let dns_event = make_mining_dns_event(23003, "pool.ethermine.org", "146.190.28.145");
+        let events = vec![proc_event, dns_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_no_crypto_mining_in_normal_events() {
+        let ctx = make_ctx(24001, "web_browser");
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx,
+            None,
+        );
+        let events = vec![exec_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_all_events_normal_no_mining() {
+        let ctx = make_ctx(24002, "chrome");
+        let exec_event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx.clone(),
+            None,
+        );
+        let dns_event = make_mining_dns_event(24002, "www.google.com", "142.250.80.46");
+        let net_event = make_mining_network_event(24002, "142.250.80.46", 443);
+        let events = vec![exec_event, dns_event, net_event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[2].storyline_id());
+
+        // Normal browsing — no mining signals
         assert!(patterns.is_empty());
     }
 }
