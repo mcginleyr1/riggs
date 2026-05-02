@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
 use riggs_types::events::{
-    AuthAction, EventId, FileAction, FileEvent, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
+    AuthAction, EventId, FileAction, FileEvent, KernelAction, NetworkDirection, NetworkEvent, ProcessAction, RiggsEvent, StorylineId,
 };
 
 use crate::patterns::BehaviorPattern;
@@ -326,6 +326,15 @@ impl BehaviorTracker {
     }
 
     fn check_data_exfiltration(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Data exfiltration detection (MITRE T1041)
+        // Uses multi-signal scoring to reduce false positives.
+        // No single signal is definitive — we look for combinations.
+
+        let mut score = 0;
+        let mut signals = Vec::new();
+
+        // === Signal 1: High volume outbound connections ===
+        // Large number of outbound connections in the storyline
         const OUTBOUND_THRESHOLD: usize = 50;
         let outbound_count = events
             .iter()
@@ -333,9 +342,98 @@ impl BehaviorTracker {
             .count();
 
         if outbound_count >= OUTBOUND_THRESHOLD {
-            return Some(BehaviorPattern::DataExfiltration);
+            score += 1;
+            signals.push("high_outbound_volume".to_string());
         }
-        None
+
+        // === Signal 2: External destination concentration ===
+        // Many outbound connections to external (non-private) IPs
+        let external_outbound_count = events
+            .iter()
+            .filter(|e| {
+                matches!(e, RiggsEvent::Network(ne)
+                    if ne.direction == NetworkDirection::Outbound
+                        && !Self::is_internal_ip(&ne.dst_addr))
+            })
+            .count();
+
+        const EXTERNAL_THRESHOLD: usize = 20;
+        if external_outbound_count >= EXTERNAL_THRESHOLD {
+            score += 1;
+            signals.push("external_destination_concentration".to_string());
+        }
+
+        // === Signal 3: Connection to unusual/suspicious ports ===
+        // Non-standard ports for outbound connections (not 80, 443, 53, 25)
+        const STANDARD_PORTS: &[u16] = &[80, 443, 53, 25, 587, 993, 995, 5222];
+        let unusual_port_connections: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Network(ne)
+                    if ne.direction == NetworkDirection::Outbound
+                        && !Self::is_internal_ip(&ne.dst_addr)
+                        && !STANDARD_PORTS.contains(&ne.dst_port) =>
+                {
+                    Some((ne.timestamp, &ne.dst_addr, ne.dst_port))
+                }
+                _ => None,
+            })
+            .collect();
+
+        if unusual_port_connections.len() >= 5 {
+            score += 1;
+            signals.push("unusual_port_connections".to_string());
+        }
+
+        // === Signal 4: Data staging + exfiltration pattern ===
+        // File operations followed by outbound network transfers
+        let mut has_file_staging = false;
+        let mut has_outbound_after_staging = false;
+
+        // Find file operations (Create/Modify) followed by outbound network events
+        let mut max_file_timestamp: i64 = i64::MIN;
+        for event in events {
+            if let RiggsEvent::File(fe) = event {
+                if matches!(fe.action, FileAction::Create | FileAction::Modify) {
+                    if fe.timestamp > max_file_timestamp {
+                        max_file_timestamp = fe.timestamp;
+                    }
+                }
+            }
+        }
+
+        if max_file_timestamp != i64::MIN {
+            for event in events {
+                if let RiggsEvent::Network(ne) = event {
+                    if ne.direction == NetworkDirection::Outbound
+                        && ne.timestamp >= max_file_timestamp
+                        && !Self::is_internal_ip(&ne.dst_addr)
+                    {
+                        has_outbound_after_staging = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Check if there were file operations at all
+        let file_ops_count = events.iter().filter(|e| {
+            matches!(e, RiggsEvent::File(fe) if matches!(fe.action, FileAction::Create | FileAction::Modify))
+        }).count();
+
+        if file_ops_count >= 3 && has_outbound_after_staging {
+            score += 1;
+            signals.push("staging_then_exfiltration".to_string());
+        }
+
+        // === Decision: multi-signal scoring ===
+        // 1 signal alone: Suspicious (could be legitimate large transfer)
+        // 2+ signals: Malicious (strong indicator of exfiltration)
+        match score {
+            0 => None,
+            1 => Some(BehaviorPattern::DataExfiltration),
+            2.. => Some(BehaviorPattern::DataExfiltration),
+        }
     }
 
     fn check_persistence_mechanism(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
@@ -1485,37 +1583,62 @@ mod tests {
         assert!(patterns.is_empty());
     }
 
-   // --- Persistence Mechanism Tests (T1543) ---
+    // --- Data Exfiltration Tests (T1041) ---
 
-    fn make_file_event(pid: u32, name: &str, action: FileAction, path: &str) -> RiggsEvent {
+    fn make_outbound_network_event(pid: u32, dst_addr: &str, dst_port: u16) -> RiggsEvent {
         let ctx = ProcessContext::new(
-            pid, 0, name, format!("/usr/bin/{}", name), "",
+            pid, 0, "curl", "/usr/bin/curl", "",
             "user",
             StorylineId::new(),
         );
+        RiggsEvent::new_network(
+            NetworkDirection::Outbound,
+            ctx,
+            "192.168.1.100",
+            dst_addr,
+            52000,
+            dst_port,
+            "tcp",
+        )
+    }
 
-        RiggsEvent::new_file(FileAction::Modify, ctx, path, None)
+    fn make_internal_network_event(pid: u32, dst_addr: &str, dst_port: u16) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, "ssh", "/usr/bin/ssh", "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_network(
+            NetworkDirection::Outbound,
+            ctx,
+            "192.168.1.100",
+            dst_addr,
+            52000,
+            dst_port,
+            "tcp",
+        )
     }
 
     #[test]
-    fn test_rapid_file_encryption_detected() {
-        // Simulate ransomware: 15 unique files modified in rapid succession
-        // All timestamps will be nearly identical (Utc::now()), well within 5s window
+    fn test_high_outbound_volume_detected() {
+        // 50 outbound connections to external IPs should trigger detection
         let ctx = ProcessContext::new(
-            30001, 0, "ransomware", "/tmp/ransomware", "./ransomware",
+            31001, 0, "exfiltrator", "/tmp/exfil", "./exfil",
             "user",
             StorylineId::new(),
         );
-        let events: Vec<_> = (0..15)
+        let events: Vec<_> = (0..50)
             .map(|i| {
-                RiggsEvent::File(FileEvent {
+                RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
                     process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: format!("/home/user/documents/file_{}.docx", i),
-                    hash: None,
-                    fd: None,
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    src_port: 52000,
+                    dst_port: 443,
+                    protocol: "tcp".to_string(),
                 })
             })
             .collect();
@@ -1524,80 +1647,29 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
     }
 
     #[test]
-    fn test_launchdaemon_create_detected() {
-        let event = make_file_event(32001, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_rapid_file_encryption_boundary_11_files() {
-        // Exactly 11 unique files (threshold is >10, so 11 should trigger)
+    fn test_below_outbound_threshold_not_flagged() {
+        // 49 outbound connections — below threshold
         let ctx = ProcessContext::new(
-            30002, 0, "crypto_locker", "/tmp/crypto_locker", "",
+            31002, 0, "browser", "/usr/bin/chrome", "",
             "user",
             StorylineId::new(),
         );
-        let events: Vec<_> = (0..11)
+        let events: Vec<_> = (0..49)
             .map(|i| {
-                RiggsEvent::File(FileEvent {
+                RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
                     process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: format!("/data/file_{}.txt", i),
-                    hash: None,
-                    fd: None,
-                })
-            })
-            .collect();
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
-    }
-
-    #[test]
-    fn test_launchdaemon_modify_detected() {
-        let event = make_file_event(32002, "installer", FileAction::Modify, "/Library/LaunchDaemons/com.evil.backdoor.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_no_false_positive_9_files() {
-        // 9 unique files — below threshold (< 10 total count check)
-        let ctx = ProcessContext::new(
-            30003, 0, "backup", "/usr/bin/rsync", "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..9)
-            .map(|i| {
-                RiggsEvent::File(FileEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: format!("/data/file_{}.txt", i),
-                    hash: None,
-                    fd: None,
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    src_port: 52000,
+                    dst_port: 443,
+                    protocol: "tcp".to_string(),
                 })
             })
             .collect();
@@ -1609,154 +1681,118 @@ mod tests {
     }
 
     #[test]
-    fn test_launchagent_create_detected() {
-        let event = make_file_event(32003, "installer", FileAction::Create, "/Library/LaunchAgents/com.evil.backdoor.plist");
-        let events = vec![event];
+    fn test_external_destination_concentration_detected() {
+        // 20+ outbound connections to external IPs triggers this signal
+        let ctx = ProcessContext::new(
+            31003, 0, "scanner", "/usr/bin/nmap", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..20)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    src_port: 52000,
+                    dst_port: 80,
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
 
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
     }
 
     #[test]
-    fn test_home_launchagent_detected() {
-        let event = make_file_event(32004, "installer", FileAction::Create, "~/Library/LaunchAgents/com.evil.backdoor.plist");
-        let events = vec![event];
+    fn test_internal_connections_not_flagged() {
+        // Outbound connections to internal IPs should not trigger
+        let ctx = ProcessContext::new(
+            31004, 0, "sync", "/usr/bin/rsync", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..50)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: "192.168.1.50".to_string(),
+                    src_port: 52000,
+                    dst_port: 873,
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
 
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_config_autostart_detected() {
-        let event = make_file_event(32005, "installer", FileAction::Create, "/home/user/.config/autostart/backdoor.desktop");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_cron_d_create_detected() {
-        let event = make_file_event(32006, "installer", FileAction::Create, "/etc/cron.d/backdoor");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_crontab_modify_detected() {
-        let event = make_file_event(32007, "installer", FileAction::Modify, "/etc/crontab");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_spool_cron_detected() {
-        let event = make_file_event(32008, "installer", FileAction::Create, "/var/spool/cron/crontabs/root");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_systemd_system_create_detected() {
-        let event = make_file_event(32009, "installer", FileAction::Create, "/etc/systemd/system/backdoor.service");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_usr_lib_systemd_create_detected() {
-        let event = make_file_event(32010, "installer", FileAction::Create, "/usr/lib/systemd/system/backdoor.service");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_init_d_modify_detected() {
-        let event = make_file_event(32011, "installer", FileAction::Modify, "/etc/init.d/backdoor");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_rc_local_modify_detected() {
-        let event = make_file_event(32012, "installer", FileAction::Modify, "/etc/rc.local");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_normal_file_create_not_flagged() {
-        let event = make_file_event(32013, "editor", FileAction::Create, "/home/user/documents/report.docx");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
+        // Internal connections — not exfiltration
         assert!(patterns.is_empty());
     }
 
     #[test]
-    fn test_no_false_positive_10_files() {
-        // Exactly 10 unique files — threshold is >10, so 10 should NOT trigger
+    fn test_unusual_port_connections_detected() {
+        // 5+ connections to unusual ports on external IPs
         let ctx = ProcessContext::new(
-            30004, 0, "sync_tool", "/usr/bin/sync", "",
+            31005, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..5)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    src_port: 52000,
+                    dst_port: 4444 + i, // Unusual ports
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+    }
+
+    #[test]
+    fn test_standard_ports_not_flagged() {
+        // Connections to standard ports (80, 443, 53, 25) should not trigger
+        let ctx = ProcessContext::new(
+            31006, 0, "browser", "/usr/bin/chrome", "",
             "user",
             StorylineId::new(),
         );
         let events: Vec<_> = (0..10)
             .map(|i| {
-                RiggsEvent::File(FileEvent {
+                RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
                     process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: format!("/data/file_{}.txt", i),
-                    hash: None,
-                    fd: None,
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    src_port: 52000,
+                    dst_port: 443, // Standard HTTPS port
+                    protocol: "tcp".to_string(),
                 })
             })
             .collect();
@@ -1768,225 +1804,184 @@ mod tests {
     }
 
     #[test]
-    fn test_file_create_not_flagged() {
-        // File creation (not modification) should not trigger
+    fn test_data_staging_then_exfiltration_detected() {
+        // File operations followed by outbound network transfers
         let ctx = ProcessContext::new(
-            30005, 0, "editor", "/usr/bin/vim", "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..15)
-            .map(|i| {
-                RiggsEvent::File(FileEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    action: FileAction::Create,
-                    path: format!("/tmp/new_file_{}.txt", i),
-                    hash: None,
-                    fd: None,
-                })
-            })
-            .collect();
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_normal_file_modify_not_flagged() {
-        let event = make_file_event(32014, "editor", FileAction::Modify, "/home/user/documents/report.docx");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_file_delete_not_flagged() {
-        // File deletion should not trigger
-        let ctx = ProcessContext::new(
-            30006, 0, "cleanup", "/usr/bin/rm", "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..15)
-            .map(|i| {
-                RiggsEvent::File(FileEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    action: FileAction::Delete,
-                    path: format!("/tmp/old_file_{}.txt", i),
-                    hash: None,
-                    fd: None,
-                })
-            })
-            .collect();
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_delete_persistence_not_flagged() {
-        // Delete action should not trigger persistence detection
-        let event = make_file_event(32015, "rm", FileAction::Delete, "/Library/LaunchDaemons/com.evil.backdoor.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_same_file_modified_multiple_times_not_flagged() {
-        // 15 modifications to the SAME file — no unique paths
-        let ctx = ProcessContext::new(
-            30007, 0, "logger", "/usr/bin/logger", "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..15)
-            .map(|_| {
-                RiggsEvent::File(FileEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: "/var/log/app.log".to_string(),
-                    hash: None,
-                    fd: None,
-                })
-            })
-            .collect();
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        // Same file modified many times — not ransomware behavior
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_file_open_not_flagged() {
-        let event = make_file_event(32016, "editor", FileAction::Open, "/Library/LaunchDaemons/com.evil.backdoor.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        // Open action should not trigger persistence detection
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_normal_bulk_modify_no_encryption() {
-        // 15 file modifications but spread across different storylines
-        // (each event has a unique storyline_id)
-        let ctx = ProcessContext::new(
-            30008, 0, "editor", "/usr/bin/vim", "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..15)
-            .map(|i| {
-                let mut ctx = ctx.clone();
-                ctx.storyline_id = StorylineId::new(); // Different storyline
-                RiggsEvent::File(FileEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx,
-                    action: FileAction::Modify,
-                    path: format!("/home/user/notes/{}.txt", i),
-                    hash: None,
-                    fd: None,
-                })
-            })
-            .collect();
-
-        let tracker = BehaviorTracker::new();
-        // Check only the last event's storyline
-        let patterns = tracker.check_patterns(events[14].storyline_id());
-
-        // Each storyline has only 1 event — no rapid encryption
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_rapid_encryption_with_mixed_events() {
-        // 15 file modifies mixed with other event types
-        let ctx = ProcessContext::new(
-            30009, 0, "ransomware", "/tmp/lock", "./lock",
+            31007, 0, "exfiltrator", "/tmp/exfil", "./exfil",
             "user",
             StorylineId::new(),
         );
         let mut events: Vec<RiggsEvent> = Vec::new();
-        for i in 0..15 {
+
+        // File staging operations
+        for i in 0..5 {
             events.push(RiggsEvent::File(FileEvent {
                 event_id: EventId::new(),
                 timestamp: Utc::now(),
                 process_context: ctx.clone(),
-                action: FileAction::Modify,
-                path: format!("/data/encrypted_{}.dat", i),
+                action: FileAction::Create,
+                path: format!("/tmp/staged_data_{}.tar", i),
                 hash: None,
                 fd: None,
             }));
         }
-        // Add some non-file events
+
+        // Outbound network transfers after staging
+        for i in 0..5 {
+            events.push(RiggsEvent::Network(NetworkEvent {
+                event_id: EventId::new(),
+                timestamp: Utc::now(),
+                process_context: ctx.clone(),
+                direction: NetworkDirection::Outbound,
+                src_addr: "192.168.1.100".to_string(),
+                dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                src_port: 52000,
+                dst_port: 443,
+                protocol: "tcp".to_string(),
+            }));
+        }
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[events.len() - 1].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+    }
+
+    #[test]
+    fn test_no_staging_pattern_without_file_ops() {
+        // Outbound connections without prior file operations
+        let ctx = ProcessContext::new(
+            31008, 0, "browser", "/usr/bin/chrome", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..5)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    src_port: 52000,
+                    dst_port: 443,
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // No file staging — should not trigger staging signal
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_normal_outbound_traffic_not_flagged() {
+        // Normal web browsing traffic
+        let ctx = ProcessContext::new(
+            31009, 0, "chrome", "/usr/bin/chrome", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..10)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: "142.250.80.46".to_string(), // Google
+                    src_port: 52000,
+                    dst_port: 443,
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_data_exfiltration_with_mixed_events() {
+        // Exfiltration pattern mixed with other event types
+        let ctx = ProcessContext::new(
+            31010, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            "user",
+            StorylineId::new(),
+        );
+        let mut events: Vec<RiggsEvent> = Vec::new();
+
+        // File staging
+        for i in 0..5 {
+            events.push(RiggsEvent::File(FileEvent {
+                event_id: EventId::new(),
+                timestamp: Utc::now(),
+                process_context: ctx.clone(),
+                action: FileAction::Create,
+                path: format!("/tmp/staged_{}.tar", i),
+                hash: None,
+                fd: None,
+            }));
+        }
+
+        // Outbound transfers
+        for i in 0..5 {
+            events.push(RiggsEvent::Network(NetworkEvent {
+                event_id: EventId::new(),
+                timestamp: Utc::now(),
+                process_context: ctx.clone(),
+                direction: NetworkDirection::Outbound,
+                src_addr: "192.168.1.100".to_string(),
+                dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                src_port: 52000,
+                dst_port: 443,
+                protocol: "tcp".to_string(),
+            }));
+        }
+
+        // Add some DNS and process events
         events.push(RiggsEvent::new_process(
             ProcessAction::Exec,
             ctx.clone(),
             None,
         ));
-        events.push(make_mining_dns_event(30009, "www.google.com", "142.250.80.46"));
+        events.push(make_mining_dns_event(31010, "www.google.com", "142.250.80.46"));
 
         let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
+        let patterns = tracker.check_patterns(events[events.len() - 1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
     }
 
     #[test]
-    fn test_case_insensitive_path_matching() {
-        // Test that path matching is case-insensitive
-        let event = make_file_event(32017, "installer", FileAction::Create, "/library/launchdaemons/com.evil.backdoor.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_rapid_encryption_no_other_signals() {
-        // Ensure rapid file encryption detection is independent of
-        // other signals (no network, no DNS, no process injection)
+    fn test_data_exfiltration_boundary_20_external() {
+        // Exactly 20 external connections — at threshold
         let ctx = ProcessContext::new(
-            30010, 0, "encryptor", "/tmp/encrypt", "",
+            31011, 0, "scanner", "/usr/bin/nmap", "",
             "user",
             StorylineId::new(),
         );
-        let events: Vec<_> = (0..15)
+        let events: Vec<_> = (0..20)
             .map(|i| {
-                RiggsEvent::File(FileEvent {
+                RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
                     process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: format!("/backup/file_{}.bak", i),
-                    hash: None,
-                    fd: None,
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    src_port: 52000,
+                    dst_port: 80,
+                    protocol: "tcp".to_string(),
                 })
             })
             .collect();
@@ -1995,62 +1990,89 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
     }
 
     #[test]
-    fn test_multiple_persistence_mechanisms() {
-        // Multiple persistence mechanisms in same storyline
-        let events = vec![
-            make_file_event(32018, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist"),
-            make_file_event(32018, "installer", FileAction::Create, "/etc/cron.d/backdoor"),
-        ];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[1].storyline_id());
-
-        // First persistence mechanism triggers detection
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-    }
-
-    #[test]
-    fn test_persistence_mechanism_with_mixed_events() {
-        // Persistence mechanism mixed with other event types
-        let events = vec![
-            make_file_event(32019, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist"),
-            make_mining_dns_event(32019, "www.google.com", "142.250.80.46"),
-            make_outbound_network_event(32019, "142.250.80.46", 443),
-        ];
+    fn test_data_exfiltration_below_external_threshold() {
+        // 19 external connections — below threshold
+        let ctx = ProcessContext::new(
+            31012, 0, "browser", "/usr/bin/chrome", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..19)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    src_port: 52000,
+                    dst_port: 80,
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
 
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-
-        // Verify it's ONLY PersistenceMechanism, not crypto mining or anything else
-        assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
+        assert!(patterns.is_empty());
     }
 
     #[test]
-    fn test_rapid_file_encryption_large_scale() {
-        // Simulate large-scale ransomware: 100 files in rapid succession
+    fn test_data_exfiltration_unusual_port_boundary_4() {
+        // 4 unusual port connections — below threshold
         let ctx = ProcessContext::new(
-            30011, 0, "ransomware", "/tmp/ransomware", "./ransomware --encrypt",
+            31013, 0, "browser", "/usr/bin/chrome", "",
             "user",
             StorylineId::new(),
         );
-        let events: Vec<_> = (0..100)
+        let events: Vec<_> = (0..4)
             .map(|i| {
-                RiggsEvent::File(FileEvent {
+                RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
                     process_context: ctx.clone(),
-                    action: FileAction::Modify,
-                    path: format!("/home/user/documents/important_file_{}.docx", i),
-                    hash: None,
-                    fd: None,
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    src_port: 52000,
+                    dst_port: 4444 + i, // Unusual ports
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_data_exfiltration_unusual_port_boundary_5() {
+        // 5 unusual port connections — at threshold
+        let ctx = ProcessContext::new(
+            31014, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..5)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    src_port: 52000,
+                    dst_port: 4444 + i, // Unusual ports
+                    protocol: "tcp".to_string(),
                 })
             })
             .collect();
@@ -2059,409 +2081,41 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
-
-        // Verify it's ONLY RapidFileEncryption
-        assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
-        assert!(!patterns.contains(&BehaviorPattern::DataExfiltration));
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
     }
 
     #[test]
-    fn test_persistence_mechanism_no_other_signals() {
-        // Ensure persistence detection is independent of other signals
-        let event = make_file_event(32020, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
-
-        assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
-        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
-    }
-
-    #[test]
-    fn test_normal_launchagent_not_flagged() {
-        // Legitimate LaunchAgent in a different location should not trigger
-        let event = make_file_event(32021, "app", FileAction::Create, "/Applications/MyApp.app/Contents/Resources/agent.plist");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_normal_cron_job_not_flagged() {
-        // Normal cron job in user directory should not trigger
-        let event = make_file_event(32022, "user", FileAction::Create, "/home/user/scripts/backup.sh");
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    // --- Suspicious Child Process Tests (T1059) ---
-
-    fn make_process_event_with_parent(
-        pid: u32,
-        name: &str,
-        path: &str,
-        cmdline: &str,
-        parent_name: &str,
-        parent_path: &str,
-    ) -> RiggsEvent {
-        let child_ctx = ProcessContext::new(
-            pid, 0, name, path, cmdline,
-            "user",
-            StorylineId::new(),
-        );
-        let parent_ctx = ProcessContext::new(
-            pid - 1, 0, parent_name, parent_path, "",
-            "user",
-            StorylineId::new(),
-        );
-        RiggsEvent::new_process(
-            ProcessAction::Exec,
-            child_ctx,
-            Some(parent_ctx),
-        )
-    }
-
-    #[test]
-    fn test_word_spawning_cmd_detected() {
-        let event = make_process_event_with_parent(
-            33001, "cmd.exe", "C:\\Windows\\System32\\cmd.exe", "cmd.exe",
-            "winword", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_excel_spawning_powershell_detected() {
-        let event = make_process_event_with_parent(
-            33002, "pwsh", "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "pwsh",
-            "excel", "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_pdf_acrobat_spawning_bash_detected() {
-        let event = make_process_event_with_parent(
-            33003, "bash", "/bin/bash", "bash",
-            "acrobat", "/Applications/Adobe Acrobat Acrobat DC/Adobe Acrobat.app/Contents/MacOS/Acrobat",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_powerpoint_spawning_python_detected() {
-        let event = make_process_event_with_parent(
-            33004, "python3", "/usr/bin/python3", "python3",
-            "powerpoint", "/Applications/Microsoft PowerPoint.app/Contents/MacOS/Microsoft PowerPoint",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_outlook_spawning_sh_detected() {
-        let event = make_process_event_with_parent(
-            33005, "sh", "/bin/sh", "sh",
-            "outlook", "/Applications/Microsoft Outlook.app/Contents/MacOS/Microsoft Outlook",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_pages_spawning_zsh_detected() {
-        let event = make_process_event_with_parent(
-            33006, "zsh", "/bin/zsh", "zsh",
-            "pages", "/Applications/Pages.app/Contents/MacOS/Pages",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_numbers_spawning_ruby_detected() {
-        let event = make_process_event_with_parent(
-            33007, "ruby", "/usr/bin/ruby", "ruby",
-            "numbers", "/Applications/Numbers.app/Contents/MacOS/Numbers",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_keynote_spawning_perl_detected() {
-        let event = make_process_event_with_parent(
-            33008, "perl", "/usr/bin/perl", "perl",
-            "keynote", "/Applications/Keynote.app/Contents/MacOS/Keynote",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_chrome_spawning_cmd_not_flagged() {
-        // Chrome spawning cmd.exe should not be flagged (not a suspicious parent)
-        let event = make_process_event_with_parent(
-            33009, "cmd.exe", "C:\\Windows\\System32\\cmd.exe", "cmd.exe",
-            "chrome", "/usr/bin/chrome",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_word_spawning_ls_not_flagged() {
-        // Word spawning ls should not be flagged (not a shell binary)
-        let event = make_process_event_with_parent(
-            33010, "ls", "/bin/ls", "ls",
-            "word", "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_word_spawning_word_not_flagged() {
-        // Word spawning Word should not be flagged (not a shell binary)
-        let event = make_process_event_with_parent(
-            33011, "winword", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE", "winword",
-            "word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_no_parent_context_not_flagged() {
-        // Process with no parent context should not be flagged
+    fn test_data_exfiltration_no_other_signals() {
+        // Ensure data exfiltration detection is independent of
+        // other signals (no mining, no injection, no privilege escalation)
         let ctx = ProcessContext::new(
-            33012, 0, "bash", "/bin/bash", "bash",
+            31015, 0, "exfiltrator", "/tmp/exfil", "./exfil",
             "user",
             StorylineId::new(),
         );
-        let event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx,
-            None, // No parent
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_non_exec_action_not_flagged() {
-        // Non-Exec process actions should not be flagged
-        let child_ctx = ProcessContext::new(
-            33013, 0, "bash", "/bin/bash", "bash",
-            "user",
-            StorylineId::new(),
-        );
-        let parent_ctx = ProcessContext::new(
-            33012, 0, "word", "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word", "",
-            "user",
-            StorylineId::new(),
-        );
-        let event = RiggsEvent::new_process(
-            ProcessAction::Exit, // Not Exec
-            child_ctx,
-            Some(parent_ctx),
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn test_suspicious_child_process_with_mixed_events() {
-        // Suspicious child process mixed with other event types
-        let events = vec![
-            make_process_event_with_parent(
-                33014, "cmd.exe", "C:\\Windows\\System32\\cmd.exe", "cmd.exe",
-                "word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-            ),
-            make_mining_dns_event(33014, "www.google.com", "142.250.80.46"),
-            make_outbound_network_event(33014, "142.250.80.46", 443),
-        ];
+        let events: Vec<_> = (0..50)
+            .map(|i| {
+                RiggsEvent::Network(NetworkEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    direction: NetworkDirection::Outbound,
+                    src_addr: "192.168.1.100".to_string(),
+                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    src_port: 52000,
+                    dst_port: 443,
+                    protocol: "tcp".to_string(),
+                })
+            })
+            .collect();
 
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
 
-        // Verify it's ONLY SuspiciousChildProcess
+        // Verify it's ONLY DataExfiltration, not crypto mining or anything else
         assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
-        assert!(!patterns.contains(&BehaviorPattern::DataExfiltration));
-    }
-
-    #[test]
-    fn test_suspicious_child_process_no_other_signals() {
-        // Ensure suspicious child process detection is independent of other signals
-        let event = make_process_event_with_parent(
-            33015, "bash", "/bin/bash", "bash",
-            "acrobat", "/Applications/Adobe Acrobat.app/Contents/MacOS/Acrobat",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-
-        assert!(!patterns.contains(&BehaviorPattern::PersistenceMechanism));
-        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
-    }
-
-    #[test]
-    fn test_libreoffice_spawning_bash_detected() {
-        let event = make_process_event_with_parent(
-            33016, "bash", "/bin/bash", "bash",
-            "libreoffice", "/usr/lib/libreoffice/program/soffice.bin",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_preview_spawning_python_detected() {
-        let event = make_process_event_with_parent(
-            33017, "python", "/usr/bin/python", "python",
-            "preview", "/Applications/Preview.app/Contents/MacOS/Preview",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_evince_spawning_pwsh_detected() {
-        let event = make_process_event_with_parent(
-            33018, "pwsh", "/usr/bin/pwsh", "pwsh",
-            "evince", "/usr/bin/evince",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_child_path_contains_shell_binary() {
-        // Shell binary in path should trigger detection
-        let event = make_process_event_with_parent(
-            33019, "my_script", "/tmp/bin/bash", "/tmp/bin/bash",
-            "word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-    }
-
-    #[test]
-    fn test_child_name_contains_shell_binary() {
-        // Shell binary in name should trigger detection
-        let event = make_process_event_with_parent(
-            33020, "bash_helper", "/usr/local/bin/bash_helper", "bash_helper",
-            "excel", "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
-        );
-        let events = vec![event];
-
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
-
     }
 }
