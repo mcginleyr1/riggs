@@ -1485,14 +1485,16 @@ mod tests {
         assert!(patterns.is_empty());
     }
 
-    // --- Rapid File Encryption Tests (T1486 — Ransomware) ---
+   // --- Persistence Mechanism Tests (T1543) ---
 
-    fn make_file_modify_event(pid: u32, name: &str, path: &str) -> RiggsEvent {
+    fn make_file_event(pid: u32, name: &str, action: FileAction, path: &str) -> RiggsEvent {
         let ctx = ProcessContext::new(
             pid, 0, name, format!("/usr/bin/{}", name), "",
             "user",
             StorylineId::new(),
         );
+
+// HEAD (main): Crypto mining / Ransomware tests
         RiggsEvent::new_file(FileAction::Modify, ctx, path, None)
     }
 
@@ -1519,10 +1521,21 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+        RiggsEvent::new_file(action, ctx, path, None)
+    }
+
+    #[test]
+    fn test_launchdaemon_create_detected() {
+        let event = make_file_event(32001, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
+
+// HEAD (main): Crypto mining / Ransomware tests
         assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 
@@ -1548,10 +1561,21 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_launchdaemon_modify_detected() {
+        let event = make_file_event(32002, "installer", FileAction::Modify, "/Library/LaunchDaemons/com.evil.backdoor.plist");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
+
+// HEAD (main): Crypto mining / Ransomware tests
         assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 
@@ -1577,6 +1601,135 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_launchagent_create_detected() {
+        let event = make_file_event(32003, "installer", FileAction::Create, "/Library/LaunchAgents/com.evil.backdoor.plist");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_home_launchagent_detected() {
+        let event = make_file_event(32004, "installer", FileAction::Create, "~/Library/LaunchAgents/com.evil.backdoor.plist");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_config_autostart_detected() {
+        let event = make_file_event(32005, "installer", FileAction::Create, "/home/user/.config/autostart/backdoor.desktop");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_cron_d_create_detected() {
+        let event = make_file_event(32006, "installer", FileAction::Create, "/etc/cron.d/backdoor");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_crontab_modify_detected() {
+        let event = make_file_event(32007, "installer", FileAction::Modify, "/etc/crontab");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_spool_cron_detected() {
+        let event = make_file_event(32008, "installer", FileAction::Create, "/var/spool/cron/crontabs/root");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_systemd_system_create_detected() {
+        let event = make_file_event(32009, "installer", FileAction::Create, "/etc/systemd/system/backdoor.service");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_usr_lib_systemd_create_detected() {
+        let event = make_file_event(32010, "installer", FileAction::Create, "/usr/lib/systemd/system/backdoor.service");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_init_d_modify_detected() {
+        let event = make_file_event(32011, "installer", FileAction::Modify, "/etc/init.d/backdoor");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_rc_local_modify_detected() {
+        let event = make_file_event(32012, "installer", FileAction::Modify, "/etc/rc.local");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_normal_file_create_not_flagged() {
+        let event = make_file_event(32013, "editor", FileAction::Create, "/home/user/documents/report.docx");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
@@ -1584,6 +1737,8 @@ mod tests {
     }
 
     #[test]
+
+// HEAD (main): Crypto mining / Ransomware tests
     fn test_no_false_positive_10_files() {
         // Exactly 10 unique files — threshold is >10, so 10 should NOT trigger
         let ctx = ProcessContext::new(
@@ -1633,6 +1788,11 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+    fn test_normal_file_modify_not_flagged() {
+        let event = make_file_event(32014, "editor", FileAction::Modify, "/home/user/documents/report.docx");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
@@ -1641,6 +1801,8 @@ mod tests {
 
     #[test]
     fn test_file_delete_not_flagged() {
+
+// HEAD (main): Crypto mining / Ransomware tests
         // File deletion should not trigger
         let ctx = ProcessContext::new(
             30006, 0, "cleanup", "/usr/bin/rm", "",
@@ -1661,13 +1823,24 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+        let event = make_file_event(32015, "rm", FileAction::Delete, "/Library/LaunchDaemons/com.evil.backdoor.plist");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
+
+// HEAD (main): Crypto mining / Ransomware tests
+
+// Branch: Persistence mechanism / Suspicious child process tests
+        // Delete action should not trigger persistence detection
 
         assert!(patterns.is_empty());
     }
 
     #[test]
+
+// HEAD (main): Crypto mining / Ransomware tests
     fn test_same_file_modified_multiple_times_not_flagged() {
         // 15 modifications to the SAME file — no unique paths
         let ctx = ProcessContext::new(
@@ -1689,14 +1862,26 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+    fn test_file_open_not_flagged() {
+        let event = make_file_event(32016, "editor", FileAction::Open, "/Library/LaunchDaemons/com.evil.backdoor.plist");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
+// HEAD (main): Crypto mining / Ransomware tests
         // Same file modified many times — not ransomware behavior
+
+// Branch: Persistence mechanism / Suspicious child process tests
+        // Open action should not trigger persistence detection
+
         assert!(patterns.is_empty());
     }
 
     #[test]
+
+// HEAD (main): Crypto mining / Ransomware tests
     fn test_normal_bulk_modify_no_encryption() {
         // 15 file modifications but spread across different storylines
         // (each event has a unique storyline_id)
@@ -1757,10 +1942,18 @@ mod tests {
         ));
         events.push(make_mining_dns_event(30009, "www.google.com", "142.250.80.46"));
 
+// Branch: Persistence mechanism / Suspicious child process tests
+    fn test_case_insensitive_path_matching() {
+        // Test that path matching is case-insensitive
+        let event = make_file_event(32017, "installer", FileAction::Create, "/library/launchdaemons/com.evil.backdoor.plist");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
+
+// HEAD (main): Crypto mining / Ransomware tests
         assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 
@@ -1787,10 +1980,41 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_multiple_persistence_mechanisms() {
+        // Multiple persistence mechanisms in same storyline
+        let events = vec![
+            make_file_event(32018, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist"),
+            make_file_event(32018, "installer", FileAction::Create, "/etc/cron.d/backdoor"),
+        ];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[1].storyline_id());
+
+        // First persistence mechanism triggers detection
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_persistence_mechanism_with_mixed_events() {
+        // Persistence mechanism mixed with other event types
+        let events = vec![
+            make_file_event(32019, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist"),
+            make_mining_dns_event(32019, "www.google.com", "142.250.80.46"),
+            make_outbound_network_event(32019, "142.250.80.46", 443),
+        ];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
+
+// HEAD (main): Crypto mining / Ransomware tests
         assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
 
         // Verify it's ONLY RapidFileEncryption, not crypto mining or anything else
@@ -1819,10 +2043,415 @@ mod tests {
             })
             .collect();
 
+// Branch: Persistence mechanism / Suspicious child process tests
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+
+        // Verify it's ONLY PersistenceMechanism
+        assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
+        assert!(!patterns.contains(&BehaviorPattern::DataExfiltration));
+    }
+
+    #[test]
+    fn test_persistence_mechanism_no_other_signals() {
+        // Ensure persistence detection is independent of other signals
+        let event = make_file_event(32020, "installer", FileAction::Create, "/Library/LaunchDaemons/com.evil.backdoor.plist");
+        let events = vec![event];
+
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
+
+// HEAD (main): Crypto mining / Ransomware tests
         assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+
+// Branch: Persistence mechanism / Suspicious child process tests
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+
+        assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
+        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_normal_launchagent_not_flagged() {
+        // Legitimate LaunchAgent in a different location should not trigger
+        let event = make_file_event(32021, "app", FileAction::Create, "/Applications/MyApp.app/Contents/Resources/agent.plist");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_normal_cron_job_not_flagged() {
+        // Normal cron job in user directory should not trigger
+        let event = make_file_event(32022, "user", FileAction::Create, "/home/user/scripts/backup.sh");
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    // --- Suspicious Child Process Tests (T1059) ---
+
+    fn make_process_event_with_parent(
+        pid: u32,
+        name: &str,
+        path: &str,
+        cmdline: &str,
+        parent_name: &str,
+        parent_path: &str,
+    ) -> RiggsEvent {
+        let child_ctx = ProcessContext::new(
+            pid, 0, name, path, cmdline,
+            "user",
+            StorylineId::new(),
+        );
+        let parent_ctx = ProcessContext::new(
+            pid - 1, 0, parent_name, parent_path, "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_process(
+            ProcessAction::Exec,
+            child_ctx,
+            Some(parent_ctx),
+        )
+    }
+
+    #[test]
+    fn test_word_spawning_cmd_detected() {
+        let event = make_process_event_with_parent(
+            33001, "cmd.exe", "C:\\Windows\\System32\\cmd.exe", "cmd.exe",
+            "winword", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_excel_spawning_powershell_detected() {
+        let event = make_process_event_with_parent(
+            33002, "pwsh", "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "pwsh",
+            "excel", "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_pdf_acrobat_spawning_bash_detected() {
+        let event = make_process_event_with_parent(
+            33003, "bash", "/bin/bash", "bash",
+            "acrobat", "/Applications/Adobe Acrobat Acrobat DC/Adobe Acrobat.app/Contents/MacOS/Acrobat",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_powerpoint_spawning_python_detected() {
+        let event = make_process_event_with_parent(
+            33004, "python3", "/usr/bin/python3", "python3",
+            "powerpoint", "/Applications/Microsoft PowerPoint.app/Contents/MacOS/Microsoft PowerPoint",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_outlook_spawning_sh_detected() {
+        let event = make_process_event_with_parent(
+            33005, "sh", "/bin/sh", "sh",
+            "outlook", "/Applications/Microsoft Outlook.app/Contents/MacOS/Microsoft Outlook",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_pages_spawning_zsh_detected() {
+        let event = make_process_event_with_parent(
+            33006, "zsh", "/bin/zsh", "zsh",
+            "pages", "/Applications/Pages.app/Contents/MacOS/Pages",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_numbers_spawning_ruby_detected() {
+        let event = make_process_event_with_parent(
+            33007, "ruby", "/usr/bin/ruby", "ruby",
+            "numbers", "/Applications/Numbers.app/Contents/MacOS/Numbers",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_keynote_spawning_perl_detected() {
+        let event = make_process_event_with_parent(
+            33008, "perl", "/usr/bin/perl", "perl",
+            "keynote", "/Applications/Keynote.app/Contents/MacOS/Keynote",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_chrome_spawning_cmd_not_flagged() {
+        // Chrome spawning cmd.exe should not be flagged (not a suspicious parent)
+        let event = make_process_event_with_parent(
+            33009, "cmd.exe", "C:\\Windows\\System32\\cmd.exe", "cmd.exe",
+            "chrome", "/usr/bin/chrome",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_word_spawning_ls_not_flagged() {
+        // Word spawning ls should not be flagged (not a shell binary)
+        let event = make_process_event_with_parent(
+            33010, "ls", "/bin/ls", "ls",
+            "word", "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_word_spawning_word_not_flagged() {
+        // Word spawning Word should not be flagged (not a shell binary)
+        let event = make_process_event_with_parent(
+            33011, "winword", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE", "winword",
+            "word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_no_parent_context_not_flagged() {
+        // Process with no parent context should not be flagged
+        let ctx = ProcessContext::new(
+            33012, 0, "bash", "/bin/bash", "bash",
+            "user",
+            StorylineId::new(),
+        );
+        let event = RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx,
+            None, // No parent
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_non_exec_action_not_flagged() {
+        // Non-Exec process actions should not be flagged
+        let child_ctx = ProcessContext::new(
+            33013, 0, "bash", "/bin/bash", "bash",
+            "user",
+            StorylineId::new(),
+        );
+        let parent_ctx = ProcessContext::new(
+            33012, 0, "word", "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word", "",
+            "user",
+            StorylineId::new(),
+        );
+        let event = RiggsEvent::new_process(
+            ProcessAction::Exit, // Not Exec
+            child_ctx,
+            Some(parent_ctx),
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_suspicious_child_process_with_mixed_events() {
+        // Suspicious child process mixed with other event types
+        let events = vec![
+            make_process_event_with_parent(
+                33014, "cmd.exe", "C:\\Windows\\System32\\cmd.exe", "cmd.exe",
+                "word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+            ),
+            make_mining_dns_event(33014, "www.google.com", "142.250.80.46"),
+            make_outbound_network_event(33014, "142.250.80.46", 443),
+        ];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+
+        // Verify it's ONLY SuspiciousChildProcess
+        assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
+        assert!(!patterns.contains(&BehaviorPattern::DataExfiltration));
+    }
+
+    #[test]
+    fn test_suspicious_child_process_no_other_signals() {
+        // Ensure suspicious child process detection is independent of other signals
+        let event = make_process_event_with_parent(
+            33015, "bash", "/bin/bash", "bash",
+            "acrobat", "/Applications/Adobe Acrobat.app/Contents/MacOS/Acrobat",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+
+        assert!(!patterns.contains(&BehaviorPattern::PersistenceMechanism));
+        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+    }
+
+    #[test]
+    fn test_libreoffice_spawning_bash_detected() {
+        let event = make_process_event_with_parent(
+            33016, "bash", "/bin/bash", "bash",
+            "libreoffice", "/usr/lib/libreoffice/program/soffice.bin",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_preview_spawning_python_detected() {
+        let event = make_process_event_with_parent(
+            33017, "python", "/usr/bin/python", "python",
+            "preview", "/Applications/Preview.app/Contents/MacOS/Preview",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_evince_spawning_pwsh_detected() {
+        let event = make_process_event_with_parent(
+            33018, "pwsh", "/usr/bin/pwsh", "pwsh",
+            "evince", "/usr/bin/evince",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_child_path_contains_shell_binary() {
+        // Shell binary in path should trigger detection
+        let event = make_process_event_with_parent(
+            33019, "my_script", "/tmp/bin/bash", "/tmp/bin/bash",
+            "word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+    }
+
+    #[test]
+    fn test_child_name_contains_shell_binary() {
+        // Shell binary in name should trigger detection
+        let event = make_process_event_with_parent(
+            33020, "bash_helper", "/usr/local/bin/bash_helper", "bash_helper",
+            "excel", "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+        );
+        let events = vec![event];
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::SuspiciousChildProcess));
+
     }
 }
