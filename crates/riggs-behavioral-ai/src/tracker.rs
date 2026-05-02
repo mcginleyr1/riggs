@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use riggs_types::events::{
-    AuthAction, FileAction, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
+    AuthAction, EventId, FileAction, FileEvent, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
 };
 
 use crate::patterns::BehaviorPattern;
@@ -1483,5 +1483,346 @@ mod tests {
 
         // Normal browsing — no mining signals
         assert!(patterns.is_empty());
+    }
+
+    // --- Rapid File Encryption Tests (T1486 — Ransomware) ---
+
+    fn make_file_modify_event(pid: u32, name: &str, path: &str) -> RiggsEvent {
+        let ctx = ProcessContext::new(
+            pid, 0, name, format!("/usr/bin/{}", name), "",
+            "user",
+            StorylineId::new(),
+        );
+        RiggsEvent::new_file(FileAction::Modify, ctx, path, None)
+    }
+
+    #[test]
+    fn test_rapid_file_encryption_detected() {
+        // Simulate ransomware: 15 unique files modified in rapid succession
+        // All timestamps will be nearly identical (Utc::now()), well within 5s window
+        let ctx = ProcessContext::new(
+            30001, 0, "ransomware", "/tmp/ransomware", "./ransomware",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..15)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: format!("/home/user/documents/file_{}.docx", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+    }
+
+    #[test]
+    fn test_rapid_file_encryption_boundary_11_files() {
+        // Exactly 11 unique files (threshold is >10, so 11 should trigger)
+        let ctx = ProcessContext::new(
+            30002, 0, "crypto_locker", "/tmp/crypto_locker", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..11)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: format!("/data/file_{}.txt", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+    }
+
+    #[test]
+    fn test_no_false_positive_9_files() {
+        // 9 unique files — below threshold (< 10 total count check)
+        let ctx = ProcessContext::new(
+            30003, 0, "backup", "/usr/bin/rsync", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..9)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: format!("/data/file_{}.txt", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_no_false_positive_10_files() {
+        // Exactly 10 unique files — threshold is >10, so 10 should NOT trigger
+        let ctx = ProcessContext::new(
+            30004, 0, "sync_tool", "/usr/bin/sync", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..10)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: format!("/data/file_{}.txt", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_file_create_not_flagged() {
+        // File creation (not modification) should not trigger
+        let ctx = ProcessContext::new(
+            30005, 0, "editor", "/usr/bin/vim", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..15)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Create,
+                    path: format!("/tmp/new_file_{}.txt", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_file_delete_not_flagged() {
+        // File deletion should not trigger
+        let ctx = ProcessContext::new(
+            30006, 0, "cleanup", "/usr/bin/rm", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..15)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Delete,
+                    path: format!("/tmp/old_file_{}.txt", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_same_file_modified_multiple_times_not_flagged() {
+        // 15 modifications to the SAME file — no unique paths
+        let ctx = ProcessContext::new(
+            30007, 0, "logger", "/usr/bin/logger", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..15)
+            .map(|_| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: "/var/log/app.log".to_string(),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Same file modified many times — not ransomware behavior
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_normal_bulk_modify_no_encryption() {
+        // 15 file modifications but spread across different storylines
+        // (each event has a unique storyline_id)
+        let ctx = ProcessContext::new(
+            30008, 0, "editor", "/usr/bin/vim", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..15)
+            .map(|i| {
+                let mut ctx = ctx.clone();
+                ctx.storyline_id = StorylineId::new(); // Different storyline
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx,
+                    action: FileAction::Modify,
+                    path: format!("/home/user/notes/{}.txt", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        // Check only the last event's storyline
+        let patterns = tracker.check_patterns(events[14].storyline_id());
+
+        // Each storyline has only 1 event — no rapid encryption
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_rapid_encryption_with_mixed_events() {
+        // 15 file modifies mixed with other event types
+        let ctx = ProcessContext::new(
+            30009, 0, "ransomware", "/tmp/lock", "./lock",
+            "user",
+            StorylineId::new(),
+        );
+        let mut events: Vec<RiggsEvent> = Vec::new();
+        for i in 0..15 {
+            events.push(RiggsEvent::File(FileEvent {
+                event_id: EventId::new(),
+                timestamp: Utc::now(),
+                process_context: ctx.clone(),
+                action: FileAction::Modify,
+                path: format!("/data/encrypted_{}.dat", i),
+                hash: None,
+                fd: None,
+            }));
+        }
+        // Add some non-file events
+        events.push(RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx.clone(),
+            None,
+        ));
+        events.push(make_mining_dns_event(30009, "www.google.com", "142.250.80.46"));
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+    }
+
+    #[test]
+    fn test_rapid_encryption_no_other_signals() {
+        // Ensure rapid file encryption detection is independent of
+        // other signals (no network, no DNS, no process injection)
+        let ctx = ProcessContext::new(
+            30010, 0, "encryptor", "/tmp/encrypt", "",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..15)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: format!("/backup/file_{}.bak", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+
+        // Verify it's ONLY RapidFileEncryption, not crypto mining or anything else
+        assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
+    }
+
+    #[test]
+    fn test_rapid_file_encryption_large_scale() {
+        // Simulate large-scale ransomware: 100 files in rapid succession
+        let ctx = ProcessContext::new(
+            30011, 0, "ransomware", "/tmp/ransomware", "./ransomware --encrypt",
+            "user",
+            StorylineId::new(),
+        );
+        let events: Vec<_> = (0..100)
+            .map(|i| {
+                RiggsEvent::File(FileEvent {
+                    event_id: EventId::new(),
+                    timestamp: Utc::now(),
+                    process_context: ctx.clone(),
+                    action: FileAction::Modify,
+                    path: format!("/home/user/documents/important_file_{}.docx", i),
+                    hash: None,
+                    fd: None,
+                })
+            })
+            .collect();
+
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 }
