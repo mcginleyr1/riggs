@@ -1494,7 +1494,6 @@ mod tests {
             StorylineId::new(),
         );
 
-// HEAD (main): Crypto mining / Ransomware tests
         RiggsEvent::new_file(FileAction::Modify, ctx, path, None)
     }
 
@@ -1521,8 +1520,11 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
-        RiggsEvent::new_file(action, ctx, path, None)
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 
     #[test]
@@ -1534,9 +1536,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-
-// HEAD (main): Crypto mining / Ransomware tests
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
     }
 
     #[test]
@@ -1561,8 +1561,11 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 
     #[test]
@@ -1574,9 +1577,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-
-// HEAD (main): Crypto mining / Ransomware tests
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
     }
 
     #[test]
@@ -1601,8 +1602,10 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
     }
 
     #[test]
@@ -1737,8 +1740,6 @@ mod tests {
     }
 
     #[test]
-
-// HEAD (main): Crypto mining / Ransomware tests
     fn test_no_false_positive_10_files() {
         // Exactly 10 unique files — threshold is >10, so 10 should NOT trigger
         let ctx = ProcessContext::new(
@@ -1788,7 +1789,13 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
     fn test_normal_file_modify_not_flagged() {
         let event = make_file_event(32014, "editor", FileAction::Modify, "/home/user/documents/report.docx");
         let events = vec![event];
@@ -1801,8 +1808,6 @@ mod tests {
 
     #[test]
     fn test_file_delete_not_flagged() {
-
-// HEAD (main): Crypto mining / Ransomware tests
         // File deletion should not trigger
         let ctx = ProcessContext::new(
             30006, 0, "cleanup", "/usr/bin/rm", "",
@@ -1823,24 +1828,25 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_delete_persistence_not_flagged() {
+        // Delete action should not trigger persistence detection
         let event = make_file_event(32015, "rm", FileAction::Delete, "/Library/LaunchDaemons/com.evil.backdoor.plist");
         let events = vec![event];
 
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-// HEAD (main): Crypto mining / Ransomware tests
-
-// Branch: Persistence mechanism / Suspicious child process tests
-        // Delete action should not trigger persistence detection
-
         assert!(patterns.is_empty());
     }
 
     #[test]
-
-// HEAD (main): Crypto mining / Ransomware tests
     fn test_same_file_modified_multiple_times_not_flagged() {
         // 15 modifications to the SAME file — no unique paths
         let ctx = ProcessContext::new(
@@ -1862,7 +1868,14 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        // Same file modified many times — not ransomware behavior
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
     fn test_file_open_not_flagged() {
         let event = make_file_event(32016, "editor", FileAction::Open, "/Library/LaunchDaemons/com.evil.backdoor.plist");
         let events = vec![event];
@@ -1870,18 +1883,11 @@ mod tests {
         let tracker = BehaviorTracker::new();
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-// HEAD (main): Crypto mining / Ransomware tests
-        // Same file modified many times — not ransomware behavior
-
-// Branch: Persistence mechanism / Suspicious child process tests
         // Open action should not trigger persistence detection
-
         assert!(patterns.is_empty());
     }
 
     #[test]
-
-// HEAD (main): Crypto mining / Ransomware tests
     fn test_normal_bulk_modify_no_encryption() {
         // 15 file modifications but spread across different storylines
         // (each event has a unique storyline_id)
@@ -1942,7 +1948,14 @@ mod tests {
         ));
         events.push(make_mining_dns_event(30009, "www.google.com", "142.250.80.46"));
 
-// Branch: Persistence mechanism / Suspicious child process tests
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+    }
+
+    #[test]
     fn test_case_insensitive_path_matching() {
         // Test that path matching is case-insensitive
         let event = make_file_event(32017, "installer", FileAction::Create, "/library/launchdaemons/com.evil.backdoor.plist");
@@ -1952,9 +1965,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-
-// HEAD (main): Crypto mining / Ransomware tests
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
     }
 
     #[test]
@@ -1980,8 +1991,11 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
+
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
     }
 
     #[test]
@@ -2013,11 +2027,9 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
 
-// HEAD (main): Crypto mining / Ransomware tests
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
-
-        // Verify it's ONLY RapidFileEncryption, not crypto mining or anything else
+        // Verify it's ONLY PersistenceMechanism, not crypto mining or anything else
         assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
     }
 
@@ -2043,10 +2055,13 @@ mod tests {
             })
             .collect();
 
-// Branch: Persistence mechanism / Suspicious child process tests
-        assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+        let tracker = BehaviorTracker::new();
+        let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        // Verify it's ONLY PersistenceMechanism
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
+
+        // Verify it's ONLY RapidFileEncryption
         assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
         assert!(!patterns.contains(&BehaviorPattern::DataExfiltration));
     }
@@ -2061,11 +2076,6 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-
-// HEAD (main): Crypto mining / Ransomware tests
-        assert!(matches!(patterns[0], BehaviorPattern::RapidFileEncryption));
-
-// Branch: Persistence mechanism / Suspicious child process tests
         assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
 
         assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
