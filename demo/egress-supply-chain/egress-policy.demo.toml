@@ -1,0 +1,35 @@
+# Riggs egress demo policy — supply-chain beacon defense.
+#
+# Load it for the demo by copying to where the daemon looks:
+#   cp demo/egress-supply-chain/egress-policy.demo.toml config/egress-policy.toml
+# (or /etc/riggs/egress-policy.toml). The daemon hot-reloads on change.
+
+enabled = true
+mode    = "enforce"          # the demo flips this to "monitor" to contrast
+
+# Global allowlist — applies to processes WITHOUT a specific rule below.
+# Note the C&C stand-in is deliberately NOT here.
+allow_domains = [
+  "github.com",
+  "*.githubusercontent.com",
+]
+allow_cidrs = []
+allow_ports = []            # empty = any port
+
+# Baseline — the host can always resolve names and keep time, so a blocked
+# beacon fails at CONNECT (clean), not at DNS.
+[baseline]
+dns = true
+dhcp_ntp = true
+loopback = true
+
+# The supply-chain defense: node/npm are CONFINED to the registry. A poisoned
+# pre/post-install script runs as `node`, so its beacon to any other host is
+# denied — even if that host is later added to the GLOBAL allowlist above.
+[[process_rules]]
+process = "npm"
+allow_domains = ["registry.npmjs.org", "*.npmjs.org"]
+
+[[process_rules]]
+process = "node"
+allow_domains = ["registry.npmjs.org", "*.npmjs.org"]

@@ -12,3 +12,7 @@
 # Swift Package Manager / Xcode build artifacts (riggs-filter extension)
 .build/
 *.pcm
+
+# Python bytecode
+__pycache__/
+*.pyc

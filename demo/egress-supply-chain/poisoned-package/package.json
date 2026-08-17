@@ -1,0 +1,9 @@
+{
+  "name": "riggs-demo-poisoned-dep",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Benign stand-in for a supply-chain-poisoned dependency. Its postinstall fetches from the registry (allowed) then tries to beacon a FAKE credential to a C&C stand-in (must be blocked in enforce mode).",
+  "scripts": {
+    "postinstall": "node beacon.js"
+  }
+}
