@@ -19,6 +19,13 @@ impl LinuxSensor {
     }
 
     fn send_signal(&self, pid: u32, signal: libc::c_int) -> Result<(), RiggsError> {
+        // Never signal pid 0 (the caller's entire process group -- would kill the
+        // daemon itself) or pid 1 (init). Response actions must carry a real target.
+        if pid <= 1 {
+            return Err(RiggsError::Platform(format!(
+                "refusing to signal pid {pid}: pid 0 signals the daemon's own process group, pid 1 is init"
+            )));
+        }
         let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
         if ret == 0 {
             Ok(())

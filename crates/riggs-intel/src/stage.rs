@@ -46,11 +46,16 @@ impl ThreatIntelStage {
         event_id: EventId,
         hash: &str,
     ) -> Result<StageVerdict, RiggsError> {
-        if let Some(cached) = self.cache.get(hash) {
-            return Ok(cached_to_stage_verdict(event_id, &cached));
-        }
-
         let bloom_hit = self.check_bloom(hash.as_bytes());
+
+        if let Some(cached) = self.cache.get(hash) {
+            // A cached Clean is only trustworthy while the hash is still absent
+            // from the feed. Once a feed refresh adds it to the bloom, bypass the
+            // stale Clean and re-evaluate; other cached verdicts still stand.
+            if !(bloom_hit && cached.threat_level == ThreatLevel::Clean) {
+                return Ok(cached_to_stage_verdict(event_id, &cached));
+            }
+        }
 
         if !bloom_hit {
             return Ok(StageVerdict::Clean);

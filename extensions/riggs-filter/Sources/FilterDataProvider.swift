@@ -1,3 +1,4 @@
+import Darwin
 import NetworkExtension
 import os.log
 
@@ -49,50 +50,62 @@ class FilterDataProvider: NEFilterDataProvider {
             return .allow()
         }
 
-        // Extract remote hostname (SNI for TLS, or resolved name)
-        guard let hostname = socketFlow.remoteHostname ?? remoteHostname(from: socketFlow) else {
-            return .allow()
-        }
-
-        // Fast path: skip non-watched domains
-        guard isWatchedDomain(hostname) else {
-            return .allow()
-        }
-
-        // Extract source PID from the audit token
+        let hostname = socketFlow.remoteHostname ?? remoteHostname(from: socketFlow)
         let pid = extractPid(from: socketFlow)
-        guard pid > 0 else {
-            logger.warning("could not extract PID from flow to \(hostname)")
-            return .allow()
-        }
-
-        // Query the daemon
-        guard let connection = daemonConnection else {
-            logger.warning("no daemon connection, fail-open for PID \(pid) -> \(hostname)")
-            return .allow()
-        }
-
         let remoteIP = socketFlow.remoteEndpoint.flatMap { endpoint -> String? in
             (endpoint as? NWHostEndpoint)?.hostname
         } ?? ""
-
         let remotePort = socketFlow.remoteEndpoint.flatMap { endpoint -> UInt16? in
             (endpoint as? NWHostEndpoint).flatMap { UInt16($0.port) }
         } ?? 0
 
+        // No daemon -> fail open (never break the user's network on our account).
+        guard let connection = daemonConnection else {
+            return .allow()
+        }
+
+        // 1) Egress allowlist (default-deny) — evaluated for EVERY flow, keyed on
+        //    the originating process. This is what catches an install script's
+        //    beacon to C&C even when the destination looks innocuous.
+        if pid > 0 {
+            let processPath = processPath(for: pid)
+            let egress = connection.checkEgress(
+                pid: pid,
+                processPath: processPath,
+                hostname: hostname ?? "",
+                remoteIP: remoteIP,
+                remotePort: remotePort
+            )
+            if !egress.allow {
+                logger.warning(
+                    "EGRESS BLOCK [\(egress.mode)]: pid \(pid) (\(processPath)) -> \(hostname ?? remoteIP): \(egress.reason ?? "policy")"
+                )
+                return .drop()
+            }
+        }
+
+        // 2) DLP (content) — only for watched domains, once egress permits the flow.
+        guard let hostname = hostname, isWatchedDomain(hostname), pid > 0 else {
+            return .allow()
+        }
         let verdict = connection.checkFlow(
             pid: pid,
             hostname: hostname,
             remoteIP: remoteIP,
             remotePort: remotePort
         )
-
         if verdict.allow {
             return .allow()
-        } else {
-            logger.warning("DLP BLOCK: PID \(pid) -> \(hostname): \(verdict.reason ?? "policy")")
-            return .drop()
         }
+        logger.warning("DLP BLOCK: PID \(pid) -> \(hostname): \(verdict.reason ?? "policy")")
+        return .drop()
+    }
+
+    /// Resolve a PID's executable path via libproc (best-effort; "" on failure).
+    private func processPath(for pid: UInt32) -> String {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let ret = proc_pidpath(Int32(pid), &buffer, UInt32(buffer.count))
+        return ret > 0 ? String(cString: buffer) : ""
     }
 
     // MARK: - Domain matching

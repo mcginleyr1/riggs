@@ -66,11 +66,155 @@ impl riggs_comms::DlpQuery for DlpAdapter {
     }
 }
 
+struct EgressAdapter {
+    engine: Arc<riggs_egress::EgressEngine>,
+    policy_path: PathBuf,
+    config: std::sync::Mutex<riggs_types::config::EgressConfig>,
+}
+
+impl EgressAdapter {
+    /// Mutate the egress config, persist it to the policy file, and hot-reload
+    /// the live policy so a local `riggs egress` edit takes effect immediately.
+    fn mutate(
+        &self,
+        f: impl FnOnce(&mut riggs_types::config::EgressConfig),
+    ) -> Result<(), String> {
+        let mut guard = self
+            .config
+            .lock()
+            .map_err(|_| "egress config lock poisoned".to_string())?;
+        f(&mut guard);
+
+        let toml_str =
+            toml::to_string_pretty(&*guard).map_err(|e| format!("serialize egress policy: {e}"))?;
+        if let Some(parent) = self.policy_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&self.policy_path, toml_str)
+            .map_err(|e| format!("write {}: {e}", self.policy_path.display()))?;
+
+        self.engine
+            .replace_policy(riggs_egress::EgressPolicy::from_config(&guard));
+        Ok(())
+    }
+}
+
+impl riggs_comms::EgressQuery for EgressAdapter {
+    fn check(
+        &self,
+        pid: u32,
+        process_path: &str,
+        hostname: &str,
+        remote_ip: &str,
+        remote_port: u16,
+    ) -> riggs_comms::EgressFlowVerdict {
+        let process = egress_process_name(process_path);
+        let host = (!hostname.is_empty()).then_some(hostname);
+        let ip = remote_ip.parse::<std::net::IpAddr>().ok();
+
+        let decision = self
+            .engine
+            .evaluate(process.as_deref(), host, ip, remote_port);
+
+        if decision.would_block {
+            warn!(
+                pid,
+                process = %process.as_deref().unwrap_or("?"),
+                dest = %hostname,
+                mode = %decision.mode.as_str(),
+                dropped = !decision.allow,
+                reason = %decision.reason,
+                "egress would-block"
+            );
+        }
+
+        riggs_comms::EgressFlowVerdict {
+            allow: decision.allow,
+            would_block: decision.would_block,
+            reason: Some(decision.reason),
+            mode: decision.mode.as_str().to_string(),
+        }
+    }
+
+    fn status(&self) -> riggs_comms::EgressQueryStatus {
+        let (mode, allow_domains, process_rules) = self.engine.status();
+        riggs_comms::EgressQueryStatus {
+            mode: mode.as_str().to_string(),
+            allow_domains,
+            process_rules,
+        }
+    }
+
+    fn allow_domain(&self, domain: &str) -> Result<(), String> {
+        let domain = domain.trim().to_string();
+        if domain.is_empty() {
+            return Err("empty domain".into());
+        }
+        self.mutate(|c| {
+            if !c.allow_domains.iter().any(|d| d == &domain) {
+                c.allow_domains.push(domain.clone());
+            }
+        })
+    }
+
+    fn deny_domain(&self, domain: &str) -> Result<(), String> {
+        let domain = domain.trim().to_string();
+        self.mutate(|c| c.allow_domains.retain(|d| d != &domain))
+    }
+
+    fn set_mode(&self, mode: &str) -> Result<(), String> {
+        let m = mode.trim().to_ascii_lowercase();
+        let enabled = match m.as_str() {
+            "off" => false,
+            "monitor" | "enforce" => true,
+            _ => return Err(format!("invalid mode '{mode}' (use off | monitor | enforce)")),
+        };
+        self.mutate(move |c| {
+            c.enabled = enabled;
+            c.mode = m;
+        })
+    }
+}
+
+fn egress_process_name(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    Some(
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path)
+            .to_string(),
+    )
+}
+
 const CONFIG_PATHS: &[&str] = &[
     "/etc/riggs/riggs.toml",
     "config/riggs.toml",
 ];
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// Resolve when the daemon should shut down: SIGINT (Ctrl-C) or SIGTERM.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 
 pub struct RiggsDaemon {
     config: RiggsConfig,
@@ -134,11 +278,17 @@ impl RiggsDaemon {
         }
 
         // -- Detection pipeline --
-        let mut pipeline = DetectionPipeline::new(verdict_tx);
+        let mut pipeline = DetectionPipeline::new(verdict_tx).with_merge_thresholds(
+            self.config.engine.merge_malicious_threshold,
+            self.config.engine.merge_suspicious_threshold,
+        );
 
         if self.config.engine.static_ai_enabled {
-            let model_path = PathBuf::from("/var/lib/riggs/models/static.onnx");
-            pipeline.add_stage(Box::new(StaticAiStage::new(model_path)));
+            let model_path = PathBuf::from(&self.config.engine.static_ai_model_path);
+            let max_scan_bytes = self.config.engine.static_ai_max_scan_mib * 1024 * 1024;
+            pipeline.add_stage(Box::new(
+                StaticAiStage::new(model_path).with_max_scan_bytes(max_scan_bytes),
+            ));
         }
 
         let ioc_handle: Arc<StdRwLock<Option<IocMatcher>>> =
@@ -151,12 +301,19 @@ impl RiggsDaemon {
         }
 
         if self.config.engine.behavioral_ai_enabled {
-            pipeline.add_stage(Box::new(BehavioralAiStage::new()));
+            pipeline.add_stage(Box::new(BehavioralAiStage::configured(
+                self.config.engine.behavioral_max_events_per_storyline,
+                self.config.engine.behavioral_max_storylines,
+                &self.config.detection,
+            )));
         }
 
         // -- Threat intelligence stage --
         let bloom: Arc<StdRwLock<BloomFilter>> =
-            Arc::new(StdRwLock::new(BloomFilter::new(1_000_000, 0.001)));
+            Arc::new(StdRwLock::new(BloomFilter::new(
+                self.config.intel.bloom_capacity,
+                self.config.intel.bloom_false_positive_rate,
+            )));
 
         if self.config.intel.enabled {
             let cache_path = PathBuf::from(&self.config.intel.cache_path);
@@ -244,10 +401,14 @@ impl RiggsDaemon {
                 }));
             }
 
-            // Spawn correlator reaper to evict stale file access entries
+            // Supervised correlator reaper to evict stale file access entries
+            // (restarted by the supervisor if it ever exits).
             let reaper_correlator = Arc::clone(&dlp_correlator);
-            tokio::spawn(async move {
-                reaper_correlator.reaper_loop().await;
+            self.supervisor.spawn("dlp-reaper", move || {
+                let correlator = Arc::clone(&reaper_correlator);
+                Box::pin(async move {
+                    correlator.reaper_loop().await;
+                })
             });
 
             // Hot-reload: watch the policy file for changes
@@ -273,6 +434,45 @@ impl RiggsDaemon {
             );
         }
 
+        // -- Egress allowlist (default-deny, opt-in; local-first) --
+        {
+            let egress_config = self.config.egress.clone();
+            let engine = Arc::new(riggs_egress::EgressEngine::new(
+                riggs_egress::EgressPolicy::from_config(&egress_config),
+            ));
+            let egress_policy_path = riggs_egress::reload::find_policy_file()
+                .unwrap_or_else(riggs_egress::reload::default_policy_path);
+            if let Ok(mut guard) = daemon_state.egress.write() {
+                *guard = Some(Arc::new(EgressAdapter {
+                    engine: Arc::clone(&engine),
+                    policy_path: egress_policy_path,
+                    config: std::sync::Mutex::new(egress_config.clone()),
+                }));
+            }
+            info!(
+                enabled = egress_config.enabled,
+                mode = %egress_config.mode,
+                domains = egress_config.allow_domains.len(),
+                process_rules = egress_config.process_rules.len(),
+                "egress allowlist initialized"
+            );
+
+            // Hot-reload the egress policy file if present.
+            if let Some(path) = riggs_egress::reload::find_policy_file() {
+                let watch_engine = Arc::clone(&engine);
+                self.supervisor.spawn("egress-policy-watcher", move || {
+                    let engine = Arc::clone(&watch_engine);
+                    let path = path.clone();
+                    Box::pin(async move {
+                        if let Err(e) = riggs_egress::reload::watch_policy(path, engine).await {
+                            tracing::error!(error = %e, "egress policy watcher error");
+                        }
+                    })
+                });
+                info!("egress policy hot-reload watcher started");
+            }
+        }
+
         let pipeline = Arc::new(pipeline);
 
         // -- Feed manager & dispatcher --
@@ -280,7 +480,12 @@ impl RiggsDaemon {
             let (feed_tx, feed_rx) = mpsc::channel::<FeedUpdate>(256);
 
             let feed_manager =
-                Arc::new(FeedManager::new(self.config.intel.feeds.clone(), feed_tx));
+                Arc::new(FeedManager::new(
+                    self.config.intel.feeds.clone(),
+                    feed_tx,
+                    (self.config.intel.bloom_capacity / 100).max(1),
+                    self.config.intel.bloom_false_positive_rate,
+                ));
 
             let fm = Arc::clone(&feed_manager);
             self.supervisor.spawn("feed-manager", move || {
@@ -386,7 +591,13 @@ impl RiggsDaemon {
         }
 
         // -- Storyline correlator --
-        let mut correlator = StorylineCorrelator::new();
+        let mut correlator = StorylineCorrelator::new()
+            .with_limits(
+                self.config.engine.storyline_max_events,
+                self.config.engine.storyline_idle_secs,
+                self.config.engine.storyline_prune_interval_secs,
+            )
+            .with_threat_threshold(self.config.detection.threat_score_threshold);
 
         // -- Sensor + collector --
         #[cfg(target_os = "macos")]
@@ -407,20 +618,44 @@ impl RiggsDaemon {
                 ))
             })?;
         }
-        let store = Arc::new(RiggsStore::new(&store_path)?);
+        let store = Arc::new(RiggsStore::with_compression(
+            &store_path,
+            self.config.store.compression_enabled,
+        )?);
         if let Ok(mut guard) = daemon_state.store.write() {
             *guard = Some(Arc::new(StoreAdapter(Arc::clone(&store))));
         }
 
+        // -- Retention (prunes events/verdicts/response_log past retention_days) --
+        let retention_days = self.config.store.retention_days;
+        let retention_sweep = Duration::from_secs(self.config.engine.retention_sweep_secs.max(1));
+        let retention_store = Arc::clone(&store);
+        self.supervisor.spawn("retention", move || {
+            let store = Arc::clone(&retention_store);
+            Box::pin(async move {
+                let policy = riggs_store::RetentionPolicy::new(retention_days);
+                let mut interval = tokio::time::interval(retention_sweep);
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = policy.run_cleanup(&store).await {
+                        tracing::error!(error = %e, "retention cleanup failed");
+                    }
+                }
+            })
+        });
+
         // -- Response executor --
         let policy = riggs_response::ResponsePolicy::default();
         let vault = riggs_response::QuarantineVault::new(PathBuf::from(
-            "/var/lib/riggs/quarantine",
+            &self.config.response.quarantine_path,
         ));
         #[cfg(target_os = "macos")]
         let response_sensor_pc = Box::new(riggs_platform_macos::MacOsSensor::new());
         #[cfg(target_os = "macos")]
-        let response_sensor_nc = Box::new(riggs_platform_macos::MacOsSensor::new());
+        let response_sensor_nc = Box::new(
+            riggs_platform_macos::MacOsSensor::new()
+                .with_pf_conf_path(self.config.response.pf_conf_path.clone()),
+        );
         #[cfg(not(target_os = "macos"))]
         let response_sensor_pc = Box::new(riggs_platform_linux::LinuxSensor::new());
         #[cfg(not(target_os = "macos"))]
@@ -436,13 +671,14 @@ impl RiggsDaemon {
         let threats_detected = Arc::clone(&daemon_state.threats_detected);
 
         // -- Health check loop --
+        let health_interval = Duration::from_secs(self.config.engine.health_check_secs.max(1));
         let health_events = Arc::clone(&events_processed);
         let health_threats = Arc::clone(&threats_detected);
         self.supervisor.spawn("health-check", move || {
             let events = Arc::clone(&health_events);
             let threats = Arc::clone(&health_threats);
             Box::pin(async move {
-                let mut interval = tokio::time::interval(HEALTH_CHECK_INTERVAL);
+                let mut interval = tokio::time::interval(health_interval);
                 loop {
                     interval.tick().await;
                     let ev = events.load(Ordering::Relaxed);
@@ -459,11 +695,14 @@ impl RiggsDaemon {
         // -- IPC server (wired to shared daemon state) --
         let ipc_state = Arc::clone(&daemon_state);
         let ipc_socket_path = self.config.comms.socket_path.clone();
+        let ipc_max_msg = self.config.comms.ipc_max_message_bytes;
+        let ipc_max_conn = self.config.comms.ipc_max_connections;
         self.supervisor.spawn("ipc-server", move || {
             let state = Arc::clone(&ipc_state);
             let socket = ipc_socket_path.clone();
             Box::pin(async move {
-                let server = riggs_comms::IpcServer::with_state(PathBuf::from(&socket), state);
+                let server = riggs_comms::IpcServer::with_state(PathBuf::from(&socket), state)
+                    .with_limits(ipc_max_msg, ipc_max_conn);
                 if let Err(e) = server.start().await {
                     tracing::error!(error = %e, "IPC server error");
                 }
@@ -497,6 +736,8 @@ impl RiggsDaemon {
                         endpoint,
                         enrollment_token: token,
                         heartbeat_interval_secs: self.config.comms.heartbeat_interval_secs,
+                        tls: self.config.comms.tls.clone(),
+                        require_tls: self.config.comms.require_tls,
                     };
                     let mut cc = riggs_cloud::ConsoleClient::new(cloud_config.clone());
                     match cc.connect().await {
@@ -522,18 +763,48 @@ impl RiggsDaemon {
                                         })
                                     });
 
-                                    // Threat reporter
+                                    // Threat reporter (supervised). The channel
+                                    // receiver can only be consumed once, so we
+                                    // hand it over a take-once slot: the first
+                                    // run owns it; a restart after a panic finds
+                                    // the slot empty and parks (a moved receiver
+                                    // can't be resurrected) — but the task is now
+                                    // health-tracked and logged, not silent.
                                     let rep_client = cc.clone();
                                     let rep_agent_id = agent_id.clone();
-                                    tokio::spawn(async move {
-                                        riggs_cloud::run_threat_reporter(rep_client, rep_agent_id, verdict_rx).await;
+                                    let rep_rx =
+                                        Arc::new(tokio::sync::Mutex::new(Some(verdict_rx)));
+                                    self.supervisor.spawn("cloud-threat-reporter", move || {
+                                        let client = rep_client.clone();
+                                        let id = rep_agent_id.clone();
+                                        let slot = Arc::clone(&rep_rx);
+                                        Box::pin(async move {
+                                            match slot.lock().await.take() {
+                                                Some(rx) => {
+                                                    riggs_cloud::run_threat_reporter(client, id, rx).await
+                                                }
+                                                None => std::future::pending::<()>().await,
+                                            }
+                                        })
                                     });
 
-                                    // DLP event reporter
+                                    // DLP event reporter (supervised, same slot pattern)
                                     let dlp_client = cc.clone();
                                     let dlp_agent_id = agent_id.clone();
-                                    tokio::spawn(async move {
-                                        riggs_cloud::run_dlp_reporter(dlp_client, dlp_agent_id, dlp_rx).await;
+                                    let dlp_rx_slot =
+                                        Arc::new(tokio::sync::Mutex::new(Some(dlp_rx)));
+                                    self.supervisor.spawn("cloud-dlp-reporter", move || {
+                                        let client = dlp_client.clone();
+                                        let id = dlp_agent_id.clone();
+                                        let slot = Arc::clone(&dlp_rx_slot);
+                                        Box::pin(async move {
+                                            match slot.lock().await.take() {
+                                                Some(rx) => {
+                                                    riggs_cloud::run_dlp_reporter(client, id, rx).await
+                                                }
+                                                None => std::future::pending::<()>().await,
+                                            }
+                                        })
                                     });
 
                                     info!("cloud heartbeat, threat reporter, and DLP reporter started");
@@ -560,6 +831,54 @@ impl RiggsDaemon {
 
         // -- Config for auto-respond, captured before entering the loop --
         let auto_respond = self.config.response.auto_respond;
+        let supervisor_check_interval =
+            Duration::from_secs(self.config.engine.health_check_secs.max(1));
+
+        // -- Batched store writer (H16) --
+        // Coalesce (event, verdict) writes into one transaction so the hot path
+        // pays a single fsync per batch instead of two per event. The writer
+        // flushes when the buffer hits `batch_max` or `batch_flush_ms` elapses.
+        let batch_max = self.config.store.batch_max.max(1);
+        let batch_flush = Duration::from_millis(self.config.store.batch_flush_ms.max(1));
+        let (store_tx, mut store_rx) =
+            mpsc::channel::<(RiggsEvent, MergedVerdict)>(batch_max.saturating_mul(4).max(1));
+        let writer_store = Arc::clone(&store);
+        let writer_handle = tokio::spawn(async move {
+            let mut buf: Vec<(RiggsEvent, MergedVerdict)> = Vec::with_capacity(batch_max);
+            let mut ticker = tokio::time::interval(batch_flush);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    item = store_rx.recv() => {
+                        match item {
+                            Some(pair) => {
+                                buf.push(pair);
+                                if buf.len() >= batch_max {
+                                    if let Err(e) = writer_store.store_batch(&buf) {
+                                        error!(error = %e, "failed to store batch");
+                                    }
+                                    buf.clear();
+                                }
+                            }
+                            None => break, // channel closed: flush below and exit
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if !buf.is_empty() {
+                            if let Err(e) = writer_store.store_batch(&buf) {
+                                error!(error = %e, "failed to flush batch");
+                            }
+                            buf.clear();
+                        }
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                if let Err(e) = writer_store.store_batch(&buf) {
+                    error!(error = %e, "failed to flush final batch");
+                }
+            }
+        });
 
         info!("riggs daemon running");
 
@@ -569,7 +888,24 @@ impl RiggsDaemon {
                 while let Some(event) = event_rx.recv().await {
                     events_processed.fetch_add(1, Ordering::Relaxed);
 
-                    let merged = pipeline.run(event.clone()).await;
+                    // Isolate detection in its own task: a panic in any stage
+                    // (e.g. on a crafted event) becomes a JoinError here instead
+                    // of unwinding and killing the daemon's event loop.
+                    let merged = {
+                        let pipeline = Arc::clone(&pipeline);
+                        let ev = event.clone();
+                        match tokio::spawn(async move { pipeline.run(ev).await }).await {
+                            Ok(merged) => merged,
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    event_id = %event.event_id(),
+                                    "detection pipeline panicked; dropping event"
+                                );
+                                continue;
+                            }
+                        }
+                    };
                     let storyline_id = correlator.correlate(&event);
 
                     for v in &merged.verdicts {
@@ -586,7 +922,12 @@ impl RiggsDaemon {
                         );
 
                         if auto_respond {
-                            let actions = policy.evaluate(&merged);
+                            let target_pid = event.process_context().pid;
+                            let target_path = match &event {
+                                RiggsEvent::File(fe) => Some(std::path::Path::new(fe.path.as_str())),
+                                _ => None,
+                            };
+                            let actions = policy.evaluate(&merged, target_pid, target_path);
                             if !actions.is_empty() {
                                 let exec = Arc::clone(&executor);
                                 tokio::spawn(async move {
@@ -607,17 +948,26 @@ impl RiggsDaemon {
                         }
                     }
 
-                    if let Err(e) = store.store_event(&event) {
-                        error!(error = %e, "failed to store event");
-                    }
-                    if let Err(e) = store.store_verdict(&merged) {
-                        error!(error = %e, "failed to store verdict");
+                    // Hand off to the batched writer. If the queue is full the
+                    // writer is behind; drop from persistence rather than stall
+                    // the detection loop (telemetry fails open, sensing never
+                    // blocks on disk).
+                    if let Err(e) = store_tx.try_send((event, merged)) {
+                        warn!(error = %e, "store queue full; event not persisted");
                     }
                 }
             } => {}
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown_signal() => {
                 info!("shutdown signal received");
             }
+            _ = async {
+                // Restart any supervised task that has died.
+                let mut interval = tokio::time::interval(supervisor_check_interval);
+                loop {
+                    interval.tick().await;
+                    self.supervisor.check_health().await;
+                }
+            } => {}
         }
 
         // -- Shutdown --
@@ -628,6 +978,13 @@ impl RiggsDaemon {
         }
 
         self.supervisor.shutdown_all();
+
+        // Close the store channel so the writer flushes its final batch, then
+        // wait briefly for it to drain before we exit.
+        drop(store_tx);
+        if let Err(e) = tokio::time::timeout(Duration::from_secs(5), writer_handle).await {
+            warn!(error = %e, "store writer did not flush within timeout");
+        }
 
         let stats = pipeline.stats();
         info!(

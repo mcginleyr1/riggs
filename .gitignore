@@ -3,3 +3,12 @@
 *.swp
 *.swo
 .DS_Store
+
+# Never commit TLS keys/certs (dev or otherwise).
+/dev-certs/
+*.pem
+*.key
+
+# Swift Package Manager / Xcode build artifacts (riggs-filter extension)
+.build/
+*.pcm

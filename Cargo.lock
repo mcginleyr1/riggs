@@ -3090,6 +3090,7 @@ dependencies = [
 name = "riggs-comms"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "riggs-types",
  "serde",
  "serde_json",
@@ -3106,6 +3107,7 @@ dependencies = [
  "riggs-cloud",
  "riggs-comms",
  "riggs-dlp",
+ "riggs-egress",
  "riggs-engine",
  "riggs-intel",
  "riggs-platform",
@@ -3168,6 +3170,18 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "riggs-egress"
+version = "0.1.0"
+dependencies = [
+ "ipnetwork",
+ "notify",
+ "riggs-types",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -3514,12 +3528,22 @@ version = "0.23.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -4229,8 +4253,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

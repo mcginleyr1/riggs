@@ -121,21 +121,17 @@ pub async fn events(socket_path: &Path, args: &[String]) -> Result<(), RiggsErro
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--storyline" | "-s" => {
-                if i + 1 < args.len() {
-                    storyline_id = Some(args[i + 1].clone());
-                    i += 2;
-                    continue;
-                }
+            "--storyline" | "-s" if i + 1 < args.len() => {
+                storyline_id = Some(args[i + 1].clone());
+                i += 2;
+                continue;
             }
-            "--limit" | "-n" => {
-                if i + 1 < args.len() {
-                    limit = args[i + 1]
-                        .parse()
-                        .map_err(|_| RiggsError::Other("Invalid limit value".into()))?;
-                    i += 2;
-                    continue;
-                }
+            "--limit" | "-n" if i + 1 < args.len() => {
+                limit = args[i + 1]
+                    .parse()
+                    .map_err(|_| RiggsError::Other("Invalid limit value".into()))?;
+                i += 2;
+                continue;
             }
             _ => {}
         }
@@ -214,6 +210,7 @@ fn event_summary(event: &riggs_types::events::RiggsEvent) -> (&'static str, Stri
                 riggs_types::events::FileAction::Delete => "delete",
                 riggs_types::events::FileAction::Rename => "rename",
                 riggs_types::events::FileAction::Open => "open",
+                riggs_types::events::FileAction::Close => "close",
             };
             ("FILE", format!("{} {}", action, e.path))
         }
@@ -458,6 +455,64 @@ pub async fn dlp(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> 
         cmd => {
             eprintln!("Unknown dlp subcommand: {cmd}");
             println!("Usage: riggs dlp [status|policy]");
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn egress(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
+    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    match subcmd {
+        "status" | "list" => {
+            let mut client = connect(socket_path).await?;
+            match send(&mut client, &ClientMessage::EgressStatus).await? {
+                DaemonMessage::EgressStatus {
+                    mode,
+                    allow_domains,
+                    process_rules,
+                } => {
+                    let (color, text) = match mode.as_str() {
+                        "enforce" => (RED, "enforce"),
+                        "monitor" => (YELLOW, "monitor"),
+                        _ => (DIM, "off"),
+                    };
+                    println!("{BOLD}Egress Allowlist{RESET}");
+                    println!("{DIM}────────────────────────────────────{RESET}");
+                    println!("  {BOLD}Mode:{RESET}            {color}{text}{RESET}");
+                    println!("  {BOLD}Allow domains:{RESET}   {allow_domains}");
+                    println!("  {BOLD}Process rules:{RESET}   {process_rules}");
+                }
+                DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+                _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+            }
+        }
+        "allow" | "deny" | "mode" => {
+            let value = match args.get(1) {
+                Some(v) => v.clone(),
+                None => {
+                    eprintln!("Usage: riggs egress {subcmd} <value>");
+                    return Ok(());
+                }
+            };
+            let msg = match subcmd {
+                "allow" => ClientMessage::EgressAllow { domain: value },
+                "deny" => ClientMessage::EgressDeny { domain: value },
+                _ => ClientMessage::EgressSetMode { mode: value },
+            };
+            let mut client = connect(socket_path).await?;
+            match send(&mut client, &msg).await? {
+                DaemonMessage::Ok => println!("{GREEN}ok{RESET}"),
+                DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+                _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+            }
+        }
+        cmd => {
+            eprintln!("Unknown egress subcommand: {cmd}");
+            println!(
+                "Usage: riggs egress [status | allow <domain> | deny <domain> | mode off|monitor|enforce]"
+            );
         }
     }
 

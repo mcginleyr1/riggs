@@ -5,7 +5,14 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{error, info};
+use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
+
+/// Default max IPC frame size before allocating (untrusted length prefix).
+const DEFAULT_MAX_MSG_LEN: usize = 8 * 1024 * 1024;
+
+/// Default cap on concurrent client handlers so a flood can't exhaust the daemon.
+const DEFAULT_MAX_CONCURRENT_CLIENTS: usize = 32;
 
 use riggs_types::events::RiggsEvent;
 use riggs_types::verdict::MergedVerdict;
@@ -41,6 +48,38 @@ pub struct DlpQueryStatus {
     pub watched_domains: usize,
 }
 
+pub struct EgressFlowVerdict {
+    pub allow: bool,
+    pub would_block: bool,
+    pub reason: Option<String>,
+    pub mode: String,
+}
+
+pub struct EgressQueryStatus {
+    pub mode: String,
+    pub allow_domains: usize,
+    pub process_rules: usize,
+}
+
+pub trait EgressQuery: Send + Sync {
+    fn check(
+        &self,
+        pid: u32,
+        process_path: &str,
+        hostname: &str,
+        remote_ip: &str,
+        remote_port: u16,
+    ) -> EgressFlowVerdict;
+
+    fn status(&self) -> EgressQueryStatus;
+
+    /// Local management: add/remove a global allow domain, or set the mode.
+    /// Persist the change and reload the live policy. Returns an error string.
+    fn allow_domain(&self, domain: &str) -> std::result::Result<(), String>;
+    fn deny_domain(&self, domain: &str) -> std::result::Result<(), String>;
+    fn set_mode(&self, mode: &str) -> std::result::Result<(), String>;
+}
+
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("IO error: {0}")]
@@ -63,6 +102,7 @@ pub struct DaemonState {
     pub cache_entries: Arc<AtomicU64>,
     pub store: std::sync::RwLock<Option<Arc<dyn StoreQuery>>>,
     pub dlp: std::sync::RwLock<Option<Arc<dyn DlpQuery>>>,
+    pub egress: std::sync::RwLock<Option<Arc<dyn EgressQuery>>>,
 }
 
 impl DaemonState {
@@ -75,6 +115,7 @@ impl DaemonState {
             cache_entries: Arc::new(AtomicU64::new(0)),
             store: std::sync::RwLock::new(None),
             dlp: std::sync::RwLock::new(None),
+            egress: std::sync::RwLock::new(None),
         }
     }
 }
@@ -85,10 +126,15 @@ impl Default for DaemonState {
     }
 }
 
-async fn read_length_prefixed(stream: &mut UnixStream) -> Result<Vec<u8>> {
+async fn read_length_prefixed(stream: &mut UnixStream, max_len: usize) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
+    if len > max_len {
+        return Err(IpcError::Other(format!(
+            "message length {len} exceeds maximum {max_len}"
+        )));
+    }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     Ok(buf)
@@ -102,9 +148,39 @@ async fn write_length_prefixed(stream: &mut UnixStream, data: &[u8]) -> Result<(
     Ok(())
 }
 
+/// Apply a local egress management op and map the result to a DaemonMessage.
+fn egress_mutate(
+    state: &DaemonState,
+    op: impl FnOnce(&dyn EgressQuery) -> std::result::Result<(), String>,
+) -> DaemonMessage {
+    let guard = match state.egress.read() {
+        Ok(guard) => guard,
+        Err(_) => return DaemonMessage::Error("egress state unavailable".into()),
+    };
+    match guard.as_ref() {
+        Some(egress) => match op(egress.as_ref()) {
+            Ok(()) => DaemonMessage::Ok,
+            Err(e) => DaemonMessage::Error(e),
+        },
+        None => DaemonMessage::Error("egress control not initialized".into()),
+    }
+}
+
+/// True when the connecting peer runs as the same user as the daemon.
+/// Uses `getpeereid` on the connected socket (works on macOS and Linux).
+fn peer_is_owner(stream: &UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
+    ok && uid == unsafe { libc::geteuid() }
+}
+
 pub struct IpcServer {
     socket_path: PathBuf,
     state: Arc<DaemonState>,
+    max_message_bytes: usize,
+    max_connections: usize,
 }
 
 impl IpcServer {
@@ -112,6 +188,8 @@ impl IpcServer {
         Self {
             socket_path,
             state: Arc::new(DaemonState::new()),
+            max_message_bytes: DEFAULT_MAX_MSG_LEN,
+            max_connections: DEFAULT_MAX_CONCURRENT_CLIENTS,
         }
     }
 
@@ -119,7 +197,16 @@ impl IpcServer {
         Self {
             socket_path,
             state,
+            max_message_bytes: DEFAULT_MAX_MSG_LEN,
+            max_connections: DEFAULT_MAX_CONCURRENT_CLIENTS,
         }
+    }
+
+    /// Override the IPC frame-size and concurrency caps (operator-configurable).
+    pub fn with_limits(mut self, max_message_bytes: usize, max_connections: usize) -> Self {
+        self.max_message_bytes = max_message_bytes.max(1024);
+        self.max_connections = max_connections.max(1);
+        self
     }
 
     pub fn state(&self) -> &Arc<DaemonState> {
@@ -133,7 +220,9 @@ impl IpcServer {
 
         let listener = UnixListener::bind(&self.socket_path)?;
 
-        // Allow non-root users (CLI, menubar) to connect
+        // Non-root users (CLI, menubar) may connect for read-only status/query
+        // commands; state-changing commands are gated per-connection by peer uid
+        // in handle_client, and secrets are stripped from GetConfig responses.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -143,12 +232,23 @@ impl IpcServer {
 
         info!("IPC server listening on {:?}", self.socket_path);
 
+        let limiter = Arc::new(Semaphore::new(self.max_connections));
+        let max_message_bytes = self.max_message_bytes;
+
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
+                    let permit = match Arc::clone(&limiter).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            warn!("IPC connection limit reached, dropping connection");
+                            continue;
+                        }
+                    };
                     let state = Arc::clone(&self.state);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_client(stream, &state).await {
+                        let _permit = permit; // released when the handler finishes
+                        if let Err(e) = Self::handle_client(stream, &state, max_message_bytes).await {
                             error!("Client handler error: {}", e);
                         }
                     });
@@ -160,9 +260,34 @@ impl IpcServer {
         }
     }
 
-    async fn handle_client(mut stream: UnixStream, state: &DaemonState) -> Result<()> {
-        let raw = read_length_prefixed(&mut stream).await?;
+    async fn handle_client(
+        mut stream: UnixStream,
+        state: &DaemonState,
+        max_message_bytes: usize,
+    ) -> Result<()> {
+        let raw = read_length_prefixed(&mut stream, max_message_bytes).await?;
         let msg: ClientMessage = serde_json::from_slice(&raw)?;
+
+        // State-changing commands require the peer to run as the daemon owner.
+        // Read-only status/query/DLP commands stay open to the CLI and menubar.
+        let needs_privilege = matches!(
+            msg,
+            ClientMessage::UpdateConfig { .. }
+                | ClientMessage::TriggerScan { .. }
+                | ClientMessage::RefreshFeeds
+                | ClientMessage::VulnUpdate
+                | ClientMessage::EgressAllow { .. }
+                | ClientMessage::EgressDeny { .. }
+                | ClientMessage::EgressSetMode { .. }
+        );
+        if needs_privilege && !peer_is_owner(&stream) {
+            let denied = DaemonMessage::Error(
+                "permission denied: command requires daemon-owner privilege".into(),
+            );
+            let bytes = serde_json::to_vec(&denied)?;
+            write_length_prefixed(&mut stream, &bytes).await?;
+            return Ok(());
+        }
 
         let response = match msg {
             ClientMessage::GetStatus => DaemonMessage::Status {
@@ -259,6 +384,58 @@ impl IpcServer {
                     },
                 }
             }
+            ClientMessage::EgressCheckFlow {
+                pid,
+                process_path,
+                remote_hostname,
+                remote_ip,
+                remote_port,
+            } => {
+                let verdict = state
+                    .egress
+                    .read()
+                    .ok()
+                    .and_then(|guard| {
+                        guard.as_ref().map(|eg| {
+                            eg.check(pid, &process_path, &remote_hostname, &remote_ip, remote_port)
+                        })
+                    })
+                    // No policy loaded -> allow (fail-open until egress is enabled).
+                    .unwrap_or(EgressFlowVerdict {
+                        allow: true,
+                        would_block: false,
+                        reason: None,
+                        mode: "off".into(),
+                    });
+                DaemonMessage::EgressVerdict {
+                    allow: verdict.allow,
+                    would_block: verdict.would_block,
+                    reason: verdict.reason,
+                    mode: verdict.mode,
+                }
+            }
+            ClientMessage::EgressStatus => {
+                let status = state
+                    .egress
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.as_ref().map(|eg| eg.status()));
+                match status {
+                    Some(s) => DaemonMessage::EgressStatus {
+                        mode: s.mode,
+                        allow_domains: s.allow_domains,
+                        process_rules: s.process_rules,
+                    },
+                    None => DaemonMessage::EgressStatus {
+                        mode: "off".into(),
+                        allow_domains: 0,
+                        process_rules: 0,
+                    },
+                }
+            }
+            ClientMessage::EgressAllow { domain } => egress_mutate(state, |eg| eg.allow_domain(&domain)),
+            ClientMessage::EgressDeny { domain } => egress_mutate(state, |eg| eg.deny_domain(&domain)),
+            ClientMessage::EgressSetMode { mode } => egress_mutate(state, |eg| eg.set_mode(&mode)),
         };
 
         let response_bytes = serde_json::to_vec(&response)?;
@@ -280,7 +457,7 @@ impl IpcClient {
     pub async fn send(&mut self, msg: &ClientMessage) -> Result<DaemonMessage> {
         let request_bytes = serde_json::to_vec(msg)?;
         write_length_prefixed(&mut self.stream, &request_bytes).await?;
-        let response_bytes = read_length_prefixed(&mut self.stream).await?;
+        let response_bytes = read_length_prefixed(&mut self.stream, DEFAULT_MAX_MSG_LEN).await?;
         let response: DaemonMessage = serde_json::from_slice(&response_bytes)?;
         Ok(response)
     }

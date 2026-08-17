@@ -39,7 +39,7 @@ defmodule Murtaugh.Ingest.ThreatIngester do
 
           case TenantRepo.insert(Threat.changeset(%Threat{}, attrs)) do
             {:ok, threat} ->
-              Phoenix.PubSub.broadcast(Murtaugh.PubSub, "threats", {:new_threat, threat})
+              Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.threats(org_node_id), {:new_threat, threat})
               {:ok, threat.id}
 
             {:error, changeset} ->

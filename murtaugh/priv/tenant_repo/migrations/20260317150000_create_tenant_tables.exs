@@ -42,7 +42,9 @@ defmodule Murtaugh.TenantRepo.Migrations.CreateTenantTables do
       add :storyline_id, :binary_id, null: false
       add :event_type, :text, null: false
       add :severity, :text, null: false
-      add :timestamp, :utc_datetime, null: false
+      # Part of the primary key: TimescaleDB requires the hypertable partition
+      # column (timestamp) to be included in every unique index / primary key.
+      add :timestamp, :utc_datetime, null: false, primary_key: true
       add :received_at, :utc_datetime, null: false, default: fragment("NOW()")
       add :pid, :integer
       add :ppid, :integer

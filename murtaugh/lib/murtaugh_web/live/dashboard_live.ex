@@ -7,10 +7,11 @@ defmodule MurtaughWeb.DashboardLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "threats")
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "dlp")
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "fleet")
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "throughput")
+      org_id = socket.assigns.current_org.id
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.threats(org_id))
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.dlp(org_id))
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.fleet(org_id))
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.throughput(org_id))
     end
 
     shard = socket.assigns[:current_shard]
@@ -365,7 +366,7 @@ defmodule MurtaughWeb.DashboardLive do
     threats_today = Detection.count_threats_today(shard)
     recent_threats = shard |> Detection.list_threats(limit: 10) |> Enum.map(&Presenters.present_threat/1)
     recent_dlp = shard |> Dlp.recent_blocks(limit: 5) |> Enum.map(&Presenters.present_dlp_event/1)
-    dlp_blocks = shard |> Dlp.list_events(action: "block") |> length()
+    dlp_blocks = Dlp.count_blocks_today(shard)
 
     {
       Map.get(status_counts, "online", 0),

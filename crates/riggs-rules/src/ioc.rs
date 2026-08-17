@@ -33,11 +33,31 @@ pub struct IocMatcher {
 
 impl IocMatcher {
     pub fn new(iocs: Vec<Ioc>) -> Self {
-        let patterns: Vec<&str> = iocs.iter().map(|ioc| ioc.value.as_str()).collect();
-        let automaton = AhoCorasick::new(&patterns)
-            .expect("failed to build AhoCorasick automaton from IOC patterns");
+        // Drop empty patterns (AhoCorasick rejects them) so patterns and iocs
+        // stay index-aligned for check_string's self.iocs[pattern_index] lookup.
+        let iocs: Vec<Ioc> = iocs.into_iter().filter(|ioc| !ioc.value.is_empty()).collect();
 
-        Self { automaton, iocs }
+        let build = {
+            let patterns: Vec<&str> = iocs.iter().map(|ioc| ioc.value.as_str()).collect();
+            AhoCorasick::new(&patterns)
+        };
+
+        match build {
+            Ok(automaton) => Self { automaton, iocs },
+            Err(e) => {
+                // Never panic the feed dispatcher on a bad/oversized batch;
+                // disable IOC matching for it and keep the previous data.
+                tracing::error!(
+                    error = %e,
+                    "failed to build IOC automaton; IOC matching disabled for this batch"
+                );
+                Self {
+                    automaton: AhoCorasick::new(Vec::<&str>::new())
+                        .expect("empty AhoCorasick automaton is always valid"),
+                    iocs: Vec::new(),
+                }
+            }
+        }
     }
 
     pub fn load_from_file(path: &Path) -> Result<Vec<Ioc>, RiggsError> {

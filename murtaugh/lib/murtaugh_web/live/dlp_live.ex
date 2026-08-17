@@ -9,7 +9,7 @@ defmodule MurtaughWeb.DlpLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "dlp")
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.dlp(socket.assigns.current_org.id))
     end
 
     shard = socket.assigns[:current_shard]

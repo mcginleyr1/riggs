@@ -12,7 +12,16 @@ use tracing::info;
 use crate::poller::trigger_scan_background;
 use crate::status::SharedStatus;
 
-const TIMER_INTERVAL_SECS: f64 = 2.0;
+const DEFAULT_TIMER_INTERVAL_SECS: f64 = 2.0;
+
+/// Menu refresh cadence, overridable via RIGGS_MENUBAR_TIMER_SECS.
+fn timer_interval_secs() -> f64 {
+    std::env::var("RIGGS_MENUBAR_TIMER_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&s| s > 0.0)
+        .unwrap_or(DEFAULT_TIMER_INTERVAL_SECS)
+}
 
 struct DelegateIvars {
     status: SharedStatus,
@@ -284,7 +293,7 @@ fn setup_update_timer(delegate: &Retained<AppDelegate>) {
     unsafe {
         let _timer =
             objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                TIMER_INTERVAL_SECS,
+                timer_interval_secs(),
                 delegate.as_ref() as &AnyObject,
                 sel!(updateMenu:),
                 None,

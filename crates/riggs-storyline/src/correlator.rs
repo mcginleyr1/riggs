@@ -5,10 +5,16 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tracing::info;
 
-use riggs_types::events::{EventId, ProcessContext, RiggsEvent, StorylineId};
+use riggs_types::events::{EventId, ProcessAction, ProcessContext, RiggsEvent, StorylineId};
 use riggs_types::verdict::Verdict;
 
-const THREAT_SCORE_THRESHOLD: f32 = 0.5;
+const DEFAULT_THREAT_SCORE_THRESHOLD: f32 = 0.5;
+/// Default cap on event ids retained per storyline.
+const DEFAULT_MAX_EVENTS_PER_STORYLINE: usize = 1024;
+/// Default cadence for correlate()'s opportunistic idle-storyline pruning.
+const DEFAULT_PRUNE_INTERVAL_SECS: i64 = 60;
+/// Default idle age after which a storyline is pruned.
+const DEFAULT_STORYLINE_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 pub struct Storyline {
     pub id: StorylineId,
@@ -39,6 +45,11 @@ impl fmt::Display for Storyline {
 pub struct StorylineCorrelator {
     storylines: HashMap<StorylineId, Storyline>,
     pid_to_storyline: HashMap<u32, StorylineId>,
+    last_prune: DateTime<Utc>,
+    max_events_per_storyline: usize,
+    max_age: Duration,
+    prune_interval_secs: i64,
+    threat_score_threshold: f32,
 }
 
 impl StorylineCorrelator {
@@ -46,7 +57,31 @@ impl StorylineCorrelator {
         Self {
             storylines: HashMap::new(),
             pid_to_storyline: HashMap::new(),
+            last_prune: Utc::now(),
+            max_events_per_storyline: DEFAULT_MAX_EVENTS_PER_STORYLINE,
+            max_age: DEFAULT_STORYLINE_MAX_AGE,
+            prune_interval_secs: DEFAULT_PRUNE_INTERVAL_SECS,
+            threat_score_threshold: DEFAULT_THREAT_SCORE_THRESHOLD,
         }
+    }
+
+    /// Override the score above which a storyline is treated as a threat.
+    pub fn with_threat_threshold(mut self, threshold: f32) -> Self {
+        self.threat_score_threshold = threshold;
+        self
+    }
+
+    /// Override the per-storyline event cap, idle-prune age, and prune cadence.
+    pub fn with_limits(
+        mut self,
+        max_events_per_storyline: usize,
+        idle_secs: u64,
+        prune_interval_secs: u64,
+    ) -> Self {
+        self.max_events_per_storyline = max_events_per_storyline.max(1);
+        self.max_age = Duration::from_secs(idle_secs);
+        self.prune_interval_secs = prune_interval_secs.max(1) as i64;
+        self
     }
 
     /// Assign an event to an existing storyline or create a new one.
@@ -55,15 +90,33 @@ impl StorylineCorrelator {
     /// already associated with a storyline, the event joins that storyline.
     /// Otherwise a new storyline is created rooted at the current process.
     pub fn correlate(&mut self, event: &RiggsEvent) -> StorylineId {
-        let ctx = extract_process_context(event);
+        let ctx = extract_process_context(event).clone();
         let event_id = extract_event_id(event);
         let now = Utc::now();
 
+        // Opportunistically prune idle storylines so the maps stay bounded.
+        if (now - self.last_prune).num_seconds() >= self.prune_interval_secs {
+            self.prune_inactive(self.max_age);
+            self.last_prune = now;
+        }
+
+        let storyline_id = self.assign(&ctx, event_id, now);
+
+        // A process exit ends the pid's association, so a later reused pid does
+        // not inherit this (possibly unrelated) process's storyline.
+        if matches!(event, RiggsEvent::Process(pe) if pe.action == ProcessAction::Exit) {
+            self.pid_to_storyline.remove(&ctx.pid);
+        }
+
+        storyline_id
+    }
+
+    fn assign(&mut self, ctx: &ProcessContext, event_id: EventId, now: DateTime<Utc>) -> StorylineId {
         // Check if this process already belongs to a storyline
         if let Some(existing_id) = self.pid_to_storyline.get(&ctx.pid) {
             let existing_id = existing_id.clone();
             if let Some(storyline) = self.storylines.get_mut(&existing_id) {
-                storyline.events.push(event_id);
+                push_capped(&mut storyline.events, event_id, self.max_events_per_storyline);
                 storyline.updated_at = now;
                 return existing_id;
             }
@@ -73,7 +126,7 @@ impl StorylineCorrelator {
         if let Some(parent_id) = self.pid_to_storyline.get(&ctx.ppid) {
             let parent_id = parent_id.clone();
             if let Some(storyline) = self.storylines.get_mut(&parent_id) {
-                storyline.events.push(event_id);
+                push_capped(&mut storyline.events, event_id, self.max_events_per_storyline);
                 storyline.updated_at = now;
                 let already_tracked = storyline.process_tree.iter().any(|p| p.pid == ctx.pid);
                 if !already_tracked {
@@ -137,7 +190,7 @@ impl StorylineCorrelator {
     pub fn threat_storylines(&self) -> Vec<&Storyline> {
         self.storylines
             .values()
-            .filter(|s| s.threat_score > THREAT_SCORE_THRESHOLD)
+            .filter(|s| s.threat_score > self.threat_score_threshold)
             .collect()
     }
 
@@ -236,6 +289,14 @@ impl Default for StorylineCorrelator {
     }
 }
 
+fn push_capped(events: &mut Vec<EventId>, id: EventId, max: usize) {
+    events.push(id);
+    if events.len() > max {
+        let overflow = events.len() - max;
+        events.drain(0..overflow);
+    }
+}
+
 fn recalculate_threat_score(verdicts: &[Verdict]) -> f32 {
     if verdicts.is_empty() {
         return 0.0;
@@ -274,5 +335,53 @@ fn extract_event_id(event: &RiggsEvent) -> EventId {
         RiggsEvent::Dns(e) => e.event_id.clone(),
         RiggsEvent::Auth(e) => e.event_id.clone(),
         RiggsEvent::Kernel(e) => e.event_id.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc_event(pid: u32, ppid: u32, action: ProcessAction) -> RiggsEvent {
+        let ctx = ProcessContext {
+            pid,
+            ppid,
+            name: "p".into(),
+            path: "/p".into(),
+            cmdline: "p".into(),
+            user: "root".into(),
+            storyline_id: StorylineId::new(),
+        };
+        RiggsEvent::new_process(action, ctx, None)
+    }
+
+    #[test]
+    fn same_pid_shares_storyline() {
+        let mut c = StorylineCorrelator::new();
+        let a = c.correlate(&proc_event(100, 1, ProcessAction::Exec));
+        let b = c.correlate(&proc_event(100, 1, ProcessAction::Fork));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn exit_clears_pid_so_reuse_starts_new_storyline() {
+        let mut c = StorylineCorrelator::new();
+        let first = c.correlate(&proc_event(100, 1, ProcessAction::Exec));
+        c.correlate(&proc_event(100, 1, ProcessAction::Exit));
+        // pid 100 recycled by an unrelated process -> must not inherit the old storyline
+        let second = c.correlate(&proc_event(100, 1, ProcessAction::Exec));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn prune_inactive_drops_stale_storylines_and_pids() {
+        let mut c = StorylineCorrelator::new();
+        c.correlate(&proc_event(200, 1, ProcessAction::Exec));
+        assert_eq!(c.storylines.len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // A zero max-age means the cutoff is "now", so all prior storylines prune.
+        c.prune_inactive(Duration::from_secs(0));
+        assert_eq!(c.storylines.len(), 0);
+        assert!(c.pid_to_storyline.is_empty());
     }
 }

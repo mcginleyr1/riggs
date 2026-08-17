@@ -6,42 +6,42 @@ defmodule MurtaughWeb.EventsLive do
   alias Murtaugh.Detection
   alias MurtaughWeb.Presenters
 
+  @per_page 25
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Murtaugh.PubSub, "events")
     end
 
-    shard = socket.assigns[:current_shard]
+    socket =
+      socket
+      |> assign(
+        page_title: "Events",
+        search: "",
+        filter_type: "all",
+        filter_severity: "all",
+        filter_time: "24h",
+        expanded_id: nil,
+        page: 1,
+        total_pages: 1,
+        total_count: 0
+      )
+      |> reload()
 
-    {:ok, assign(socket,
-      page_title: "Events",
-      events: load_events(shard),
-      search: "",
-      filter_type: "all",
-      filter_severity: "all",
-      filter_time: "24h",
-      expanded_id: nil,
-      page: 1,
-      total_pages: 1
-    )}
-  end
-
-  defp load_events(nil), do: placeholder_events()
-
-  defp load_events(shard) do
-    shard |> Detection.list_events(limit: 100) |> Enum.map(&Presenters.present_event/1)
-  rescue
-    _ -> placeholder_events()
+    {:ok, socket}
   end
 
   @impl true
   def handle_event("search", %{"search" => search}, socket) do
-    {:noreply, assign(socket, search: search, page: 1)}
+    {:noreply, socket |> assign(search: search, page: 1) |> reload()}
   end
 
   def handle_event("filter", %{"type" => type, "severity" => severity, "time" => time}, socket) do
-    {:noreply, assign(socket, filter_type: type, filter_severity: severity, filter_time: time, page: 1)}
+    {:noreply,
+     socket
+     |> assign(filter_type: type, filter_severity: severity, filter_time: time, page: 1)
+     |> reload()}
   end
 
   def handle_event("toggle_expand", %{"id" => id}, socket) do
@@ -50,16 +50,123 @@ defmodule MurtaughWeb.EventsLive do
   end
 
   def handle_event("page", %{"page" => page}, socket) do
-    {:noreply, assign(socket, :page, String.to_integer(page))}
+    {:noreply, socket |> assign(:page, String.to_integer(page)) |> reload()}
   end
 
   @impl true
-  def handle_info({:new_event, event}, socket) do
-    events = [Presenters.present_event(event) | Enum.take(socket.assigns.events, 199)]
-    {:noreply, assign(socket, :events, events)}
+  def handle_info({:new_event, _event}, socket) do
+    # New telemetry only appears on the first page (newest-first); refresh there
+    # so counts and the visible page stay consistent without re-querying on every
+    # event while the operator is paging through history.
+    socket = if socket.assigns.page == 1, do: reload(socket), else: socket
+    {:noreply, socket}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # -- Data loading --
+
+  defp reload(socket) do
+    opts = query_opts(socket.assigns)
+    {events, total} = load_page(socket.assigns[:current_shard], opts)
+    total_pages = max(1, ceil(total / @per_page))
+
+    assign(socket, events: events, total_count: total, total_pages: total_pages)
+  end
+
+  defp query_opts(assigns) do
+    [
+      limit: @per_page,
+      offset: (assigns.page - 1) * @per_page,
+      event_type: assigns.filter_type,
+      severity: assigns.filter_severity,
+      search: assigns.search,
+      since: since_from(assigns.filter_time)
+    ]
+  end
+
+  defp load_page(nil, opts), do: placeholder_page(opts)
+
+  defp load_page(shard, opts) do
+    events = shard |> Detection.list_events(opts) |> Enum.map(&Presenters.present_event/1)
+    total = Detection.count_events(shard, opts)
+    {events, total}
+  rescue
+    _ -> placeholder_page(opts)
+  end
+
+  defp since_from(range) do
+    now = DateTime.utc_now()
+
+    case range do
+      "1h" -> DateTime.add(now, -3_600, :second)
+      "24h" -> DateTime.add(now, -86_400, :second)
+      "7d" -> DateTime.add(now, -604_800, :second)
+      "30d" -> DateTime.add(now, -2_592_000, :second)
+      _ -> nil
+    end
+  end
+
+  # In-memory equivalent of the DB filters for the no-shard/dev fallback so the
+  # controls behave identically against placeholder data.
+  defp placeholder_page(opts) do
+    filtered = filter_placeholders(placeholder_events(), opts)
+    offset = Keyword.get(opts, :offset, 0)
+    limit = Keyword.get(opts, :limit, @per_page)
+    {filtered |> Enum.drop(offset) |> Enum.take(limit), length(filtered)}
+  end
+
+  defp filter_placeholders(events, opts) do
+    type = Keyword.get(opts, :event_type)
+    sev = Keyword.get(opts, :severity)
+    search = opts |> Keyword.get(:search) |> to_string() |> String.downcase()
+
+    Enum.filter(events, fn e ->
+      type_ok?(type, e) and severity_ok?(sev, e) and search_ok?(search, e)
+    end)
+  end
+
+  defp type_ok?(type, _e) when type in [nil, "", "all"], do: true
+  defp type_ok?(type, e), do: e.event_type == type
+
+  defp severity_ok?(sev, _e) when sev in [nil, "", "all"], do: true
+  defp severity_ok?(sev, e), do: Atom.to_string(e.severity) == sev
+
+  defp search_ok?("", _e), do: true
+
+  defp search_ok?(search, e) do
+    haystack = String.downcase("#{e.process} #{e.description} #{e.event_type}")
+    String.contains?(haystack, search)
+  end
+
+  # -- Select option sources (also drive the sticky `selected` state) --
+
+  defp type_options do
+    [
+      {"all", "All Types"},
+      {"process_create", "Process Create"},
+      {"network_connect", "Network Connect"},
+      {"file_create", "File Create"},
+      {"file_read", "File Read"},
+      {"registry_set", "Registry Set"},
+      {"dns_query", "DNS Query"}
+    ]
+  end
+
+  defp severity_options do
+    [
+      {"all", "All"},
+      {"critical", "Critical"},
+      {"high", "High"},
+      {"medium", "Medium"},
+      {"low", "Low"},
+      {"info", "Info"}
+    ]
+  end
+
+  defp time_options do
+    [{"1h", "Last Hour"}, {"24h", "Last 24 Hours"}, {"7d", "Last 7 Days"}, {"30d", "Last 30 Days"}]
+  end
 
   @impl true
   def render(assigns) do
@@ -85,35 +192,24 @@ defmodule MurtaughWeb.EventsLive do
       <form phx-change="filter" class="flex flex-wrap items-center gap-3 bg-gray-800 border border-gray-700 rounded-xl p-4">
         <div>
           <label class="text-xs text-gray-400 block mb-1">Event Type</label>
-          <select name="type" value={@filter_type} class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
-            <option value="all">All Types</option>
-            <option value="process_create">Process Create</option>
-            <option value="network_connect">Network Connect</option>
-            <option value="file_create">File Create</option>
-            <option value="file_read">File Read</option>
-            <option value="registry_set">Registry Set</option>
-            <option value="dns_query">DNS Query</option>
+          <select name="type" class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
+            <option :for={{val, label} <- type_options()} value={val} selected={@filter_type == val}>{label}</option>
           </select>
         </div>
         <div>
           <label class="text-xs text-gray-400 block mb-1">Severity</label>
-          <select name="severity" value={@filter_severity} class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
-            <option value="all">All</option>
-            <option value="critical">Critical</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-            <option value="info">Info</option>
+          <select name="severity" class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
+            <option :for={{val, label} <- severity_options()} value={val} selected={@filter_severity == val}>{label}</option>
           </select>
         </div>
         <div>
           <label class="text-xs text-gray-400 block mb-1">Time Range</label>
-          <select name="time" value={@filter_time} class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
-            <option value="1h">Last Hour</option>
-            <option value="24h">Last 24 Hours</option>
-            <option value="7d">Last 7 Days</option>
-            <option value="30d">Last 30 Days</option>
+          <select name="time" class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
+            <option :for={{val, label} <- time_options()} value={val} selected={@filter_time == val}>{label}</option>
           </select>
+        </div>
+        <div class="ml-auto text-xs text-gray-400 self-end pb-1">
+          {@total_count} event{if @total_count == 1, do: "", else: "s"}
         </div>
       </form>
 
@@ -133,6 +229,9 @@ defmodule MurtaughWeb.EventsLive do
               </tr>
             </thead>
             <tbody>
+              <tr :if={@events == []}>
+                <td colspan="7" class="py-8 text-center text-gray-500">No events match these filters.</td>
+              </tr>
               <%= for event <- @events do %>
                 <tr
                   class="border-b border-gray-700/50 hover:bg-gray-700/30 cursor-pointer"

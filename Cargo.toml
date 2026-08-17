@@ -25,6 +25,7 @@ members = [
     "crates/riggs-menubar",
     "crates/riggs-dlp",
     "crates/riggs-cloud",
+    "crates/riggs-egress",
 ]
 
 [workspace.package]
@@ -74,7 +75,7 @@ redb = "2"
 zstd = "0.13"
 
 # gRPC
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 
 # Network
@@ -130,3 +131,4 @@ riggs-intel = { path = "crates/riggs-intel" }
 riggs-menubar = { path = "crates/riggs-menubar" }
 riggs-dlp = { path = "crates/riggs-dlp" }
 riggs-cloud = { path = "crates/riggs-cloud" }
+riggs-egress = { path = "crates/riggs-egress" }

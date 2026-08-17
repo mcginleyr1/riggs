@@ -17,12 +17,24 @@ impl Version {
         let raw = s.to_string();
         let s = s.trim().trim_start_matches('v').trim_start_matches('V');
 
-        // Split off pre-release suffix at first '-' or first non-numeric after patch
-        let (version_part, pre) = if let Some(idx) = s.find('-') {
-            (&s[..idx], s[idx + 1..].to_string())
-        } else {
-            (s, String::new())
+        // Strip a Debian/dpkg epoch prefix ("2:1.2.3-1" -> "1.2.3-1").
+        let s = match s.split_once(':') {
+            Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) => {
+                rest
+            }
+            _ => s,
         };
+
+        // The numeric core ends at the first '-'/'+' or the first character that
+        // is neither a digit nor a dot. Everything after is the pre-release, so
+        // "1.2.3-beta1" and "2.0.0rc1" both capture their suffix.
+        let core_end = s
+            .find(['-', '+'])
+            .or_else(|| s.find(|c: char| !c.is_ascii_digit() && c != '.'))
+            .unwrap_or(s.len());
+
+        let version_part = &s[..core_end];
+        let pre = s[core_end..].trim_start_matches(['-', '+']).to_string();
 
         let parts: Vec<&str> = version_part.split('.').collect();
         let major = parts.first().and_then(|p| parse_leading_digits(p))?;
@@ -80,10 +92,66 @@ impl Ord for Version {
                     (true, true) => Ordering::Equal,
                     (true, false) => Ordering::Greater,
                     (false, true) => Ordering::Less,
-                    (false, false) => self.pre.cmp(&other.pre),
+                    (false, false) => cmp_prerelease(&self.pre, &other.pre),
                 }
             })
     }
+}
+
+/// A pre-release identifier segment: numeric runs compare as numbers, so
+/// "beta10" > "beta2" instead of sorting lexically.
+enum PreSeg {
+    Num(u64),
+    Text(String),
+}
+
+fn prerelease_segments(s: &str) -> Vec<PreSeg> {
+    let mut segs = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            let mut run = String::new();
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_digit() {
+                    run.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            segs.push(PreSeg::Num(run.parse().unwrap_or(0)));
+        } else {
+            let mut run = String::new();
+            while let Some(&d) = chars.peek() {
+                if !d.is_ascii_digit() {
+                    run.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            segs.push(PreSeg::Text(run));
+        }
+    }
+    segs
+}
+
+fn cmp_prerelease(a: &str, b: &str) -> Ordering {
+    let sa = prerelease_segments(a);
+    let sb = prerelease_segments(b);
+    for (x, y) in sa.iter().zip(sb.iter()) {
+        let ord = match (x, y) {
+            (PreSeg::Num(m), PreSeg::Num(n)) => m.cmp(n),
+            (PreSeg::Text(m), PreSeg::Text(n)) => m.cmp(n),
+            // Numeric identifiers rank below alphanumeric ones (SemVer).
+            (PreSeg::Num(_), PreSeg::Text(_)) => Ordering::Less,
+            (PreSeg::Text(_), PreSeg::Num(_)) => Ordering::Greater,
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    sa.len().cmp(&sb.len())
 }
 
 impl PartialOrd for Version {
@@ -163,5 +231,28 @@ mod tests {
         let end = Version::parse("2.0.0").unwrap();
         assert!(v.in_range(Some(&start), Some(&end)));
         assert!(!v.in_range(Some(&end), None));
+    }
+
+    #[test]
+    fn parse_dashless_prerelease() {
+        let v = Version::parse("2.0.0rc1").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (2, 0, 0));
+        assert_eq!(v.pre, "rc1");
+        assert!(v.is_prerelease());
+        // A dashless pre-release must still rank below the final release.
+        assert!(v < Version::parse("2.0.0").unwrap());
+    }
+
+    #[test]
+    fn prerelease_numeric_ordering() {
+        // Byte-lexical ordering would wrongly put beta10 < beta2.
+        assert!(Version::parse("1.0.0-beta2").unwrap() < Version::parse("1.0.0-beta10").unwrap());
+        assert!(Version::parse("1.0.0-rc2").unwrap() < Version::parse("1.0.0-rc10").unwrap());
+    }
+
+    #[test]
+    fn parse_strips_debian_epoch() {
+        let v = Version::parse("2:1.2.3-1ubuntu0.1").unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
     }
 }

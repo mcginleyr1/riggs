@@ -25,6 +25,7 @@ riggs-response = { workspace = true }
 riggs-store = { workspace = true }
 riggs-comms = { workspace = true }
 riggs-dlp = { workspace = true }
+riggs-egress = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::Mutex;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -37,15 +40,28 @@ pub struct FeedManager {
     tx: mpsc::Sender<FeedUpdate>,
     malwarebazaar: MalwareBazaarClient,
     urlhaus: UrlhausClient,
+    // Cumulative set of known malware hashes. Each refresh unions the newly
+    // fetched (rolling-window) hashes in, so earlier malware is not forgotten.
+    known_hashes: Mutex<HashSet<String>>,
+    bloom_min_capacity: usize,
+    bloom_false_positive_rate: f64,
 }
 
 impl FeedManager {
-    pub fn new(config: FeedsConfig, tx: mpsc::Sender<FeedUpdate>) -> Self {
+    pub fn new(
+        config: FeedsConfig,
+        tx: mpsc::Sender<FeedUpdate>,
+        bloom_min_capacity: usize,
+        bloom_false_positive_rate: f64,
+    ) -> Self {
         Self {
             config,
             tx,
             malwarebazaar: MalwareBazaarClient::new(),
             urlhaus: UrlhausClient::new(),
+            known_hashes: Mutex::new(HashSet::new()),
+            bloom_min_capacity: bloom_min_capacity.max(1),
+            bloom_false_positive_rate,
         }
     }
 
@@ -77,11 +93,24 @@ impl FeedManager {
         tracing::info!("refreshing MalwareBazaar hash feed");
         match self.malwarebazaar.download_recent_hashes().await {
             Ok(hashes) => {
-                let mut bloom = BloomFilter::new(hashes.len().max(10_000), 0.001);
-                for hash in &hashes {
-                    bloom.insert(hash.as_bytes());
-                }
-                tracing::info!("built bloom filter with {} hashes", bloom.len());
+                // Union the new hashes into the cumulative set, then rebuild the
+                // bloom sized for the full set (a fixed bloom can't grow safely).
+                let bloom = {
+                    let mut known = self
+                        .known_hashes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    known.extend(hashes);
+                    let mut bloom = BloomFilter::new(
+                        known.len().max(self.bloom_min_capacity),
+                        self.bloom_false_positive_rate,
+                    );
+                    for hash in known.iter() {
+                        bloom.insert(hash.as_bytes());
+                    }
+                    bloom
+                };
+                tracing::info!("bloom filter now holds {} cumulative hashes", bloom.len());
                 if self.tx.send(FeedUpdate::BloomFilterReady(bloom)).await.is_err() {
                     tracing::warn!("feed update receiver dropped");
                 }

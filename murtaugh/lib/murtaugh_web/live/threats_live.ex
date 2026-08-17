@@ -9,7 +9,7 @@ defmodule MurtaughWeb.ThreatsLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "threats")
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.threats(socket.assigns.current_org.id))
     end
 
     shard = socket.assigns[:current_shard]
@@ -61,7 +61,9 @@ defmodule MurtaughWeb.ThreatsLive do
 
   @impl true
   def handle_info({:new_threat, threat}, socket) do
-    threats = [Presenters.present_threat(threat) | socket.assigns.threats]
+    # Cap the retained list so a long-lived tab on a busy tenant can't grow the
+    # socket's assigns without bound.
+    threats = [Presenters.present_threat(threat) | Enum.take(socket.assigns.threats, 199)]
     {:noreply, assign(socket, :threats, threats)}
   end
 
