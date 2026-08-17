@@ -14,6 +14,8 @@ pub struct DaemonStatus {
 }
 
 impl DaemonStatus {
+    // Reserved for the menubar rate display; kept on the status API surface.
+    #[allow(dead_code)]
     pub fn events_per_sec(&self) -> Option<f64> {
         let elapsed = self.last_update?.elapsed().as_secs_f64();
         if elapsed > 0.0 && self.events_processed > 0 {

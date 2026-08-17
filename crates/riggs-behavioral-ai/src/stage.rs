@@ -21,6 +21,30 @@ impl BehavioralAiStage {
             tracker: Mutex::new(BehaviorTracker::new()),
         }
     }
+
+    /// Construct with operator-configured memory caps.
+    pub fn with_limits(max_events_per_storyline: usize, max_storylines: usize) -> Self {
+        Self {
+            tracker: Mutex::new(
+                BehaviorTracker::new().with_limits(max_events_per_storyline, max_storylines),
+            ),
+        }
+    }
+
+    /// Construct with operator-configured memory caps and detection thresholds.
+    pub fn configured(
+        max_events_per_storyline: usize,
+        max_storylines: usize,
+        detection: &riggs_types::config::DetectionConfig,
+    ) -> Self {
+        Self {
+            tracker: Mutex::new(
+                BehaviorTracker::new()
+                    .with_limits(max_events_per_storyline, max_storylines)
+                    .with_detection(detection),
+            ),
+        }
+    }
 }
 
 impl Default for BehavioralAiStage {
@@ -39,10 +63,12 @@ impl DetectionStage for BehavioralAiStage {
         let storyline_id = extract_storyline_id(event);
 
         let patterns = {
+            // Recover from a poisoned lock instead of erroring out; a single
+            // panic under the lock must not disable behavioral detection forever.
             let mut tracker = self
                 .tracker
                 .lock()
-                .map_err(|e| RiggsError::Engine(format!("tracker lock poisoned: {e}")))?;
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
 
             tracker.track(event.clone());
             tracker.check_patterns(&storyline_id)

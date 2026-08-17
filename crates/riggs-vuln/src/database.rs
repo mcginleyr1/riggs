@@ -142,14 +142,28 @@ fn version_is_affected(
         }
     }
 
-    // Parse the affected version constraints
-    let constraints: Vec<&str> = affected_versions.split(',').map(|s| s.trim()).collect();
+    let trimmed = affected_versions.trim();
+    if trimmed.is_empty() || trimmed == "unknown" {
+        // No usable range. The global fixed check above already passed, so treat
+        // as affected only when a fixed version was actually supplied.
+        return fixed_version.is_some();
+    }
 
-    for constraint in &constraints {
-        let constraint = constraint.trim();
+    // Multiple affected ranges are OR-combined (separated by ';'); the
+    // comma-separated constraints within a single range are AND-combined.
+    trimmed
+        .split(';')
+        .map(str::trim)
+        .filter(|range| !range.is_empty())
+        .any(|range| range_matches(installed, range))
+}
 
-        if constraint == "*" {
-            return true;
+/// True when `installed` satisfies every comma-separated constraint in a single
+/// affected range.
+fn range_matches(installed: &Version, range: &str) -> bool {
+    for constraint in range.split(',').map(str::trim) {
+        if constraint.is_empty() || constraint == "*" {
+            continue;
         }
 
         if let Some(rest) = constraint.strip_prefix(">=") {
@@ -183,7 +197,7 @@ fn version_is_affected(
                 }
             }
         } else {
-            // Unparseable constraint — be conservative, assume affected
+            // Unparseable constraint — be conservative, assume it matches.
             warn!("Unparseable version constraint: '{constraint}'");
         }
     }
@@ -244,5 +258,21 @@ mod tests {
 
         let hits = db.lookup("openssl", "1.5.0");
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn lookup_multi_range_is_or_combined() {
+        let mut db = CveDatabase::new();
+        // Affects the 1.0.x and 2.0.x branches, but not the 1.2–1.9 gap.
+        db.add(make_cve(
+            "lib",
+            ">= 1.0.0, < 1.2.3; >= 2.0.0, < 2.1.0",
+            Some("2.1.0"),
+        ));
+
+        assert_eq!(db.lookup("lib", "1.1.0").len(), 1, "in first range");
+        assert_eq!(db.lookup("lib", "2.0.5").len(), 1, "in second range");
+        assert_eq!(db.lookup("lib", "1.5.0").len(), 0, "in the gap between ranges");
+        assert_eq!(db.lookup("lib", "3.0.0").len(), 0, "past all ranges");
     }
 }

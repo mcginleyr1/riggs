@@ -9,7 +9,16 @@ use crate::status::SharedStatus;
 fn socket_path() -> String {
     std::env::var("RIGGS_SOCKET").unwrap_or_else(|_| "/var/run/riggs.sock".to_string())
 }
-const POLL_INTERVAL_SECS: u64 = 3;
+const DEFAULT_POLL_INTERVAL_SECS: u64 = 3;
+
+/// Status poll cadence, overridable via RIGGS_MENUBAR_POLL_SECS.
+fn poll_interval_secs() -> u64 {
+    std::env::var("RIGGS_MENUBAR_POLL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_POLL_INTERVAL_SECS)
+}
 
 pub fn spawn_poller(status: SharedStatus) {
     std::thread::spawn(move || {
@@ -35,7 +44,7 @@ async fn poll_loop(status: SharedStatus) {
                 }
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(poll_interval_secs())).await;
     }
 }
 

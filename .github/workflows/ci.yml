@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # riggs-cloud/build.rs compiles protobufs at build time and needs protoc.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # NOTE: `cargo fmt --all --check` is not gated yet — the tree has never
+      # been run through rustfmt (~all files differ). Do a one-shot
+      # `cargo fmt --all` in its own commit, then add the check step here.
+
+      # Matches `make clippy`. Hard errors (non-exhaustive matches, missing
+      # fields) still fail the build; pre-existing style warnings do not block
+      # yet. Tighten to `-- -D warnings` once the warning backlog is cleared.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  elixir:
+    name: Murtaugh (compile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: murtaugh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.17"
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            murtaugh/deps
+            murtaugh/_build
+          key: mix-${{ runner.os }}-${{ hashFiles('murtaugh/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      # NOTE: `mix format --check-formatted` is not run yet. The formatter's
+      # `lib/**` glob pulls in generated `*.pb.ex` protobuf files, which are not
+      # hand-formatted; scope the formatter inputs to hand-written code first.
+
+      # NOTE: `mix test` is intentionally not run yet. The tenant DB migrations
+      # currently fail at create_hypertable (the events primary key omits the
+      # `timestamp` partition column). Once that Phase 1 fix lands, add a
+      # TimescaleDB service container and enable:
+      #   - name: Test
+      #     run: mix test

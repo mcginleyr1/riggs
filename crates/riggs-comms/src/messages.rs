@@ -31,6 +31,23 @@ pub enum ClientMessage {
         remote_port: u16,
     },
     DlpStatus,
+    EgressCheckFlow {
+        pid: u32,
+        process_path: String,
+        remote_hostname: String,
+        remote_ip: String,
+        remote_port: u16,
+    },
+    EgressStatus,
+    EgressAllow {
+        domain: String,
+    },
+    EgressDeny {
+        domain: String,
+    },
+    EgressSetMode {
+        mode: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,5 +76,16 @@ pub enum DaemonMessage {
         tracked_pids: usize,
         tracked_accesses: usize,
         watched_domains: usize,
+    },
+    EgressVerdict {
+        allow: bool,
+        would_block: bool,
+        reason: Option<String>,
+        mode: String,
+    },
+    EgressStatus {
+        mode: String,
+        allow_domains: usize,
+        process_rules: usize,
     },
 }

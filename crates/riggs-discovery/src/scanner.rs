@@ -27,6 +27,30 @@ pub enum ScanError {
 
 type Result<T> = std::result::Result<T, ScanError>;
 
+/// Poll granularity for datalink reads. Without a read timeout, `receiver.next()`
+/// blocks forever on a silent network and the deadline loop never re-checks the
+/// clock — so we bound each read and re-check the deadline between polls.
+const DATALINK_READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long to wait for ARP replies after blasting an active scan.
+const ARP_REPLY_WAIT: Duration = Duration::from_secs(3);
+
+fn datalink_config() -> datalink::Config {
+    datalink::Config {
+        read_timeout: Some(DATALINK_READ_TIMEOUT),
+        ..Default::default()
+    }
+}
+
+/// True when a datalink read error is just the poll timeout expiring (no packet
+/// arrived in the window) rather than a real channel failure.
+fn is_read_timeout(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
 fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8)> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
@@ -49,6 +73,10 @@ fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8)> {
 }
 
 fn enumerate_hosts(base: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
+    // /0 would enumerate the entire IPv4 space -- nonsensical for a local scan.
+    if prefix == 0 {
+        return Vec::new();
+    }
     if prefix >= 31 {
         return vec![base];
     }
@@ -59,7 +87,9 @@ fn enumerate_hosts(base: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
 }
 
 fn find_interface_for_subnet(target: Ipv4Addr, prefix: u8) -> Option<NetworkInterface> {
-    let mask = if prefix >= 32 {
+    let mask = if prefix == 0 {
+        0
+    } else if prefix >= 32 {
         u32::MAX
     } else {
         !((1u32 << (32 - prefix)) - 1)
@@ -138,7 +168,7 @@ impl NetworkScanner {
             .mac
             .ok_or_else(|| ScanError::Other("interface has no MAC address".into()))?;
 
-        let (mut sender, receiver) = match datalink::channel(&interface, Default::default()) {
+        let (mut sender, receiver) = match datalink::channel(&interface, datalink_config()) {
             Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
             Ok(_) => return Err(ScanError::Other("unsupported channel type".into())),
             Err(e) => {
@@ -192,7 +222,7 @@ impl NetworkScanner {
             "starting passive discovery"
         );
 
-        let (_, receiver) = match datalink::channel(&interface, Default::default()) {
+        let (_, receiver) = match datalink::channel(&interface, datalink_config()) {
             Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
             Ok(_) => return Err(ScanError::Other("unsupported channel type".into())),
             Err(e) => {
@@ -237,7 +267,7 @@ fn collect_arp_replies(
     mut receiver: Box<dyn pnet::datalink::DataLinkReceiver>,
 ) -> HashMap<Ipv4Addr, MacAddr> {
     let mut found: HashMap<Ipv4Addr, MacAddr> = HashMap::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + ARP_REPLY_WAIT;
 
     while std::time::Instant::now() < deadline {
         match receiver.next() {
@@ -254,6 +284,8 @@ fn collect_arp_replies(
                     }
                 }
             }
+            // Poll timeout: no packet this window -> re-check the deadline.
+            Err(ref e) if is_read_timeout(e) => continue,
             Err(_) => break,
         }
     }
@@ -280,6 +312,8 @@ fn sniff_arp_traffic(
                     }
                 }
             }
+            // Poll timeout: no packet this window -> re-check the deadline.
+            Err(ref e) if is_read_timeout(e) => continue,
             Err(_) => break,
         }
     }

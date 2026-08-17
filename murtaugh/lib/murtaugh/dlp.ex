@@ -54,6 +54,19 @@ defmodule Murtaugh.Dlp do
     end)
   end
 
+  @doc "Count of blocked DLP events since midnight UTC (dashboard 'DLP BLOCKS')."
+  def count_blocks_today(shard) do
+    Tenancy.with_tenant(shard, fn ->
+      start_of_day =
+        DateTime.utc_now()
+        |> DateTime.to_date()
+        |> DateTime.new!(~T[00:00:00], "Etc/UTC")
+
+      from(e in Event, where: e.action == "block" and e.timestamp >= ^start_of_day)
+      |> TenantRepo.aggregate(:count, :id)
+    end)
+  end
+
   def recent_blocks(shard, opts \\ []) do
     Tenancy.with_tenant(shard, fn ->
       limit = Keyword.get(opts, :limit, 25)

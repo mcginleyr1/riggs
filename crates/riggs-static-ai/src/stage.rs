@@ -34,6 +34,12 @@ impl StaticAiStage {
         }
     }
 
+    /// Override the max bytes read per file for analysis (operator-configurable).
+    pub fn with_max_scan_bytes(mut self, max_scan_bytes: u64) -> Self {
+        self.analyzer = self.analyzer.with_max_scan_bytes(max_scan_bytes);
+        self
+    }
+
     pub fn with_thresholds(
         model_path: PathBuf,
         suspicious_threshold: f32,
@@ -82,12 +88,17 @@ impl DetectionStage for StaticAiStage {
             return Ok(StageVerdict::Clean);
         }
 
-        // Skip files that are clearly not executables
+        // Skip files that are clearly not executables -- but only when the
+        // content agrees. A binary renamed to invoice.txt still has executable
+        // magic bytes and must be scanned, so the extension is trusted only for
+        // files that do NOT begin with a known executable signature.
         let skip_extensions = ["txt", "log", "json", "toml", "yaml", "yml", "xml",
             "csv", "md", "rst", "html", "css", "js", "ts", "py", "rb", "sh",
             "conf", "cfg", "ini", "lock", "pid", "sock", "tmp"];
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if skip_extensions.iter().any(|&s| s.eq_ignore_ascii_case(ext)) {
+            if skip_extensions.iter().any(|&s| s.eq_ignore_ascii_case(ext))
+                && !has_executable_magic(path)
+            {
                 return Ok(StageVerdict::Clean);
             }
         }
@@ -125,5 +136,54 @@ impl DetectionStage for StaticAiStage {
         } else {
             Ok(StageVerdict::Clean)
         }
+    }
+}
+
+/// True when the file begins with a known executable signature (ELF, Mach-O,
+/// PE/DOS), regardless of its extension.
+fn has_executable_magic(path: &Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
+        Ok(()) => {
+            matches!(
+                buf,
+                [0x7f, b'E', b'L', b'F']        // ELF
+                    | [0xFE, 0xED, 0xFA, 0xCE]  // Mach-O 32-bit
+                    | [0xFE, 0xED, 0xFA, 0xCF]  // Mach-O 64-bit
+                    | [0xCE, 0xFA, 0xED, 0xFE]  // Mach-O 32-bit (byte-swapped)
+                    | [0xCF, 0xFA, 0xED, 0xFE]  // Mach-O 64-bit (byte-swapped)
+                    | [0xCA, 0xFE, 0xBA, 0xBE]  // Mach-O universal
+            ) || buf[..2] == *b"MZ" // PE / DOS
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("riggs-static-ai-test-{}-{name}", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn detects_elf_magic_despite_extension() {
+        let path = write_temp("fake.txt", b"\x7fELF and some more bytes here");
+        assert!(has_executable_magic(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn plain_text_has_no_executable_magic() {
+        let path = write_temp("real.txt", b"just some plain text content here");
+        assert!(!has_executable_magic(&path));
+        let _ = std::fs::remove_file(&path);
     }
 }

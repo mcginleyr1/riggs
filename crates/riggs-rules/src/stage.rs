@@ -62,10 +62,29 @@ fn event_id(event: &RiggsEvent) -> EventId {
 
 fn severity_to_threat_level(severity: Severity) -> ThreatLevel {
     match severity {
-        Severity::Info | Severity::Low => ThreatLevel::Suspicious,
-        Severity::Medium | Severity::High => ThreatLevel::Suspicious,
-        Severity::Critical => ThreatLevel::Malicious,
+        Severity::Info | Severity::Low | Severity::Medium => ThreatLevel::Suspicious,
+        // A high-severity IOC (e.g. a live-malware URLhaus hit) is a confirmed
+        // match against known-bad infrastructure, so it warrants Malicious.
+        Severity::High | Severity::Critical => ThreatLevel::Malicious,
     }
+}
+
+/// Convert a verdict to a stage verdict by its threat level.
+fn stage_verdict(verdict: Verdict) -> StageVerdict {
+    match verdict.threat_level {
+        ThreatLevel::Malicious => StageVerdict::Malicious(verdict),
+        ThreatLevel::Suspicious => StageVerdict::Suspicious(verdict),
+        ThreatLevel::Clean => StageVerdict::Clean,
+    }
+}
+
+/// Pick the strongest verdict (highest threat level, then highest confidence).
+fn strongest(candidates: Vec<Verdict>) -> Option<Verdict> {
+    candidates.into_iter().max_by(|a, b| {
+        a.threat_level
+            .cmp(&b.threat_level)
+            .then(a.confidence.total_cmp(&b.confidence))
+    })
 }
 
 fn severity_to_confidence(severity: Severity) -> f32 {
@@ -87,7 +106,11 @@ impl DetectionStage for RulesStage {
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {
         let eid = event_id(event);
 
-        // Run IOC matching
+        // Run every matcher and keep the strongest verdict; a weak IOC/custom
+        // hit must not short-circuit a stronger YARA match on the same event.
+        let mut candidates: Vec<Verdict> = Vec::new();
+
+        // IOC matching
         if let Ok(guard) = self.ioc.read() {
             if let Some(ioc_matcher) = guard.as_ref() {
                 let ioc_hits = ioc_matcher.check_event(event);
@@ -103,39 +126,30 @@ impl DetectionStage for RulesStage {
                         .map(|ioc| format!("{}: {}", ioc.value, ioc.description))
                         .collect();
 
-                    let threat_level = severity_to_threat_level(worst_severity);
-                    let confidence = severity_to_confidence(worst_severity);
-
-                    let verdict = Verdict {
+                    candidates.push(Verdict {
                         event_id: eid.clone(),
-                        threat_level,
-                        confidence,
+                        threat_level: severity_to_threat_level(worst_severity),
+                        confidence: severity_to_confidence(worst_severity),
                         source: DetectionSource::IocMatch,
                         description: format!("IOC matches: {}", descriptions.join("; ")),
                         timestamp: Utc::now(),
-                    };
-
-                    return match threat_level {
-                        ThreatLevel::Malicious => Ok(StageVerdict::Malicious(verdict)),
-                        _ => Ok(StageVerdict::Suspicious(verdict)),
-                    };
+                    });
                 }
             }
         }
 
-        // Run custom rule evaluation
+        // Custom rule evaluation
         if let Some(custom_engine) = &self.custom {
             let matched_rules = custom_engine.evaluate(event);
             if !matched_rules.is_empty() {
-                let verdict = Verdict {
-                    event_id: eid,
+                candidates.push(Verdict {
+                    event_id: eid.clone(),
                     threat_level: ThreatLevel::Suspicious,
                     confidence: 0.7,
                     source: DetectionSource::CustomRule,
                     description: format!("Custom rules matched: {}", matched_rules.join(", ")),
                     timestamp: Utc::now(),
-                };
-                return Ok(StageVerdict::Suspicious(verdict));
+                });
             }
         }
 
@@ -148,18 +162,14 @@ impl DetectionStage for RulesStage {
                         Ok(matches) if !matches.is_empty() => {
                             let rule_names: Vec<&str> =
                                 matches.iter().map(|m| m.rule_name.as_str()).collect();
-                            let verdict = Verdict {
-                                event_id: eid,
+                            candidates.push(Verdict {
+                                event_id: eid.clone(),
                                 threat_level: ThreatLevel::Malicious,
                                 confidence: 0.9,
                                 source: DetectionSource::YaraRule,
-                                description: format!(
-                                    "YARA rules matched: {}",
-                                    rule_names.join(", ")
-                                ),
+                                description: format!("YARA rules matched: {}", rule_names.join(", ")),
                                 timestamp: Utc::now(),
-                            };
-                            return Ok(StageVerdict::Malicious(verdict));
+                            });
                         }
                         Err(e) => {
                             tracing::debug!(error = %e, path = %fe.path, "YARA scan failed");
@@ -170,6 +180,49 @@ impl DetectionStage for RulesStage {
             }
         }
 
-        Ok(StageVerdict::Clean)
+        Ok(strongest(candidates).map(stage_verdict).unwrap_or(StageVerdict::Clean))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verdict(level: ThreatLevel, confidence: f32, source: DetectionSource) -> Verdict {
+        Verdict {
+            event_id: EventId::new(),
+            threat_level: level,
+            confidence,
+            source,
+            description: String::new(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn high_severity_ioc_maps_to_malicious() {
+        assert_eq!(
+            severity_to_threat_level(Severity::High),
+            ThreatLevel::Malicious
+        );
+        assert_eq!(
+            severity_to_threat_level(Severity::Medium),
+            ThreatLevel::Suspicious
+        );
+    }
+
+    #[test]
+    fn strongest_yara_wins_over_weaker_ioc() {
+        // A suspicious IOC must not suppress a malicious YARA match.
+        let ioc = verdict(ThreatLevel::Suspicious, 0.8, DetectionSource::IocMatch);
+        let yara = verdict(ThreatLevel::Malicious, 0.9, DetectionSource::YaraRule);
+        let best = strongest(vec![ioc, yara]).unwrap();
+        assert_eq!(best.threat_level, ThreatLevel::Malicious);
+        assert_eq!(best.source, DetectionSource::YaraRule);
+    }
+
+    #[test]
+    fn strongest_is_none_for_no_matches() {
+        assert!(strongest(vec![]).is_none());
     }
 }

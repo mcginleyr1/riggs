@@ -2,23 +2,20 @@ defmodule MurtaughWeb.Plugs.Auth do
   @moduledoc """
   Fetches current_user from session and assigns it to the connection.
 
-  For now this uses a placeholder user map. When the Users context is ready,
-  this will look up a real user by session token.
+  Looks up the real user by the session's :user_id. A missing or stale
+  session id resolves to nil (RequireAuth then redirects to /login).
   """
   import Plug.Conn
 
   def init(opts), do: opts
 
   def call(conn, _opts) do
-    user_id = get_session(conn, :user_id)
+    user =
+      conn
+      |> get_session(:user_id)
+      |> Murtaugh.Accounts.get_user()
 
-    if user_id do
-      # Placeholder: in production this calls Murtaugh.Accounts.get_user/1
-      user = %{id: user_id, email: "operator@riggs.local", name: "Operator", role: :admin}
-      assign(conn, :current_user, user)
-    else
-      assign(conn, :current_user, nil)
-    end
+    assign(conn, :current_user, user)
   end
 end
 

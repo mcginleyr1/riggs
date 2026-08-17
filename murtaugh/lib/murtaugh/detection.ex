@@ -76,19 +76,66 @@ defmodule Murtaugh.Detection do
 
   def list_events(shard, opts \\ []) do
     Tenancy.with_tenant(shard, fn ->
-      limit = Keyword.get(opts, :limit, 100)
-      agent_id = Keyword.get(opts, :agent_id)
-
-      "events"
-      |> maybe_filter_agent_raw(agent_id)
+      events_query(opts)
       |> order_by([e], desc: e.timestamp)
-      |> limit(^limit)
+      |> limit(^Keyword.get(opts, :limit, 100))
+      |> offset(^Keyword.get(opts, :offset, 0))
+      |> select([e], %{
+        id: e.id,
+        timestamp: e.timestamp,
+        event_type: e.event_type,
+        severity: e.severity,
+        process_name: e.process_name,
+        process_path: e.process_path,
+        cmdline: e.cmdline,
+        agent_id: e.agent_id,
+        payload: e.payload
+      })
       |> TenantRepo.all()
     end)
   end
 
-  defp maybe_filter_agent_raw(query, nil), do: from(e in query)
-  defp maybe_filter_agent_raw(query, agent_id), do: from(e in query, where: e.agent_id == ^agent_id)
+  @doc "Total events matching the same filters as `list_events/2` (for pagination)."
+  def count_events(shard, opts \\ []) do
+    Tenancy.with_tenant(shard, fn ->
+      events_query(opts) |> TenantRepo.aggregate(:count, :id)
+    end)
+  end
+
+  # Shared filter chain for list_events/count_events so both see the same set.
+  defp events_query(opts) do
+    from(e in "events")
+    |> maybe_filter_agent_raw(Keyword.get(opts, :agent_id))
+    |> maybe_filter_event_type(Keyword.get(opts, :event_type))
+    |> maybe_filter_severity_str(Keyword.get(opts, :severity))
+    |> maybe_filter_since(Keyword.get(opts, :since))
+    |> maybe_search_events(Keyword.get(opts, :search))
+  end
+
+  defp maybe_filter_agent_raw(query, nil), do: query
+  defp maybe_filter_agent_raw(query, agent_id), do: where(query, [e], e.agent_id == ^agent_id)
+
+  defp maybe_filter_event_type(query, type) when type in [nil, "", "all"], do: query
+  defp maybe_filter_event_type(query, type), do: where(query, [e], e.event_type == ^type)
+
+  defp maybe_filter_severity_str(query, sev) when sev in [nil, "", "all"], do: query
+  defp maybe_filter_severity_str(query, sev), do: where(query, [e], e.severity == ^sev)
+
+  defp maybe_filter_since(query, nil), do: query
+  defp maybe_filter_since(query, %DateTime{} = since), do: where(query, [e], e.timestamp >= ^since)
+
+  defp maybe_search_events(query, term) when term in [nil, ""], do: query
+
+  defp maybe_search_events(query, term) do
+    like = "%#{term}%"
+
+    where(
+      query,
+      [e],
+      ilike(e.process_name, ^like) or ilike(e.process_path, ^like) or
+        ilike(e.cmdline, ^like) or ilike(e.event_type, ^like)
+    )
+  end
 
   defp maybe_filter_agent(query, nil), do: query
   defp maybe_filter_agent(query, agent_id), do: where(query, [t], t.agent_id == ^agent_id)

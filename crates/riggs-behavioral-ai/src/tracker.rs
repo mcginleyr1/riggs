@@ -1,29 +1,89 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use riggs_types::events::{
-    AuthAction, EventId, FileAction, FileEvent, KernelAction, NetworkDirection, NetworkEvent, ProcessAction, RiggsEvent, StorylineId,
+    AuthAction, FileAction, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
 };
 
 use crate::patterns::BehaviorPattern;
 
+/// Default cap on events retained per storyline. Detection windows only look at
+/// recent events, so keeping the most recent N bounds memory and O(n^2) rescans.
+const DEFAULT_MAX_EVENTS_PER_STORYLINE: usize = 512;
+/// Default cap on tracked storylines. Short-lived processes each open a
+/// storyline, so without this a busy host grows the map without bound.
+const DEFAULT_MAX_STORYLINES: usize = 4096;
+
 pub struct BehaviorTracker {
     storylines: HashMap<StorylineId, Vec<RiggsEvent>>,
+    max_events_per_storyline: usize,
+    max_storylines: usize,
+    exfil_threshold: usize,
+    rapid_file_threshold: usize,
+    rapid_window_secs: i64,
+    persistence_paths: Vec<String>,
 }
 
 impl BehaviorTracker {
     pub fn new() -> Self {
+        let d = riggs_types::config::DetectionConfig::default();
         Self {
             storylines: HashMap::new(),
+            max_events_per_storyline: DEFAULT_MAX_EVENTS_PER_STORYLINE,
+            max_storylines: DEFAULT_MAX_STORYLINES,
+            exfil_threshold: d.exfil_outbound_threshold,
+            rapid_file_threshold: d.rapid_encryption_file_threshold,
+            rapid_window_secs: d.rapid_encryption_window_secs,
+            persistence_paths: d.persistence_paths,
         }
+    }
+
+    /// Override the memory caps (operator-configurable).
+    pub fn with_limits(mut self, max_events_per_storyline: usize, max_storylines: usize) -> Self {
+        self.max_events_per_storyline = max_events_per_storyline.max(1);
+        self.max_storylines = max_storylines.max(1);
+        self
+    }
+
+    /// Apply operator-configured detection thresholds and signatures.
+    pub fn with_detection(mut self, cfg: &riggs_types::config::DetectionConfig) -> Self {
+        self.exfil_threshold = cfg.exfil_outbound_threshold;
+        self.rapid_file_threshold = cfg.rapid_encryption_file_threshold;
+        self.rapid_window_secs = cfg.rapid_encryption_window_secs;
+        self.persistence_paths = cfg.persistence_paths.clone();
+        self
     }
 
     pub fn track(&mut self, event: RiggsEvent) {
         let storyline_id = extract_storyline_id(&event);
+
+        // Bound the number of storylines: when a new one would exceed the cap,
+        // evict the least-recently-active storyline first.
+        if !self.storylines.contains_key(&storyline_id)
+            && self.storylines.len() >= self.max_storylines
+        {
+            if let Some(oldest) = self.least_recently_active() {
+                self.storylines.remove(&oldest);
+            }
+        }
+
+        let events = self.storylines.entry(storyline_id).or_default();
+        events.push(event);
+
+        // Bound per-storyline history to the most recent events.
+        if events.len() > self.max_events_per_storyline {
+            let overflow = events.len() - self.max_events_per_storyline;
+            events.drain(0..overflow);
+        }
+    }
+
+    /// The storyline whose most recent event is oldest (idle eviction target).
+    fn least_recently_active(&self) -> Option<StorylineId> {
         self.storylines
-            .entry(storyline_id)
-            .or_default()
-            .push(event);
+            .iter()
+            .filter_map(|(id, events)| events.last().map(|e| (id.clone(), e.timestamp())))
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(id, _)| id)
     }
 
     pub fn check_patterns(&self, storyline_id: &StorylineId) -> Vec<BehaviorPattern> {
@@ -78,12 +138,12 @@ impl BehaviorTracker {
             })
             .collect();
 
-        if file_modify_timestamps.len() < 10 {
+        if file_modify_timestamps.len() < self.rapid_file_threshold {
             return None;
         }
 
-        let window = Duration::seconds(5);
-        // Sliding window: for each event, count unique file paths within 5 seconds
+        let window = Duration::seconds(self.rapid_window_secs);
+        // Sliding window: for each event, count unique file paths within the window
         for (i, (ts, _)) in file_modify_timestamps.iter().enumerate() {
             let mut unique_paths: HashSet<&str> = HashSet::new();
             for (other_ts, path) in &file_modify_timestamps[i..] {
@@ -92,7 +152,7 @@ impl BehaviorTracker {
                 }
                 unique_paths.insert(path);
             }
-            if unique_paths.len() > 10 {
+            if unique_paths.len() > self.rapid_file_threshold {
                 return Some(BehaviorPattern::RapidFileEncryption);
             }
         }
@@ -141,7 +201,7 @@ impl BehaviorTracker {
                     // Look for a successful login from the same user within 60 seconds
                     for j in (i + 1)..auth_events.len() {
                         if auth_events[j].1 == &AuthAction::Login
-                            && auth_events[i].2 == &auth_events[j].2 // same user
+                            && auth_events[i].2 == auth_events[j].2 // same user
                             && (auth_events[j].0 - auth_events[i].0) <= Duration::seconds(60)
                         {
                             return Some(BehaviorPattern::PrivilegeEscalation);
@@ -151,18 +211,19 @@ impl BehaviorTracker {
             }
         }
 
-        // Signal 3: Process cmdline contains privilege escalation tools
-        // Tools like sudo, su, pkexec, doas, runuser are used to gain elevated privileges
-        const ESCALATION_COMMANDS: &[&str] = &["sudo ", "sudo\t", " pkexec", " doas", " runuser"];
+        // Signal 3: Process cmdline invokes a privilege-escalation tool.
+        // Match on the first token (basename) so an invocation at the very start
+        // of the cmdline is caught, whether bare (`pkexec ...`) or absolute
+        // (`/usr/bin/pkexec ...`), without matching unrelated substrings.
+        const ESCALATION_COMMANDS: &[&str] = &["sudo", "su", "pkexec", "doas", "runuser"];
 
         for event in events {
             if let RiggsEvent::Process(pe) = event {
                 if pe.action == ProcessAction::Exec {
                     let cmdline_lower = pe.process_context.cmdline.to_lowercase();
-                    if ESCALATION_COMMANDS
-                        .iter()
-                        .any(|cmd| cmdline_lower.contains(cmd))
-                    {
+                    let first_token = cmdline_lower.split_whitespace().next().unwrap_or("");
+                    let basename = first_token.rsplit('/').next().unwrap_or(first_token);
+                    if ESCALATION_COMMANDS.contains(&basename) {
                         return Some(BehaviorPattern::PrivilegeEscalation);
                     }
                 }
@@ -240,7 +301,7 @@ impl BehaviorTracker {
                     continue;
                 }
                 // DNS query resolved to the destination IP
-                if dns_query == net_dst || dns_query.trim_end_matches('.') == net_dst {
+                if dns_query == net_dst || dns_query.trim_end_matches('.') == net_dst.as_str() {
                     return Some(BehaviorPattern::LateralMovement);
                 }
             }
@@ -334,14 +395,17 @@ impl BehaviorTracker {
         let mut signals = Vec::new();
 
         // === Signal 1: High volume outbound connections ===
-        // Large number of outbound connections in the storyline
-        const OUTBOUND_THRESHOLD: usize = 50;
+        // Large number of EXTERNAL outbound connections in the storyline. Internal
+        // traffic (backups, replication) is excluded so it doesn't read as exfil.
+        // (threshold is operator-configurable via [detection].exfil_outbound_threshold)
         let outbound_count = events
             .iter()
-            .filter(|e| matches!(e, RiggsEvent::Network(ne) if ne.direction == NetworkDirection::Outbound))
+            .filter(|e| matches!(e, RiggsEvent::Network(ne)
+                if ne.direction == NetworkDirection::Outbound
+                    && !Self::is_internal_ip(&ne.dst_addr)))
             .count();
 
-        if outbound_count >= OUTBOUND_THRESHOLD {
+        if outbound_count >= self.exfil_threshold {
             score += 1;
             signals.push("high_outbound_volume".to_string());
         }
@@ -387,26 +451,27 @@ impl BehaviorTracker {
 
         // === Signal 4: Data staging + exfiltration pattern ===
         // File operations followed by outbound network transfers
-        let mut has_file_staging = false;
         let mut has_outbound_after_staging = false;
 
-        // Find file operations (Create/Modify) followed by outbound network events
-        let mut max_file_timestamp: i64 = i64::MIN;
-        for event in events {
-            if let RiggsEvent::File(fe) = event {
-                if matches!(fe.action, FileAction::Create | FileAction::Modify) {
-                    if fe.timestamp > max_file_timestamp {
-                        max_file_timestamp = fe.timestamp;
-                    }
+        // Find the most recent file operation (Create/Modify), then look for an
+        // external outbound transfer at or after it.
+        let max_file_timestamp = events
+            .iter()
+            .filter_map(|event| match event {
+                RiggsEvent::File(fe)
+                    if matches!(fe.action, FileAction::Create | FileAction::Modify) =>
+                {
+                    Some(fe.timestamp)
                 }
-            }
-        }
+                _ => None,
+            })
+            .max();
 
-        if max_file_timestamp != i64::MIN {
+        if let Some(max_ts) = max_file_timestamp {
             for event in events {
                 if let RiggsEvent::Network(ne) = event {
                     if ne.direction == NetworkDirection::Outbound
-                        && ne.timestamp >= max_file_timestamp
+                        && ne.timestamp >= max_ts
                         && !Self::is_internal_ip(&ne.dst_addr)
                     {
                         has_outbound_after_staging = true;
@@ -431,31 +496,17 @@ impl BehaviorTracker {
         // 2+ signals: Malicious (strong indicator of exfiltration)
         match score {
             0 => None,
-            1 => Some(BehaviorPattern::DataExfiltration),
-            2.. => Some(BehaviorPattern::DataExfiltration),
+            _ => Some(BehaviorPattern::DataExfiltration),
         }
     }
 
     fn check_persistence_mechanism(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        const PERSISTENCE_PATHS: &[&str] = &[
-            "/Library/LaunchDaemons",
-            "/Library/LaunchAgents",
-            "~/Library/LaunchAgents",
-            ".config/autostart",
-            "/etc/cron.d",
-            "/etc/crontab",
-            "/var/spool/cron",
-            "/etc/systemd/system",
-            "/usr/lib/systemd/system",
-            "/etc/init.d",
-            "/etc/rc.local",
-        ];
-
+        // Persistence paths are operator-configurable via [detection].persistence_paths.
         for event in events {
             if let RiggsEvent::File(fe) = event {
                 if matches!(fe.action, FileAction::Create | FileAction::Modify) {
                     let path_lower = fe.path.to_lowercase();
-                    for persistence_path in PERSISTENCE_PATHS {
+                    for persistence_path in &self.persistence_paths {
                         if path_lower.contains(&persistence_path.to_lowercase()) {
                             return Some(BehaviorPattern::PersistenceMechanism);
                         }
@@ -519,8 +570,10 @@ impl BehaviorTracker {
 
         // === Signal 1: Outbound connections to mining pool ports ===
         // Ports used by Stratum protocol and mining pool proxies
+        // 443 is deliberately excluded: it is HTTPS and far too common to treat
+        // as a mining signal on its own.
         const MINING_PORTS: &[u16] = &[
-            3333, 443, 4433, 4444, 5555, 6666, 7777, 8333,
+            3333, 4433, 4444, 5555, 6666, 7777, 8333,
             8888, 9999, 14444, 14445, 45700, 55555,
         ];
 
@@ -666,18 +719,12 @@ impl BehaviorTracker {
         // 1 signal alone = Suspicious (conflict with legitimate uses)
         // 2+ signals = Malicious (strong indicator of mining)
         // Miner binary + mining port = Malicious (very strong indicator)
+        // Any distinctive mining signal (miner binary, mining-pool domain, or a
+        // dedicated Stratum port) is enough; combinations only reinforce it.
+        // 443 was already excluded from the port list above.
         match score {
             0 => None,
-            1 => {
-                // Single signal — suspicious but not conclusive
-                // Port-only without domain correlation is weak (443 is common)
-                if signals == vec!["mining_port"] {
-                    None // Too weak alone — port 443 is too noisy
-                } else {
-                    Some(BehaviorPattern::CryptoMining)
-                }
-            }
-            2.. => Some(BehaviorPattern::CryptoMining),
+            _ => Some(BehaviorPattern::CryptoMining),
         }
     }
 }
@@ -702,6 +749,8 @@ fn extract_storyline_id(event: &RiggsEvent) -> StorylineId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use riggs_types::events::{EventId, FileEvent, NetworkEvent, ProcessContext};
 
     fn make_ctx(pid: u32, name: &str) -> ProcessContext {
         ProcessContext::new(
@@ -721,7 +770,10 @@ mod tests {
         );
         let events = vec![kernel_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -738,7 +790,10 @@ mod tests {
         );
         let events = vec![process_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -759,7 +814,10 @@ mod tests {
         );
         let events = vec![normal_event, kernel_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -776,7 +834,10 @@ mod tests {
         );
         let events = vec![module_load];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // ModuleLoad alone should not trigger process injection
@@ -809,7 +870,10 @@ mod tests {
         );
         let events = vec![auth_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -818,21 +882,21 @@ mod tests {
 
     #[test]
     fn test_brute_force_success_detected() {
-        let failed = make_auth_event(
-            AuthAction::Failed,
-            2001,
+        // Failed then successful auth for the same user must share a storyline
+        // to correlate, so both events are built from one context.
+        let ctx = ProcessContext::new(
+            2001, 0, "auth_service", "/usr/sbin/authserv", "",
             "user",
-            "password",
+            StorylineId::new(),
         );
-        let success = make_auth_event(
-            AuthAction::Login,
-            2001,
-            "user",
-            "password",
-        );
+        let failed = RiggsEvent::new_auth(AuthAction::Failed, ctx.clone(), "user", "password");
+        let success = RiggsEvent::new_auth(AuthAction::Login, ctx.clone(), "user", "password");
         let events = vec![failed, success];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -855,7 +919,10 @@ mod tests {
         );
         let events = vec![failed, success];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         // Different users — not a brute force pattern
@@ -877,7 +944,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -899,7 +969,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -927,7 +1000,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -955,7 +1031,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Normal: root spawning root (e.g., ssh session)
@@ -972,7 +1051,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1021,7 +1103,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1038,7 +1123,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1055,7 +1143,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1072,7 +1163,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1089,7 +1183,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
@@ -1105,7 +1202,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Inbound connections are not lateral movement
@@ -1122,7 +1222,10 @@ mod tests {
         );
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
@@ -1140,7 +1243,10 @@ mod tests {
         );
         let events = vec![dns_event, net_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1163,7 +1269,10 @@ mod tests {
         );
         let events = vec![auth_event, net_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1186,7 +1295,10 @@ mod tests {
         );
         let events = vec![auth_event, net_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1203,16 +1315,20 @@ mod tests {
         );
         let net_event = make_network_event(
             NetworkDirection::Outbound,
-            13002, // Different PID
-            "10.0.0.100",
-            445,
+            13002,        // Different PID
+            "10.0.0.100", // internal, but on a non-lateral port
+            8080,
         );
         let events = vec![auth_event, net_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
-        // Different PIDs — not from the same process
+        // Different PIDs (and thus storylines) — the auth and the connection do
+        // not correlate, and the connection alone is on a benign port.
         assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
     }
 
@@ -1252,7 +1368,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1300,7 +1419,10 @@ mod tests {
         let event = make_mining_network_event(20001, "pool.example.com", 3333);
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Mining port alone is suspicious but not conclusive (443 is noisy)
@@ -1314,7 +1436,10 @@ mod tests {
         let event = make_mining_network_event(20002, "f2pool.com", 4444);
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1326,7 +1451,10 @@ mod tests {
         let event = make_mining_network_event(20003, "ethermine.org", 14444);
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1338,7 +1466,10 @@ mod tests {
         let event = make_mining_network_event(20004, "nicehash.com", 45700);
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1351,7 +1482,10 @@ mod tests {
         let event = make_mining_network_event(20005, "example.com", 443);
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Port 443 alone is intentionally not flagged (too many legitimate uses)
@@ -1363,7 +1497,10 @@ mod tests {
         let event = make_mining_network_event(20006, "example.com", 8080);
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1371,8 +1508,7 @@ mod tests {
 
     #[test]
     fn test_inbound_to_mining_port_not_flagged() {
-        let event = make_mining_network_event(20007, "192.168.1.50");
-        // Note: this helper uses Outbound direction, so we need to create manually
+        // This helper uses Outbound direction, so we build the inbound flow manually.
         let ctx = ProcessContext::new(
             20007, 0, "server", "/usr/bin/server", "",
             "user",
@@ -1389,7 +1525,10 @@ mod tests {
         );
         let events = vec![inbound_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Inbound connections are not mining
@@ -1401,7 +1540,10 @@ mod tests {
         let event = make_mining_dns_event(21001, "pool.ethermine.org", "146.190.28.145");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1413,7 +1555,10 @@ mod tests {
         let event = make_mining_dns_event(21002, "www.nicehash.com", "185.177.150.207");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1425,7 +1570,10 @@ mod tests {
         let event = make_mining_dns_event(21003, "random-lookup.com", "f2pool.com");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Domain in response also triggers detection
@@ -1438,7 +1586,10 @@ mod tests {
         let event = make_mining_dns_event(21004, "www.google.com", "142.250.80.46");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1449,7 +1600,10 @@ mod tests {
         let event = make_mining_process_event(22001, "xmrig", "/tmp/xmrig", "./xmrig -o pool.example.com");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1461,7 +1615,10 @@ mod tests {
         let event = make_mining_process_event(22002, "cpuminer", "/usr/local/bin/cpuminer", "./cpuminer -a sha256d");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1473,7 +1630,10 @@ mod tests {
         let event = make_mining_process_event(22003, "ethminer", "/usr/bin/ethminer", "ethminer -G");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1482,13 +1642,14 @@ mod tests {
 
     #[test]
     fn test_mining_name_in_cmdline_detected() {
-        let event = make_mining_process_event(22004, "bash", "/bin/bash", "./start_mining.sh");
-        // "xmrig" not in name/path, but mining script implies it
-        // Actually, let's test with xmrig in cmdline
+        // Miner name only in the cmdline (not the process name/path).
         let event = make_mining_process_event(22004, "bash", "/bin/bash", "./xmrig -o pool.example.com");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1500,7 +1661,10 @@ mod tests {
         let event = make_mining_process_event(22005, "firefox", "/usr/bin/firefox", "firefox");
         let events = vec![event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1513,7 +1677,10 @@ mod tests {
         let dns_event = make_mining_dns_event(23001, "pool.ethermine.org", "146.190.28.145");
         let events = vec![net_event, dns_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1527,7 +1694,10 @@ mod tests {
         let net_event = make_mining_network_event(23002, "pool.example.com", 3333);
         let events = vec![proc_event, net_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1541,7 +1711,10 @@ mod tests {
         let dns_event = make_mining_dns_event(23003, "pool.ethermine.org", "146.190.28.145");
         let events = vec![proc_event, dns_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1558,7 +1731,10 @@ mod tests {
         );
         let events = vec![exec_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1576,7 +1752,10 @@ mod tests {
         let net_event = make_mining_network_event(24002, "142.250.80.46", 443);
         let events = vec![exec_event, dns_event, net_event];
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[2].storyline_id());
 
         // Normal browsing — no mining signals
@@ -1584,40 +1763,6 @@ mod tests {
     }
 
     // --- Data Exfiltration Tests (T1041) ---
-
-    fn make_outbound_network_event(pid: u32, dst_addr: &str, dst_port: u16) -> RiggsEvent {
-        let ctx = ProcessContext::new(
-            pid, 0, "curl", "/usr/bin/curl", "",
-            "user",
-            StorylineId::new(),
-        );
-        RiggsEvent::new_network(
-            NetworkDirection::Outbound,
-            ctx,
-            "192.168.1.100",
-            dst_addr,
-            52000,
-            dst_port,
-            "tcp",
-        )
-    }
-
-    fn make_internal_network_event(pid: u32, dst_addr: &str, dst_port: u16) -> RiggsEvent {
-        let ctx = ProcessContext::new(
-            pid, 0, "ssh", "/usr/bin/ssh", "",
-            "user",
-            StorylineId::new(),
-        );
-        RiggsEvent::new_network(
-            NetworkDirection::Outbound,
-            ctx,
-            "192.168.1.100",
-            dst_addr,
-            52000,
-            dst_port,
-            "tcp",
-        )
-    }
 
     #[test]
     fn test_high_outbound_volume_detected() {
@@ -1643,7 +1788,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1652,13 +1800,14 @@ mod tests {
 
     #[test]
     fn test_below_outbound_threshold_not_flagged() {
-        // 49 outbound connections — below threshold
+        // 19 external connections — below both the volume (50) and the external
+        // concentration (20) thresholds, so nothing should fire.
         let ctx = ProcessContext::new(
             31002, 0, "browser", "/usr/bin/chrome", "",
             "user",
             StorylineId::new(),
         );
-        let events: Vec<_> = (0..49)
+        let events: Vec<_> = (0..19)
             .map(|i| {
                 RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
@@ -1666,7 +1815,7 @@ mod tests {
                     process_context: ctx.clone(),
                     direction: NetworkDirection::Outbound,
                     src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    dst_addr: format!("203.0.{}.{}", i / 256, i % 256),
                     src_port: 52000,
                     dst_port: 443,
                     protocol: "tcp".to_string(),
@@ -1674,7 +1823,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1696,7 +1848,7 @@ mod tests {
                     process_context: ctx.clone(),
                     direction: NetworkDirection::Outbound,
                     src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    dst_addr: format!("203.0.{}.{}", i / 256, i % 256),
                     src_port: 52000,
                     dst_port: 80,
                     protocol: "tcp".to_string(),
@@ -1704,7 +1856,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1720,7 +1875,7 @@ mod tests {
             StorylineId::new(),
         );
         let events: Vec<_> = (0..50)
-            .map(|i| {
+            .map(|_i| {
                 RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
@@ -1735,7 +1890,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Internal connections — not exfiltration
@@ -1758,15 +1916,18 @@ mod tests {
                     process_context: ctx.clone(),
                     direction: NetworkDirection::Outbound,
                     src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    dst_addr: format!("203.0.0.{}", i),
                     src_port: 52000,
-                    dst_port: 4444 + i, // Unusual ports
+                    dst_port: 41000 + i, // Unusual, non-mining ports
                     protocol: "tcp".to_string(),
                 })
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1797,7 +1958,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1841,7 +2005,10 @@ mod tests {
             }));
         }
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[events.len() - 1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -1872,7 +2039,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // No file staging — should not trigger staging signal
@@ -1888,7 +2058,7 @@ mod tests {
             StorylineId::new(),
         );
         let events: Vec<_> = (0..10)
-            .map(|i| {
+            .map(|_i| {
                 RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
@@ -1903,7 +2073,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -1947,16 +2120,21 @@ mod tests {
             }));
         }
 
-        // Add some DNS and process events
+        // Add a benign process event on the same storyline. (A DNS event would
+        // carry its own storyline via the helper, so it is intentionally omitted.)
         events.push(RiggsEvent::new_process(
             ProcessAction::Exec,
             ctx.clone(),
             None,
         ));
-        events.push(make_mining_dns_event(31010, "www.google.com", "142.250.80.46"));
 
-        let tracker = BehaviorTracker::new();
-        let patterns = tracker.check_patterns(events[events.len() - 1].storyline_id());
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
+        // Inspect the exfiltration storyline (the shared ctx), not a later event
+        // that may belong to a different storyline.
+        let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
         assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
@@ -1978,7 +2156,7 @@ mod tests {
                     process_context: ctx.clone(),
                     direction: NetworkDirection::Outbound,
                     src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("{}.{}.{}.{}", 10 + (i % 200), i / 256, i % 256, 1),
+                    dst_addr: format!("203.0.{}.{}", i / 256, i % 256),
                     src_port: 52000,
                     dst_port: 80,
                     protocol: "tcp".to_string(),
@@ -1986,7 +2164,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -2017,7 +2198,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -2039,15 +2223,18 @@ mod tests {
                     process_context: ctx.clone(),
                     direction: NetworkDirection::Outbound,
                     src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    dst_addr: format!("203.0.0.{}", i),
                     src_port: 52000,
-                    dst_port: 4444 + i, // Unusual ports
+                    dst_port: 41000 + i, // Unusual, non-mining ports
                     protocol: "tcp".to_string(),
                 })
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
@@ -2069,15 +2256,18 @@ mod tests {
                     process_context: ctx.clone(),
                     direction: NetworkDirection::Outbound,
                     src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("{}.{}.{}.{}", 10 + i, 0, 0, 1),
+                    dst_addr: format!("203.0.0.{}", i),
                     src_port: 52000,
-                    dst_port: 4444 + i, // Unusual ports
+                    dst_port: 41000 + i, // Unusual, non-mining ports
                     protocol: "tcp".to_string(),
                 })
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -2109,7 +2299,10 @@ mod tests {
             })
             .collect();
 
-        let tracker = BehaviorTracker::new();
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
@@ -2117,5 +2310,31 @@ mod tests {
 
         // Verify it's ONLY DataExfiltration, not crypto mining or anything else
         assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
+    }
+
+    // --- Resource-cap tests (hardening) ---
+
+    fn cap_event_for(storyline: &StorylineId) -> RiggsEvent {
+        let ctx = ProcessContext::new(1, 0, "t", "/t", "t", "root", storyline.clone());
+        RiggsEvent::new_process(ProcessAction::Exec, ctx, None)
+    }
+
+    #[test]
+    fn caps_events_per_storyline() {
+        let mut tracker = BehaviorTracker::new();
+        let sid = StorylineId::new();
+        for _ in 0..(DEFAULT_MAX_EVENTS_PER_STORYLINE + 50) {
+            tracker.track(cap_event_for(&sid));
+        }
+        assert_eq!(tracker.storyline_event_count(&sid), DEFAULT_MAX_EVENTS_PER_STORYLINE);
+    }
+
+    #[test]
+    fn caps_total_storylines() {
+        let mut tracker = BehaviorTracker::new();
+        for _ in 0..(DEFAULT_MAX_STORYLINES + 20) {
+            tracker.track(cap_event_for(&StorylineId::new()));
+        }
+        assert!(tracker.storylines.len() <= DEFAULT_MAX_STORYLINES);
     }
 }

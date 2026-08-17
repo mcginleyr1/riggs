@@ -9,7 +9,7 @@ defmodule MurtaughWeb.ThreatDetailLive do
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "threats")
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.threats(socket.assigns.current_org.id))
     end
 
     shard = socket.assigns[:current_shard]

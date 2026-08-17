@@ -261,33 +261,95 @@ fn extract_cvss_score(severity: Option<&[OsvSeverity]>) -> f32 {
 }
 
 fn parse_cvss_vector(score_str: &str) -> Option<f32> {
+    let score_str = score_str.trim();
+
+    // Some feeds store the numeric base score directly.
     if let Ok(score) = score_str.parse::<f32>() {
         return Some(score);
     }
 
-    // CVSS vector strings look like "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
-    // The base score is not directly in the vector; however, some OSV entries
-    // store the numeric score as the value. Try extracting a float from common
-    // patterns.
-    if score_str.starts_with("CVSS:") {
-        // Some entries append the score after a slash or space at the end.
-        // As a heuristic, try the last segment.
-        if let Some(last) = score_str.rsplit('/').next() {
-            if let Ok(score) = last.parse::<f32>() {
-                return Some(score);
-            }
-        }
-        // If the vector string doesn't contain a parseable score, we can't
-        // compute it without a full CVSS calculator. Return None so we fall
-        // through to a default.
-        warn!(
-            vector = score_str,
-            "CVSS vector string without extractable score"
-        );
-        return None;
+    // CVSS v3.x vector, e.g. "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H".
+    if score_str.starts_with("CVSS:3") {
+        return cvss_v3_base_score(score_str);
     }
 
+    // CVSS v4 and other formats have no calculator here; the caller falls back.
+    warn!(vector = score_str, "unsupported CVSS vector; no base score computed");
     None
+}
+
+/// Compute the CVSS v3.0/3.1 base score from a vector string.
+fn cvss_v3_base_score(vector: &str) -> Option<f32> {
+    use std::collections::HashMap;
+
+    let metrics: HashMap<&str, &str> = vector
+        .split('/')
+        .filter_map(|part| part.split_once(':'))
+        .collect();
+
+    let av = match *metrics.get("AV")? {
+        "N" => 0.85,
+        "A" => 0.62,
+        "L" => 0.55,
+        "P" => 0.2,
+        _ => return None,
+    };
+    let ac = match *metrics.get("AC")? {
+        "L" => 0.77,
+        "H" => 0.44,
+        _ => return None,
+    };
+    let ui = match *metrics.get("UI")? {
+        "N" => 0.85,
+        "R" => 0.62,
+        _ => return None,
+    };
+    let scope_changed = match *metrics.get("S")? {
+        "U" => false,
+        "C" => true,
+        _ => return None,
+    };
+    // Privileges Required weight depends on Scope.
+    let pr = match (*metrics.get("PR")?, scope_changed) {
+        ("N", _) => 0.85,
+        ("L", false) => 0.62,
+        ("L", true) => 0.68,
+        ("H", false) => 0.27,
+        ("H", true) => 0.5,
+        _ => return None,
+    };
+    let impact_metric = |v: &str| match v {
+        "H" => Some(0.56_f64),
+        "L" => Some(0.22),
+        "N" => Some(0.0),
+        _ => None,
+    };
+    let c = impact_metric(metrics.get("C")?)?;
+    let i = impact_metric(metrics.get("I")?)?;
+    let a = impact_metric(metrics.get("A")?)?;
+
+    let iss = 1.0 - ((1.0 - c) * (1.0 - i) * (1.0 - a));
+    let impact = if scope_changed {
+        7.52 * (iss - 0.029) - 3.25 * (iss - 0.02).powi(15)
+    } else {
+        6.42 * iss
+    };
+    let exploitability = 8.22 * av * ac * pr * ui;
+
+    let base = if impact <= 0.0 {
+        0.0
+    } else if scope_changed {
+        roundup(f64::min(1.08 * (impact + exploitability), 10.0))
+    } else {
+        roundup(f64::min(impact + exploitability, 10.0))
+    };
+
+    Some(base as f32)
+}
+
+/// CVSS "Roundup": the smallest one-decimal value >= x.
+fn roundup(x: f64) -> f64 {
+    (x * 10.0).ceil() / 10.0
 }
 
 fn parse_osv_timestamp(ts: &str) -> Option<DateTime<Utc>> {
@@ -378,9 +440,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_cvss_vector_string_returns_none_without_score() {
-        let vector = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H";
-        assert_eq!(parse_cvss_vector(vector), None);
+    fn parse_cvss_v3_vector_computes_base_score() {
+        // Canonical CVSS v3.1 base-score examples.
+        assert_eq!(
+            parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+            Some(9.8)
+        );
+        assert_eq!(
+            parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"),
+            Some(10.0)
+        );
+        assert_eq!(
+            parse_cvss_vector("CVSS:3.0/AV:L/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N"),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn parse_malformed_cvss_vector_returns_none() {
+        assert_eq!(parse_cvss_vector("CVSS:3.1/AV:X/AC:L"), None);
     }
 
     #[test]

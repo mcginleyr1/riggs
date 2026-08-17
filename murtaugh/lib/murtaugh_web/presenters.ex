@@ -9,7 +9,7 @@ defmodule MurtaughWeb.Presenters do
       id: id,
       hostname: agent.hostname,
       os: agent.os,
-      status: String.to_existing_atom(agent.status),
+      status: coerce_atom(agent.status),
       last_heartbeat: time_ago(agent.last_heartbeat),
       threats: agent.threats_detected || 0,
       dlp_blocks: agent.dlp_blocks || 0,
@@ -22,7 +22,7 @@ defmodule MurtaughWeb.Presenters do
       id: id,
       hostname: agent.hostname,
       os: "#{agent.os} #{agent.os_version}",
-      status: String.to_existing_atom(agent.status),
+      status: coerce_atom(agent.status),
       last_heartbeat: time_ago(agent.last_heartbeat),
       version: agent.agent_version || "unknown",
       ip: agent.ip_address || "unknown",
@@ -37,7 +37,7 @@ defmodule MurtaughWeb.Presenters do
     %{
       id: id,
       time: time_ago(threat.timestamp),
-      level: String.to_existing_atom(threat.threat_level),
+      level: coerce_atom(threat.threat_level),
       process: threat.process_name || "unknown",
       agent: threat.agent_id |> String.slice(0..7),
       status: threat.status,
@@ -109,7 +109,15 @@ defmodule MurtaughWeb.Presenters do
   defp format_date(_), do: "unknown"
 
   defp coerce_atom(s) when is_atom(s), do: s
-  defp coerce_atom(s) when is_binary(s), do: String.to_existing_atom(s)
+
+  defp coerce_atom(s) when is_binary(s) do
+    # to_existing_atom never invents atoms (no atom-table DoS); rescue unknown
+    # (attacker-influenced) values to a safe default instead of crashing render.
+    String.to_existing_atom(s)
+  rescue
+    ArgumentError -> :info
+  end
+
   defp coerce_atom(_), do: :info
 
   defp event_description(%{event_type: type, process_name: name, payload: payload}) do

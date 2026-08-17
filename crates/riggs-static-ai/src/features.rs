@@ -152,9 +152,22 @@ pub fn extract_suspicious_strings(bytes: &[u8]) -> Vec<String> {
     found
 }
 
+/// Default cap on how many bytes of a file are read for static analysis, so a
+/// huge file can't blow up memory. Malware headers/strings live well within
+/// this; operators can override via [engine].static_ai_max_scan_mib.
+pub const DEFAULT_MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+
 impl FileFeatures {
     pub fn extract(path: &Path) -> Result<Self, FeatureError> {
-        let bytes = fs::read(path)?;
+        Self::extract_with_limit(path, DEFAULT_MAX_SCAN_BYTES)
+    }
+
+    pub fn extract_with_limit(path: &Path, max_bytes: u64) -> Result<Self, FeatureError> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(max_bytes)
+            .read_to_end(&mut bytes)?;
         Self::extract_from_bytes(&bytes)
     }
 
@@ -411,10 +424,13 @@ impl FileFeatures {
             .section_headers
             .iter()
             .map(|sh| {
+                // sh_offset/sh_size are attacker-controlled u64; use saturating
+                // math and an explicit bound so a crafted header can't overflow
+                // or produce a start > end slice (which would panic).
                 let offset = sh.sh_offset as usize;
                 let size = sh.sh_size as usize;
-                let end = (offset + size).min(bytes.len());
-                if offset < bytes.len() && size > 0 {
+                let end = offset.saturating_add(size).min(bytes.len());
+                if offset < end {
                     calculate_entropy(&bytes[offset..end])
                 } else {
                     0.0
@@ -530,10 +546,11 @@ impl FileFeatures {
         for segment in &macho.segments {
             for (section, _) in segment.sections().unwrap_or_default() {
                 section_count += 1;
+                // Attacker-controlled u64 fields: saturate and bound-check.
                 let offset = section.offset as usize;
                 let size = section.size as usize;
-                let end = (offset + size).min(bytes.len());
-                if offset < bytes.len() && size > 0 {
+                let end = offset.saturating_add(size).min(bytes.len());
+                if offset < end {
                     section_entropies.push(calculate_entropy(&bytes[offset..end]));
                 } else {
                     section_entropies.push(0.0);

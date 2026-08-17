@@ -32,32 +32,11 @@ async fn main() {
     print_banner();
     info!(version = VERSION, "riggs daemon starting");
 
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-
-        tokio::select! {
-            result = run_daemon() => {
-                if let Err(e) = result {
-                    error!("daemon fatal error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            _ = sigterm.recv() => {
-                info!("received SIGTERM, initiating shutdown");
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        if let Err(e) = run_daemon().await {
-            error!("daemon fatal error: {e}");
-            std::process::exit(1);
-        }
+    // SIGTERM and SIGINT are both handled inside RiggsDaemon::run so that either
+    // signal runs the same graceful shutdown path.
+    if let Err(e) = run_daemon().await {
+        error!("daemon fatal error: {e}");
+        std::process::exit(1);
     }
 }
 

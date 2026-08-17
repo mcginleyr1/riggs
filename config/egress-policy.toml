@@ -1,0 +1,59 @@
+# Riggs egress allowlist — default-deny outbound control.
+#
+# The daemon hot-reloads this file (/etc/riggs/egress-policy.toml, or
+# config/egress-policy.toml in dev). Manage it locally with:
+#   riggs egress status
+#   riggs egress allow github.com
+#   riggs egress mode monitor|enforce|off
+#
+# Start in "monitor": nothing is dropped, but would-block decisions are logged
+# so you can see what enforce WOULD break before turning it on.
+
+enabled = true
+mode    = "monitor"        # off | monitor | enforce
+
+# Global allowlist (applies to processes without a specific rule below).
+allow_domains = [
+  "github.com",
+  "*.githubusercontent.com",
+]
+allow_cidrs = ["10.0.0.0/8", "192.168.0.0/16"]   # internal ranges / no-SNI flows
+allow_ports = []                                  # empty = any port
+
+# Baseline — always permitted so the host can't strand itself.
+[baseline]
+dns = true
+dhcp_ntp = true
+loopback = true
+
+# Per-process rules — the supply-chain defense. A process matched here is
+# restricted to ITS list, so a poisoned pre/post-install script that tries to
+# beacon credentials to a C&C host is denied, while the package manager can
+# still reach its registry. Add your internal mirror to each.
+[[process_rules]]
+process = "npm"
+allow_domains = ["registry.npmjs.org", "*.npmjs.org"]
+
+[[process_rules]]
+process = "node"
+allow_domains = ["registry.npmjs.org", "*.npmjs.org"]
+
+[[process_rules]]
+process = "pnpm"
+allow_domains = ["registry.npmjs.org", "*.npmjs.org"]
+
+[[process_rules]]
+process = "yarn"
+allow_domains = ["registry.yarnpkg.com", "registry.npmjs.org", "*.npmjs.org"]
+
+[[process_rules]]
+process = "pip"
+allow_domains = ["pypi.org", "files.pythonhosted.org"]
+
+[[process_rules]]
+process = "cargo"
+allow_domains = ["static.crates.io", "index.crates.io", "crates.io"]
+
+[[process_rules]]
+process = "gem"
+allow_domains = ["rubygems.org", "*.rubygems.org"]

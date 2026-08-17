@@ -30,6 +30,15 @@ defmodule Murtaugh.Accounts do
     Repo.get!(User, id)
   end
 
+  @doc "Fetch a user by id, returning nil when not found or the id is invalid."
+  def get_user(nil), do: nil
+
+  def get_user(id) do
+    Repo.get(User, id)
+  rescue
+    Ecto.Query.CastError -> nil
+  end
+
   def list_users do
     Repo.all(User)
   end

@@ -16,17 +16,28 @@ pub enum AnalyzerError {
 
 pub struct StaticAnalyzer {
     model_path: Option<PathBuf>,
+    max_scan_bytes: u64,
 }
 
 impl StaticAnalyzer {
     pub fn new(model_path: PathBuf) -> Self {
         Self {
             model_path: Some(model_path),
+            max_scan_bytes: crate::features::DEFAULT_MAX_SCAN_BYTES,
         }
     }
 
     pub fn new_without_model() -> Self {
-        Self { model_path: None }
+        Self {
+            model_path: None,
+            max_scan_bytes: crate::features::DEFAULT_MAX_SCAN_BYTES,
+        }
+    }
+
+    /// Override the max bytes read per file for analysis.
+    pub fn with_max_scan_bytes(mut self, max_scan_bytes: u64) -> Self {
+        self.max_scan_bytes = max_scan_bytes;
+        self
     }
 
     pub fn has_model(&self) -> bool {
@@ -34,7 +45,7 @@ impl StaticAnalyzer {
     }
 
     pub fn analyze_file(&self, path: &Path) -> Result<f32, AnalyzerError> {
-        let features = FileFeatures::extract(path)?;
+        let features = FileFeatures::extract_with_limit(path, self.max_scan_bytes)?;
 
         debug!(
             file = %path.display(),

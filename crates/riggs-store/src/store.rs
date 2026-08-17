@@ -14,10 +14,22 @@ pub use riggs_types::events;
 
 pub struct RiggsStore {
     db: Arc<Database>,
+    compress: bool,
+}
+
+/// Decompress zstd data, falling back to the raw bytes when the value was
+/// written uncompressed (so the store reads correctly across a toggle of
+/// `compression_enabled`).
+fn decode(bytes: &[u8]) -> Vec<u8> {
+    zstd::decode_all(bytes).unwrap_or_else(|_| bytes.to_vec())
 }
 
 impl RiggsStore {
     pub fn new(path: &Path) -> Result<Self, RiggsError> {
+        Self::with_compression(path, true)
+    }
+
+    pub fn with_compression(path: &Path, compress: bool) -> Result<Self, RiggsError> {
         let db = Database::create(path).map_err(|e| RiggsError::Store(e.to_string()))?;
 
         // Ensure all tables exist by opening a write transaction.
@@ -39,14 +51,24 @@ impl RiggsStore {
             .commit()
             .map_err(|e| RiggsError::Store(e.to_string()))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            compress,
+        })
+    }
+
+    fn encode(&self, json: &[u8]) -> Result<Vec<u8>, RiggsError> {
+        if self.compress {
+            zstd::encode_all(json, 3).map_err(|e| RiggsError::Store(e.to_string()))
+        } else {
+            Ok(json.to_vec())
+        }
     }
 
     pub fn store_event(&self, event: &RiggsEvent) -> Result<(), RiggsError> {
         let key = event_id_from(event);
         let json = serde_json::to_vec(event).map_err(|e| RiggsError::Store(e.to_string()))?;
-        let compressed = zstd::encode_all(json.as_slice(), 3)
-            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let stored = self.encode(&json)?;
 
         let write_txn = self
             .db
@@ -57,7 +79,7 @@ impl RiggsStore {
                 .open_table(EVENTS_TABLE)
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
             table
-                .insert(key.as_slice(), compressed.as_slice())
+                .insert(key.as_slice(), stored.as_slice())
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
         }
         write_txn
@@ -70,10 +92,8 @@ impl RiggsStore {
 
     pub fn store_verdict(&self, verdict: &MergedVerdict) -> Result<(), RiggsError> {
         let key = verdict.event_id.0.as_bytes().to_vec();
-        let json =
-            serde_json::to_vec(verdict).map_err(|e| RiggsError::Store(e.to_string()))?;
-        let compressed = zstd::encode_all(json.as_slice(), 3)
-            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let json = serde_json::to_vec(verdict).map_err(|e| RiggsError::Store(e.to_string()))?;
+        let stored = self.encode(&json)?;
 
         let write_txn = self
             .db
@@ -84,7 +104,7 @@ impl RiggsStore {
                 .open_table(VERDICTS_TABLE)
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
             table
-                .insert(key.as_slice(), compressed.as_slice())
+                .insert(key.as_slice(), stored.as_slice())
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
         }
         write_txn
@@ -92,6 +112,45 @@ impl RiggsStore {
             .map_err(|e| RiggsError::Store(e.to_string()))?;
 
         debug!("stored verdict");
+        Ok(())
+    }
+
+    /// Persist a batch of (event, verdict) pairs in a SINGLE transaction, so the
+    /// hot path pays one fsync per batch instead of two per event.
+    pub fn store_batch(&self, batch: &[(RiggsEvent, MergedVerdict)]) -> Result<(), RiggsError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        {
+            let mut events = write_txn
+                .open_table(EVENTS_TABLE)
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
+            let mut verdicts = write_txn
+                .open_table(VERDICTS_TABLE)
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
+            for (event, verdict) in batch {
+                let ekey = event_id_from(event);
+                let ejson = serde_json::to_vec(event).map_err(|e| RiggsError::Store(e.to_string()))?;
+                events
+                    .insert(ekey.as_slice(), self.encode(&ejson)?.as_slice())
+                    .map_err(|e| RiggsError::Store(e.to_string()))?;
+
+                let vkey = verdict.event_id.0.as_bytes().to_vec();
+                let vjson =
+                    serde_json::to_vec(verdict).map_err(|e| RiggsError::Store(e.to_string()))?;
+                verdicts
+                    .insert(vkey.as_slice(), self.encode(&vjson)?.as_slice())
+                    .map_err(|e| RiggsError::Store(e.to_string()))?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        debug!(count = batch.len(), "stored batch");
         Ok(())
     }
 
@@ -112,10 +171,8 @@ impl RiggsStore {
 
         match value {
             Some(data) => {
-                let compressed = data.value();
-                let decompressed = zstd::decode_all(compressed)
-                    .map_err(|e| RiggsError::Store(e.to_string()))?;
-                let event: RiggsEvent = serde_json::from_slice(&decompressed)
+                let json = decode(data.value());
+                let event: RiggsEvent = serde_json::from_slice(&json)
                     .map_err(|e| RiggsError::Store(e.to_string()))?;
                 Ok(Some(event))
             }
@@ -142,10 +199,8 @@ impl RiggsStore {
 
         for entry in iter {
             let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
-            let compressed = value.value();
-            let decompressed =
-                zstd::decode_all(compressed).map_err(|e| RiggsError::Store(e.to_string()))?;
-            let event: RiggsEvent = serde_json::from_slice(&decompressed)
+            let json = decode(value.value());
+            let event: RiggsEvent = serde_json::from_slice(&json)
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
 
             if event_storyline_id(&event) == Some(storyline_id) {
@@ -166,24 +221,24 @@ impl RiggsStore {
             .map_err(|e| RiggsError::Store(e.to_string()))?;
 
         let mut events = Vec::new();
+
+        // UUIDv7 keys are time-ordered; iterate from the newest end and stop at
+        // `limit` instead of materializing the whole table.
         let iter = table
             .iter()
             .map_err(|e| RiggsError::Store(e.to_string()))?;
-
-        // UUIDv7 keys are time-ordered, so iterating gives chronological order.
-        // Collect all then take the last N for "most recent".
-        let all: Vec<_> = iter.collect();
-        let start = all.len().saturating_sub(limit);
-
-        for entry in &all[start..] {
-            let (_, value) = entry.as_ref().map_err(|e| RiggsError::Store(e.to_string()))?;
-            let compressed = value.value();
-            if let Ok(decompressed) = zstd::decode_all(compressed) {
-                if let Ok(event) = serde_json::from_slice::<RiggsEvent>(&decompressed) {
-                    events.push(event);
-                }
+        for entry in iter.rev() {
+            if events.len() >= limit {
+                break;
+            }
+            let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
+            let json = decode(value.value());
+            if let Ok(event) = serde_json::from_slice::<RiggsEvent>(&json) {
+                events.push(event);
             }
         }
+        // Restore chronological (oldest-first) order.
+        events.reverse();
 
         Ok(events)
     }
@@ -204,12 +259,10 @@ impl RiggsStore {
 
         for entry in iter {
             let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
-            let compressed = value.value();
-            if let Ok(decompressed) = zstd::decode_all(compressed) {
-                if let Ok(verdict) = serde_json::from_slice::<MergedVerdict>(&decompressed) {
-                    if verdict.final_threat_level > riggs_types::verdict::ThreatLevel::Clean {
-                        verdicts.push(verdict);
-                    }
+            let json = decode(value.value());
+            if let Ok(verdict) = serde_json::from_slice::<MergedVerdict>(&json) {
+                if verdict.final_threat_level > riggs_types::verdict::ThreatLevel::Clean {
+                    verdicts.push(verdict);
                 }
             }
         }
@@ -224,10 +277,8 @@ impl RiggsStore {
         record: &riggs_response_record::ResponseRecordData,
     ) -> Result<(), RiggsError> {
         let key = record.id.as_bytes().to_vec();
-        let json =
-            serde_json::to_vec(record).map_err(|e| RiggsError::Store(e.to_string()))?;
-        let compressed = zstd::encode_all(json.as_slice(), 3)
-            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let json = serde_json::to_vec(record).map_err(|e| RiggsError::Store(e.to_string()))?;
+        let stored = self.encode(&json)?;
 
         let write_txn = self
             .db
@@ -238,7 +289,7 @@ impl RiggsStore {
                 .open_table(RESPONSE_LOG_TABLE)
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
             table
-                .insert(key.as_slice(), compressed.as_slice())
+                .insert(key.as_slice(), stored.as_slice())
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
         }
         write_txn
@@ -294,5 +345,86 @@ pub mod riggs_response_record {
         pub executed_at: DateTime<Utc>,
         pub success: bool,
         pub detail: String,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riggs_types::events::ProcessContext;
+    use riggs_types::events::ProcessAction;
+    use riggs_types::verdict::MergedVerdict;
+
+    fn tmp_db() -> std::path::PathBuf {
+        // Unique-enough path without Date/rand: use a UUIDv7 (time-ordered).
+        let mut p = std::env::temp_dir();
+        p.push(format!("riggs-store-test-{}.db", uuid::Uuid::now_v7()));
+        p
+    }
+
+    fn proc_event(pid: u32) -> RiggsEvent {
+        let ctx = ProcessContext {
+            pid,
+            ppid: 1,
+            name: "p".into(),
+            path: "/p".into(),
+            cmdline: "p".into(),
+            user: "root".into(),
+            storyline_id: StorylineId::new(),
+        };
+        RiggsEvent::new_process(ProcessAction::Exec, ctx, None)
+    }
+
+    fn verdict_for(event: &RiggsEvent) -> MergedVerdict {
+        MergedVerdict::from_verdicts(
+            event.event_id().clone(),
+            event_storyline_id(event).unwrap().clone(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn batch_round_trips_events() {
+        let path = tmp_db();
+        let store = RiggsStore::with_compression(&path, true).unwrap();
+        let e1 = proc_event(10);
+        let e2 = proc_event(11);
+        let batch = vec![
+            (e1.clone(), verdict_for(&e1)),
+            (e2.clone(), verdict_for(&e2)),
+        ];
+        store.store_batch(&batch).unwrap();
+
+        assert!(store.get_event(e1.event_id()).unwrap().is_some());
+        assert!(store.get_event(e2.event_id()).unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reads_uncompressed_when_compression_disabled() {
+        let path = tmp_db();
+        let store = RiggsStore::with_compression(&path, false).unwrap();
+        let e = proc_event(20);
+        store.store_event(&e).unwrap();
+        let got = store.get_event(e.event_id()).unwrap();
+        assert_eq!(got.map(|g| g.event_id().clone()), Some(e.event_id().clone()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recent_events_returns_chronological_and_capped() {
+        let path = tmp_db();
+        let store = RiggsStore::new(&path).unwrap();
+        for pid in 0..5u32 {
+            store.store_event(&proc_event(pid)).unwrap();
+        }
+        let recent = store.get_recent_events(3).unwrap();
+        assert_eq!(recent.len(), 3);
+        // UUIDv7 keys are time-ordered; result is oldest-first within the window.
+        let ids: Vec<_> = recent.iter().map(|e| e.event_id().0).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted);
+        let _ = std::fs::remove_file(&path);
     }
 }

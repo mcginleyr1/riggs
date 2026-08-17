@@ -46,12 +46,16 @@ impl DeviceMonitor {
 
         #[cfg(target_os = "linux")]
         {
-            todo!("Linux udev device monitoring")
+            Err(MonitorError::Other(
+                "Linux udev device monitoring not yet implemented".into(),
+            ))
         }
 
         #[cfg(target_os = "windows")]
         {
-            todo!("Windows WMI device monitoring")
+            Err(MonitorError::Other(
+                "Windows WMI device monitoring not yet implemented".into(),
+            ))
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

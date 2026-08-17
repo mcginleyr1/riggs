@@ -49,6 +49,26 @@ if database_url = System.get_env("DATABASE_URL") do
     pool_size: String.to_integer(System.get_env("POOL_SIZE", "10"))
 end
 
+# gRPC agent-ingest server. mTLS (bring-your-own-PKI) is enabled only when all
+# three PEM paths are supplied; otherwise application.ex starts it in cleartext
+# and logs a warning. cacertfile is the CA that signed agent client certs.
+grpc_tls =
+  case {System.get_env("MURTAUGH_GRPC_CERT"), System.get_env("MURTAUGH_GRPC_KEY"),
+        System.get_env("MURTAUGH_GRPC_CACERT")} do
+    {cert, key, cacert} when is_binary(cert) and is_binary(key) and is_binary(cacert) ->
+      [certfile: cert, keyfile: key, cacertfile: cacert]
+
+    _ ->
+      nil
+  end
+
+# TLS mode: "disabled" (plaintext), "optional" (mTLS when certs are present,
+# else plaintext with a warning), or "required" (fail to start without certs).
+config :murtaugh, :grpc,
+  port: String.to_integer(System.get_env("MURTAUGH_GRPC_PORT") || "4001"),
+  tls_mode: System.get_env("MURTAUGH_GRPC_TLS_MODE", "optional"),
+  tls: grpc_tls
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

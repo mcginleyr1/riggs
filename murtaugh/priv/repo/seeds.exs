@@ -69,7 +69,8 @@ unless Repo.get_by(Node, node_type: "root") do
     %EnrollmentToken{}
     |> EnrollmentToken.changeset(%{
       org_node_id: demo.id,
-      token: "dev-enroll-token-riggs-sim",
+      # Stored hashed; agents present the plaintext "dev-enroll-token-riggs-sim".
+      token: EnrollmentToken.hash_token("dev-enroll-token-riggs-sim"),
       label: "Dev Sim Agent Token",
       created_by: admin.id
     })

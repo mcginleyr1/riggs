@@ -9,7 +9,7 @@ defmodule MurtaughWeb.AgentsLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, "fleet")
+      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.fleet(socket.assigns.current_org.id))
     end
 
     shard = socket.assigns[:current_shard]
@@ -28,8 +28,11 @@ defmodule MurtaughWeb.AgentsLive do
 
   @impl true
   def handle_info({:agent_online, agent}, socket) do
-    agents = [Presenters.present_agent(agent) | socket.assigns.agents]
-    {:noreply, assign(socket, :agents, agents)}
+    # Upsert by id so a re-enrolling agent doesn't accumulate duplicate rows
+    # (which would grow the assigns without bound).
+    presented = Presenters.present_agent(agent)
+    others = Enum.reject(socket.assigns.agents, &(&1.id == presented.id))
+    {:noreply, assign(socket, :agents, [presented | others])}
   end
 
   def handle_info({:agent_offline, agent}, socket) do

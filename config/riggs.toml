@@ -8,11 +8,30 @@ poll_interval_ms = 100
 static_ai_enabled = true
 behavioral_ai_enabled = true
 rules_enabled = true
+# Weighted-merge sensitivity: final verdict is Malicious at/above the first,
+# Suspicious at/above the second. Lower = more sensitive (more alerts).
+merge_malicious_threshold = 0.7
+merge_suspicious_threshold = 0.3
+# Resource limits (advanced — sane defaults; raise for big hosts, lower for tiny).
+static_ai_max_scan_mib = 64                 # max bytes read per file for static AI
+behavioral_max_events_per_storyline = 512
+behavioral_max_storylines = 4096
+storyline_max_events = 1024
+storyline_idle_secs = 3600                  # prune storylines idle this long
+storyline_prune_interval_secs = 60          # how often to run the prune sweep
+static_ai_model_path = "/var/lib/riggs/models/static.onnx"
+health_check_secs = 30                       # supervisor health/restart cadence
+retention_sweep_secs = 21600                 # how often retention cleanup runs (6h)
 
 [store]
 db_path = "/var/lib/riggs/riggs.db"
 retention_days = 90
 compression_enabled = true
+# Writes are batched into one transaction: flush when `batch_max` pairs queue up
+# or `batch_flush_ms` elapses, whichever comes first. Higher batch_max = fewer
+# fsyncs under load but more events lost if the host crashes mid-batch.
+batch_max = 64
+batch_flush_ms = 250
 
 [rules]
 rules_dir = "/etc/riggs/rules"
@@ -22,17 +41,50 @@ socket_path = "/var/run/riggs.sock"
 cloud_enabled = false
 # cloud_endpoint = "https://console.example.com"
 heartbeat_interval_secs = 60
+# Refuse to send the enrollment token over a non-https endpoint. Set false only
+# for deployments that terminate TLS elsewhere or deliberately accept cleartext.
+require_tls = true
+# Local IPC guards (advanced): max request frame size and concurrent clients.
+ipc_max_message_bytes = 8388608   # 8 MiB
+ipc_max_connections = 32
+
+# mTLS to the Murtaugh console (bring-your-own-PKI). Required for an https://
+# cloud_endpoint: the agent refuses to send its enrollment token over cleartext.
+# ca_cert_path verifies the console's server cert; client_cert/key authenticate
+# this agent (both signed by your organization's CA).
+# [comms.tls]
+# ca_cert_path     = "/etc/riggs/tls/ca.pem"
+# client_cert_path = "/etc/riggs/tls/agent.pem"
+# client_key_path  = "/etc/riggs/tls/agent-key.pem"
+# domain_name      = "murtaugh.example.com"   # if cert CN/SAN differs from dial host
 
 [response]
 auto_respond = true
 kill_on_critical = true
 quarantine_on_malicious = true
+quarantine_path = "/var/lib/riggs/quarantine"
+pf_conf_path = "/var/lib/riggs/pf-containment.conf"   # macOS containment ruleset (off /tmp)
+
+# Behavioral detection tuning and signatures (adjust sensitivity per environment).
+[detection]
+exfil_outbound_threshold = 50            # outbound conns before flagging exfiltration
+rapid_encryption_file_threshold = 10     # distinct files in the window -> ransomware
+rapid_encryption_window_secs = 5
+threat_score_threshold = 0.5             # storyline score to treat as a threat
+persistence_paths = [
+  "/Library/LaunchDaemons", "/Library/LaunchAgents", "~/Library/LaunchAgents",
+  ".config/autostart", "/etc/cron.d", "/etc/crontab", "/var/spool/cron",
+  "/etc/systemd/system", "/usr/lib/systemd/system", "/etc/init.d", "/etc/rc.local",
+]
 
 [intel]
 enabled = true
 cache_path = "/var/lib/riggs/intel_cache.db"
 cache_ttl_clean_hours = 24
 cache_ttl_malicious_hours = 168
+# Malware-hash bloom filter (advanced): initial capacity + target FP rate.
+bloom_capacity = 1000000
+bloom_false_positive_rate = 0.001
 
 [intel.virustotal]
 enabled = false

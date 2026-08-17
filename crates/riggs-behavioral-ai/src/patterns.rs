@@ -1,6 +1,6 @@
 use riggs_types::events::Severity;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BehaviorPattern {
     RapidFileEncryption,
     ProcessInjection,

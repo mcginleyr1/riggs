@@ -40,7 +40,7 @@ defmodule Murtaugh.Ingest.Enrollment do
         {:ok, agent} ->
           AgentRegistry.register(agent.id, shard, token_record.org_node_id)
           maybe_decrement_token(token_record)
-          Phoenix.PubSub.broadcast(Murtaugh.PubSub, "fleet", {:agent_online, agent})
+          Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.fleet(agent.org_node_id), {:agent_online, agent})
           {:ok, agent.id}
 
         {:error, changeset} ->
@@ -51,10 +51,11 @@ defmodule Murtaugh.Ingest.Enrollment do
 
   defp find_valid_token(token_str) do
     now = DateTime.utc_now()
+    hashed = EnrollmentToken.hash_token(token_str)
 
     query =
       from(t in EnrollmentToken,
-        where: t.token == ^token_str,
+        where: t.token == ^hashed,
         where: is_nil(t.expires_at) or t.expires_at > ^now,
         where: is_nil(t.uses_remaining) or t.uses_remaining > 0
       )

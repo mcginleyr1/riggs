@@ -41,6 +41,20 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
 
 ## Quick Start
 
+### Prerequisites
+
+The `riggs-cloud` crate compiles gRPC protobufs at build time and requires
+`protoc` (the Protocol Buffers compiler) to be installed. Without it, the build
+fails in `riggs-cloud/build.rs`.
+
+```
+# macOS
+brew install protobuf
+
+# Debian / Ubuntu
+sudo apt-get install -y protobuf-compiler
+```
+
 ### Build
 
 ```

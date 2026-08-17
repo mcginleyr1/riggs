@@ -37,6 +37,8 @@ pub struct DetectionPipeline {
     verdict_tx: mpsc::Sender<MergedVerdict>,
     events_processed: AtomicU64,
     verdicts_issued: AtomicU64,
+    malicious_threshold: f32,
+    suspicious_threshold: f32,
 }
 
 impl DetectionPipeline {
@@ -46,7 +48,17 @@ impl DetectionPipeline {
             verdict_tx,
             events_processed: AtomicU64::new(0),
             verdicts_issued: AtomicU64::new(0),
+            malicious_threshold: 0.7,
+            suspicious_threshold: 0.3,
         }
+    }
+
+    /// Override the weighted-merge thresholds (operator-configurable detection
+    /// sensitivity). Defaults are 0.7 (malicious) and 0.3 (suspicious).
+    pub fn with_merge_thresholds(mut self, malicious: f32, suspicious: f32) -> Self {
+        self.malicious_threshold = malicious;
+        self.suspicious_threshold = suspicious;
+        self
     }
 
     pub fn add_stage(&mut self, stage: Box<dyn DetectionStage>) {
@@ -82,7 +94,7 @@ impl DetectionPipeline {
 
         self.events_processed.fetch_add(1, Ordering::Relaxed);
 
-        let final_threat_level = merge_verdicts_weighted(&verdicts);
+        let final_threat_level = merge_verdicts_weighted(&verdicts, self.malicious_threshold, self.suspicious_threshold);
 
         if final_threat_level > ThreatLevel::Clean {
             self.verdicts_issued.fetch_add(1, Ordering::Relaxed);
@@ -136,7 +148,7 @@ impl DetectionPipeline {
 
         self.events_processed.fetch_add(1, Ordering::Relaxed);
 
-        let final_threat_level = merge_verdicts_weighted(&verdicts);
+        let final_threat_level = merge_verdicts_weighted(&verdicts, self.malicious_threshold, self.suspicious_threshold);
 
         if final_threat_level > ThreatLevel::Clean {
             self.verdicts_issued.fetch_add(1, Ordering::Relaxed);
@@ -188,17 +200,26 @@ fn collect_verdict(
     }
 }
 
-fn merge_verdicts_weighted(verdicts: &[Verdict]) -> ThreatLevel {
-    if verdicts.is_empty() {
+fn merge_verdicts_weighted(
+    verdicts: &[Verdict],
+    malicious_threshold: f32,
+    suspicious_threshold: f32,
+) -> ThreatLevel {
+    // Drop non-finite/non-positive confidences. A single NaN would otherwise
+    // poison the sum and make every comparison below false, silently returning
+    // Clean even alongside a confident Malicious verdict.
+    let usable: Vec<&Verdict> = verdicts
+        .iter()
+        .filter(|v| v.confidence.is_finite() && v.confidence > 0.0)
+        .collect();
+
+    if usable.is_empty() {
         return ThreatLevel::Clean;
     }
 
-    let total_confidence: f32 = verdicts.iter().map(|v| v.confidence).sum();
-    if total_confidence <= 0.0 {
-        return ThreatLevel::Clean;
-    }
+    let total_confidence: f32 = usable.iter().map(|v| v.confidence).sum();
 
-    let weighted_score: f32 = verdicts
+    let weighted_score: f32 = usable
         .iter()
         .map(|v| {
             let threat_weight = match v.threat_level {
@@ -212,13 +233,24 @@ fn merge_verdicts_weighted(verdicts: &[Verdict]) -> ThreatLevel {
 
     let average = weighted_score / total_confidence;
 
-    if average >= 0.7 {
+    let weighted_level = if average >= malicious_threshold {
         ThreatLevel::Malicious
-    } else if average >= 0.3 {
+    } else if average >= suspicious_threshold {
         ThreatLevel::Suspicious
     } else {
         ThreatLevel::Clean
-    }
+    };
+
+    // Escalate, never dilute: a stage only emits Malicious once it has crossed
+    // its own confidence bar, so corroborating weaker signals must not drag the
+    // merged verdict below the strongest individual finding.
+    let max_individual = usable
+        .iter()
+        .map(|v| v.threat_level)
+        .max()
+        .unwrap_or(ThreatLevel::Clean);
+
+    weighted_level.max(max_individual)
 }
 
 fn extract_storyline_id(event: &RiggsEvent) -> riggs_types::events::StorylineId {
@@ -249,7 +281,7 @@ mod tests {
 
     #[test]
     fn weighted_merge_empty_is_clean() {
-        assert_eq!(merge_verdicts_weighted(&[]), ThreatLevel::Clean);
+        assert_eq!(merge_verdicts_weighted(&[], 0.7, 0.3), ThreatLevel::Clean);
     }
 
     #[test]
@@ -280,7 +312,7 @@ mod tests {
         // weighted = (1.0 * 0.95 + 0.5 * 0.6) / (0.95 + 0.6)
         //          = (0.95 + 0.3) / 1.55
         //          = 1.25 / 1.55 ~= 0.806
-        assert_eq!(merge_verdicts_weighted(&verdicts), ThreatLevel::Malicious);
+        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Malicious);
     }
 
     #[test]
@@ -299,6 +331,50 @@ mod tests {
         }];
 
         // weighted = 0.5 * 0.4 / 0.4 = 0.5 -> Suspicious
-        assert_eq!(merge_verdicts_weighted(&verdicts), ThreatLevel::Suspicious);
+        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Suspicious);
+    }
+
+    fn verdict(level: ThreatLevel, confidence: f32) -> Verdict {
+        use chrono::Utc;
+        use riggs_types::events::EventId;
+        use riggs_types::verdict::DetectionSource;
+        Verdict {
+            event_id: EventId::new(),
+            threat_level: level,
+            confidence,
+            source: DetectionSource::StaticAI,
+            description: "test".into(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn corroborating_suspicious_does_not_dilute_malicious() {
+        // A confirmed-malicious verdict plus two weaker corroborating signals.
+        // The weighted average alone is (0.85 + 0.35 + 0.4) / 2.35 ~= 0.68,
+        // which would wrongly downgrade to Suspicious. Escalation keeps it
+        // Malicious because a stage already crossed its malicious threshold.
+        let verdicts = vec![
+            verdict(ThreatLevel::Malicious, 0.85),
+            verdict(ThreatLevel::Suspicious, 0.7),
+            verdict(ThreatLevel::Suspicious, 0.8),
+        ];
+        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Malicious);
+    }
+
+    #[test]
+    fn nan_confidence_does_not_collapse_to_clean() {
+        // A poisoned NaN confidence must not hide a co-occurring Malicious verdict.
+        let verdicts = vec![
+            verdict(ThreatLevel::Malicious, f32::NAN),
+            verdict(ThreatLevel::Malicious, 0.9),
+        ];
+        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Malicious);
+    }
+
+    #[test]
+    fn all_nan_confidence_is_clean() {
+        let verdicts = vec![verdict(ThreatLevel::Malicious, f32::NAN)];
+        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Clean);
     }
 }

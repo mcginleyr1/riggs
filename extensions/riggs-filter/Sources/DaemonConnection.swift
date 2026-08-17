@@ -23,6 +23,49 @@ class DaemonConnection {
         let reason: String?
     }
 
+    struct EgressVerdict {
+        let allow: Bool
+        let wouldBlock: Bool
+        let reason: String?
+        let mode: String
+    }
+
+    /// Ask the daemon whether `pid` (running `processPath`) may reach the host.
+    /// Returns allow=true on any error (fail-open), matching checkFlow.
+    func checkEgress(
+        pid: UInt32,
+        processPath: String,
+        hostname: String,
+        remoteIP: String,
+        remotePort: UInt16
+    ) -> EgressVerdict {
+        let safeHost = sanitizeForJSON(hostname)
+        let safeIP = sanitizeForJSON(remoteIP)
+        let safePath = sanitizeForJSON(processPath)
+        let request = """
+        {"EgressCheckFlow":{"pid":\(pid),"process_path":"\(safePath)","remote_hostname":"\(safeHost)","remote_ip":"\(safeIP)","remote_port":\(remotePort)}}
+        """
+
+        guard let responseData = sendAndReceive(request) else {
+            return EgressVerdict(allow: true, wouldBlock: false, reason: nil, mode: "off")
+        }
+        return parseEgressVerdict(responseData)
+    }
+
+    private func parseEgressVerdict(_ data: Data) -> EgressVerdict {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let v = json["EgressVerdict"] as? [String: Any]
+        else {
+            return EgressVerdict(allow: true, wouldBlock: false, reason: nil, mode: "off")
+        }
+        return EgressVerdict(
+            allow: v["allow"] as? Bool ?? true,
+            wouldBlock: v["would_block"] as? Bool ?? false,
+            reason: v["reason"] as? String,
+            mode: v["mode"] as? String ?? "off"
+        )
+    }
+
     /// Query the daemon: should this PID's flow to this hostname be allowed?
     /// Synchronous -- blocks until the daemon responds or times out.
     /// Returns allow=true on any error (fail-open).

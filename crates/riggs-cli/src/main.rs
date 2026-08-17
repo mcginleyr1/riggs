@@ -50,6 +50,7 @@ async fn main() {
         "quarantine" => commands::quarantine(&socket_path, &cmd_args[1..]).await,
         "intel" => commands::intel(&socket_path, &cmd_args[1..]).await,
         "dlp" => commands::dlp(&socket_path, &cmd_args[1..]).await,
+        "egress" => commands::egress(&socket_path, &cmd_args[1..]).await,
         "vuln" => commands::vuln(&socket_path, &cmd_args[1..]).await,
         "help" | "--help" | "-h" => {
             print_usage();
@@ -85,6 +86,7 @@ fn print_usage() {
     println!("  quarantine   Manage quarantined files");
     println!("  intel        Threat intelligence management");
     println!("  dlp          Data loss prevention status and policy");
+    println!("  egress       Default-deny egress allowlist (status/allow/deny/mode)");
     println!("  vuln         Vulnerability feed management");
     println!("  help         Show this help message");
 }

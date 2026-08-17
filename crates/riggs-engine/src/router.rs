@@ -48,6 +48,7 @@ mod tests {
             action: FileAction::Create,
             path: "/tmp/test".into(),
             hash: None,
+            fd: None,
         });
         assert_eq!(
             EventRouter::stages_for_event(&event),

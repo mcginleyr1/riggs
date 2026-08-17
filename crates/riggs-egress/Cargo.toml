@@ -1,0 +1,12 @@
+[package]
+name = "riggs-egress"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riggs-types = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+notify = { workspace = true }
+ipnetwork = "0.20"

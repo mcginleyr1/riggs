@@ -11,11 +11,23 @@ use tracing::info;
 
 pub struct MacOsSensor {
     running: bool,
+    pf_conf_path: String,
 }
 
 impl MacOsSensor {
     pub fn new() -> Self {
-        Self { running: false }
+        Self {
+            running: false,
+            pf_conf_path: DEFAULT_PF_CONF_PATH.to_string(),
+        }
+    }
+
+    /// Override the path the network-containment pf ruleset is written to.
+    pub fn with_pf_conf_path(mut self, path: String) -> Self {
+        if !path.is_empty() {
+            self.pf_conf_path = path;
+        }
+        self
     }
 }
 
@@ -26,6 +38,13 @@ impl Default for MacOsSensor {
 }
 
 fn send_signal(pid: u32, signal: libc::c_int, signal_name: &str) -> Result<(), RiggsError> {
+    // Never signal pid 0 (the caller's entire process group -- would kill the
+    // daemon itself) or pid 1 (init). Response actions must carry a real target.
+    if pid <= 1 {
+        return Err(RiggsError::Platform(format!(
+            "refusing to send {signal_name} to pid {pid}: pid 0 signals the daemon's own process group, pid 1 is init"
+        )));
+    }
     let ret = unsafe { libc::kill(pid as i32, signal) };
     if ret == -1 {
         let err = std::io::Error::last_os_error();
@@ -232,7 +251,9 @@ impl ProcessControl for MacOsSensor {
 }
 
 const PF_ANCHOR: &str = "riggs-containment";
-const PF_CONF_PATH: &str = "/tmp/riggs-pf-containment.conf";
+// Default off the world-writable /tmp (a symlink/pre-create there let a local
+// user influence the ruleset). Overridable via response.pf_conf_path.
+const DEFAULT_PF_CONF_PATH: &str = "/var/lib/riggs/pf-containment.conf";
 
 #[async_trait]
 impl NetworkContainment for MacOsSensor {
@@ -243,11 +264,11 @@ impl NetworkContainment for MacOsSensor {
         }
         rules.push_str("pass quick on lo0 all\n");
 
-        std::fs::write(PF_CONF_PATH, &rules)
+        std::fs::write(&self.pf_conf_path, &rules)
             .map_err(|e| RiggsError::Platform(format!("failed to write pf rules: {e}")))?;
 
         let output = std::process::Command::new("pfctl")
-            .args(["-a", PF_ANCHOR, "-f", PF_CONF_PATH])
+            .args(["-a", PF_ANCHOR, "-f", self.pf_conf_path.as_str()])
             .output()
             .map_err(|e| RiggsError::Platform(format!("failed to run pfctl: {e}")))?;
 
@@ -278,8 +299,8 @@ impl NetworkContainment for MacOsSensor {
             )));
         }
 
-        // Clean up the temporary rules file
-        let _ = std::fs::remove_file(PF_CONF_PATH);
+        // Clean up the rules file
+        let _ = std::fs::remove_file(&self.pf_conf_path);
 
         info!("network containment released");
         Ok(())

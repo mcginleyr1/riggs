@@ -67,6 +67,14 @@ defmodule Murtaugh.Tenancy do
   """
   def ensure_tenant_db(%{database_url: database_url} = shard) do
     %URI{path: "/" <> db_name} = URI.parse(database_url)
+
+    # CREATE DATABASE can't be parameterized, so the name is interpolated below.
+    # Validate it against a strict identifier allowlist to prevent injection via
+    # a malformed/hostile shard URL.
+    unless valid_db_name?(db_name) do
+      raise ArgumentError, "unsafe tenant database name: #{inspect(db_name)}"
+    end
+
     base_url = String.replace(database_url, "/" <> db_name, "/postgres")
 
     {:ok, conn} = Postgrex.start_link(url: base_url)
@@ -85,7 +93,37 @@ defmodule Murtaugh.Tenancy do
       GenServer.stop(conn)
     end
 
-    run_tenant_migrations(shard)
+    result = run_tenant_migrations(shard)
+    apply_retention_policy(shard)
+    result
+  end
+
+  # Register a TimescaleDB retention policy so the operator-configured
+  # retention_days is actually enforced (its background scheduler drops event
+  # chunks older than the window). Idempotent; a later change to retention_days
+  # needs the policy removed and re-added.
+  defp apply_retention_policy(%{database_url: database_url, retention_days: days})
+       when is_integer(days) and days > 0 do
+    {:ok, conn} = Postgrex.start_link(url: database_url)
+
+    try do
+      Postgrex.query!(
+        conn,
+        "SELECT add_retention_policy('events', drop_after => INTERVAL '#{days} days', if_not_exists => true)",
+        []
+      )
+    after
+      GenServer.stop(conn)
+    end
+
+    :ok
+  end
+
+  defp apply_retention_policy(_shard), do: :ok
+
+  defp valid_db_name?(name) do
+    is_binary(name) and byte_size(name) in 1..63 and
+      String.match?(name, ~r/\A[a-zA-Z_][a-zA-Z0-9_]*\z/)
   end
 
   # Enable the TimescaleDB extension in a freshly created tenant database.

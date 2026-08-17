@@ -17,7 +17,7 @@ defmodule Murtaugh.Ingest.EventIngester do
               conflict_target: [:id]
             )
 
-          Phoenix.PubSub.broadcast(Murtaugh.PubSub, "throughput", {:events_ingested, count})
+          Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.throughput(org_node_id), {:events_ingested, count})
           {:ok, count}
         end)
 

@@ -21,6 +21,17 @@ defmodule Murtaugh.Fleet.EnrollmentToken do
   @required_fields ~w(org_node_id token)a
   @optional_fields ~w(label uses_remaining expires_at created_by)a
 
+  @doc """
+  Hash a raw enrollment token for storage and lookup.
+
+  Tokens are high-entropy secrets, so an unsalted SHA-256 is sufficient and
+  keeps lookup a single indexed equality. The `token` column stores this hash,
+  never the plaintext; the plaintext is shown to the operator only at creation.
+  """
+  def hash_token(raw) when is_binary(raw) do
+    :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower)
+  end
+
   def changeset(enrollment_token, attrs) do
     enrollment_token
     |> cast(attrs, @required_fields ++ @optional_fields)
