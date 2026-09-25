@@ -1,3 +1,5 @@
+This is just an experiment to see how models do with the idea.
+
 # Riggs
 
 Local-first endpoint protection for macOS and Linux. All detection runs on-device
