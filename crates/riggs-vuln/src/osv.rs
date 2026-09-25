@@ -15,6 +15,10 @@ pub struct OsvClient {
 #[derive(Debug, Serialize)]
 struct OsvQueryRequest {
     package: OsvQueryPackage,
+    /// When set, OSV returns only advisories affecting this exact version,
+    /// using the ecosystem's own version ordering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,13 +103,43 @@ impl OsvClient {
         ecosystem: &str,
         package_name: &str,
     ) -> Result<Vec<Cve>, String> {
-        info!(ecosystem, package_name, "querying OSV for vulnerabilities");
+        self.query(ecosystem, package_name, None).await
+    }
+
+    /// Advisories affecting an installed `version`, one entry per advisory.
+    /// OSV does the version matching, so ecosystem-specific ordering (dpkg
+    /// revisions, PEP 440, semver) is handled correctly.
+    pub async fn query_installed(
+        &self,
+        ecosystem: &str,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<Cve>, String> {
+        let cves = self.query(ecosystem, package_name, Some(version)).await?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(cves
+            .into_iter()
+            .filter(|cve| seen.insert(cve.id.clone()))
+            .collect())
+    }
+
+    async fn query(
+        &self,
+        ecosystem: &str,
+        package_name: &str,
+        version: Option<&str>,
+    ) -> Result<Vec<Cve>, String> {
+        info!(
+            ecosystem,
+            package_name, version, "querying OSV for vulnerabilities"
+        );
 
         let request_body = OsvQueryRequest {
             package: OsvQueryPackage {
                 ecosystem: ecosystem.to_string(),
                 name: package_name.to_string(),
             },
+            version: version.map(String::from),
         };
 
         let response = self
