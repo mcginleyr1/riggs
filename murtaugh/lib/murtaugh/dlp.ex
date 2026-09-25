@@ -38,7 +38,7 @@ defmodule Murtaugh.Dlp do
     Tenancy.with_tenant(shard, fn ->
       thirty_days_ago =
         DateTime.utc_now()
-        |> DateTime.add(-30 * 86400, :second)
+        |> DateTime.add(-30 * 86_400, :second)
         |> DateTime.truncate(:second)
 
       from(e in Event,

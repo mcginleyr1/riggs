@@ -1,4 +1,6 @@
 defmodule Murtaugh.Accounts do
+  @moduledoc "Users, authentication, and org-node access grants."
+
   import Ecto.Query
   alias Murtaugh.Repo
   alias Murtaugh.Accounts.{User, Grant}

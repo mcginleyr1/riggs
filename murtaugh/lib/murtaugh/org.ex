@@ -1,4 +1,6 @@
 defmodule Murtaugh.Org do
+  @moduledoc "The org hierarchy, stored as a nested set of nodes."
+
   import Ecto.Query
   alias Murtaugh.Repo
   alias Murtaugh.Org.Node

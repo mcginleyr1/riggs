@@ -50,59 +50,30 @@ defmodule Murtaugh.ShardManager do
 
   @impl true
   def handle_call({:get_repo, shard_id, shard_or_nil}, _from, state) do
-    case Map.get(state.repos, shard_id) do
-      nil ->
-        shard = shard_or_nil || fetch_shard!(shard_id)
+    now = System.monotonic_time(:millisecond)
+    pid = Map.get(state.repos, shard_id)
 
-        case start_repo(shard) do
-          {:ok, pid} ->
-            new_state = %{
-              state
-              | repos: Map.put(state.repos, shard_id, pid),
-                last_access:
-                  Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
-            }
+    if pid && Process.alive?(pid) do
+      {:reply, {:ok, pid}, %{state | last_access: Map.put(state.last_access, shard_id, now)}}
+    else
+      # Not started yet, or the pool died unexpectedly: (re)start it.
+      case start_repo(shard_or_nil || fetch_shard!(shard_id)) do
+        {:ok, new_pid} ->
+          {:reply, {:ok, new_pid},
+           %{
+             state
+             | repos: Map.put(state.repos, shard_id, new_pid),
+               last_access: Map.put(state.last_access, shard_id, now)
+           }}
 
-            {:reply, {:ok, pid}, new_state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
-
-      pid ->
-        if Process.alive?(pid) do
-          new_state = %{
-            state
-            | last_access:
-                Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
-          }
-
-          {:reply, {:ok, pid}, new_state}
-        else
-          # Pool died unexpectedly; clean up and retry
-          shard = shard_or_nil || fetch_shard!(shard_id)
-
-          case start_repo(shard) do
-            {:ok, new_pid} ->
-              new_state = %{
-                state
-                | repos: Map.put(state.repos, shard_id, new_pid),
-                  last_access:
-                    Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
-              }
-
-              {:reply, {:ok, new_pid}, new_state}
-
-            {:error, reason} ->
-              new_state = %{
-                state
-                | repos: Map.delete(state.repos, shard_id),
-                  last_access: Map.delete(state.last_access, shard_id)
-              }
-
-              {:reply, {:error, reason}, new_state}
-          end
-        end
+        {:error, reason} ->
+          {:reply, {:error, reason},
+           %{
+             state
+             | repos: Map.delete(state.repos, shard_id),
+               last_access: Map.delete(state.last_access, shard_id)
+           }}
+      end
     end
   end
 

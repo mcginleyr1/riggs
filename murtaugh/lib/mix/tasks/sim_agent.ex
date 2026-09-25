@@ -139,7 +139,7 @@ defmodule Mix.Tasks.Sim.Agent do
         event_type: Enum.random(~w(process_create network_connect file_read dns_query)),
         severity: Enum.random(~w(info low medium)),
         process_context: %Riggs.V1.ProcessContext{
-          pid: :rand.uniform(65535),
+          pid: :rand.uniform(65_535),
           name: Enum.random(~w(chrome firefox curl wget python3 bash)),
           username: "ubuntu"
         },
@@ -203,7 +203,7 @@ defmodule Mix.Tasks.Sim.Agent do
     report = %Riggs.V1.DlpEventReport{
       agent_id: agent_id,
       action: Enum.random(actions),
-      pid: :rand.uniform(65535),
+      pid: :rand.uniform(65_535),
       process_name: Enum.random(["chrome", "firefox", "curl", "python3"]),
       file_path: "/home/ubuntu/document.pdf",
       file_type: Enum.random(["application/pdf", "text/plain", "application/zip"]),

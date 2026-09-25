@@ -128,8 +128,8 @@ defmodule MurtaughWeb.UIComponents do
 
   defp format_duration(seconds) when seconds < 60, do: "#{seconds}s ago"
   defp format_duration(seconds) when seconds < 3600, do: "#{div(seconds, 60)}m ago"
-  defp format_duration(seconds) when seconds < 86400, do: "#{div(seconds, 3600)}h ago"
-  defp format_duration(seconds), do: "#{div(seconds, 86400)}d ago"
+  defp format_duration(seconds) when seconds < 86_400, do: "#{div(seconds, 3600)}h ago"
+  defp format_duration(seconds), do: "#{div(seconds, 86_400)}d ago"
 
   @doc """
   Renders a dashboard stat card with label, value, and optional trend.

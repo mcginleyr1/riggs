@@ -79,10 +79,7 @@ defmodule Murtaugh.Archive.Exporter do
   end
 
   defp encode_csv_row(fields) do
-    fields
-    |> Enum.map(&escape_csv_field/1)
-    |> Enum.join(",")
-    |> Kernel.<>("\n")
+    Enum.map_join(fields, ",", &escape_csv_field/1) <> "\n"
   end
 
   defp escape_csv_field(nil), do: ""
