@@ -757,49 +757,35 @@ impl RiggsDaemon {
                                         })
                                     });
 
-                                    // Threat reporter (supervised). The channel
-                                    // receiver can only be consumed once, so we
-                                    // hand it over a take-once slot: the first
-                                    // run owns it; a restart after a panic finds
-                                    // the slot empty and parks (a moved receiver
-                                    // can't be resurrected) — but the task is now
-                                    // health-tracked and logged, not silent.
+                                    // Threat reporter (supervised). The receiver
+                                    // lives in a shared mutex and is only borrowed
+                                    // per run, so a restart after a panic resumes
+                                    // draining the same channel.
                                     let rep_client = cc.clone();
                                     let rep_agent_id = agent_id.clone();
-                                    let rep_rx =
-                                        Arc::new(tokio::sync::Mutex::new(Some(verdict_rx)));
+                                    let rep_rx = Arc::new(tokio::sync::Mutex::new(verdict_rx));
                                     self.supervisor.spawn("cloud-threat-reporter", move || {
                                         let client = rep_client.clone();
                                         let id = rep_agent_id.clone();
-                                        let slot = Arc::clone(&rep_rx);
+                                        let rx = Arc::clone(&rep_rx);
                                         Box::pin(async move {
-                                            match slot.lock().await.take() {
-                                                Some(rx) => {
-                                                    riggs_cloud::run_threat_reporter(client, id, rx)
-                                                        .await
-                                                }
-                                                None => std::future::pending::<()>().await,
-                                            }
+                                            let mut rx = rx.lock().await;
+                                            riggs_cloud::run_threat_reporter(client, id, &mut rx)
+                                                .await
                                         })
                                     });
 
-                                    // DLP event reporter (supervised, same slot pattern)
+                                    // DLP event reporter (supervised, same pattern)
                                     let dlp_client = cc.clone();
                                     let dlp_agent_id = agent_id.clone();
-                                    let dlp_rx_slot =
-                                        Arc::new(tokio::sync::Mutex::new(Some(dlp_rx)));
+                                    let dlp_rx = Arc::new(tokio::sync::Mutex::new(dlp_rx));
                                     self.supervisor.spawn("cloud-dlp-reporter", move || {
                                         let client = dlp_client.clone();
                                         let id = dlp_agent_id.clone();
-                                        let slot = Arc::clone(&dlp_rx_slot);
+                                        let rx = Arc::clone(&dlp_rx);
                                         Box::pin(async move {
-                                            match slot.lock().await.take() {
-                                                Some(rx) => {
-                                                    riggs_cloud::run_dlp_reporter(client, id, rx)
-                                                        .await
-                                                }
-                                                None => std::future::pending::<()>().await,
-                                            }
+                                            let mut rx = rx.lock().await;
+                                            riggs_cloud::run_dlp_reporter(client, id, &mut rx).await
                                         })
                                     });
 
@@ -947,9 +933,17 @@ impl RiggsDaemon {
                     // Hand off to the batched writer. If the queue is full the
                     // writer is behind; drop from persistence rather than stall
                     // the detection loop (telemetry fails open, sensing never
-                    // blocks on disk).
-                    if let Err(e) = store_tx.try_send((event, merged)) {
-                        warn!(error = %e, "store queue full; event not persisted");
+                    // blocks on disk). If the writer is gone, stop so the
+                    // service manager restarts us with persistence intact.
+                    match store_tx.try_send((event, merged)) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!("store queue full; event not persisted");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            error!("store writer exited; stopping daemon");
+                            break;
+                        }
                     }
                 }
             } => {}
