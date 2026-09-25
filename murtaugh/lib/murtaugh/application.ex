@@ -14,7 +14,7 @@ defmodule Murtaugh.Application do
       Murtaugh.Repo,
       {DNSCluster, query: Application.get_env(:murtaugh, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Murtaugh.PubSub},
-      Murtaugh.ShardManager,
+      Murtaugh.ShardManager.supervisor_child_spec(),
       Murtaugh.Ingest.AgentRegistry,
       grpc_child_spec(),
       # Start to serve requests, typically the last entry

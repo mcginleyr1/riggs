@@ -96,4 +96,21 @@ defmodule Murtaugh.IngestTest do
     assert {:ok, 1} = VulnIngester.ingest_vuln_scan(%{agent_id: agent_id, findings: [finding]})
     assert count(shard, "vulnerabilities", agent_id) == 1
   end
+
+  test "a crashed tenant pool doesn't take down ShardManager or other pools", %{shard: shard} do
+    other_shard = %{shard | id: Ecto.UUID.generate()}
+    manager = Process.whereis(ShardManager)
+    {:ok, victim} = ShardManager.get_repo(shard)
+    {:ok, bystander} = ShardManager.get_repo(other_shard)
+    on_exit(fn -> ShardManager.stop_repo(other_shard.id) end)
+
+    ref = Process.monitor(victim)
+    Process.exit(victim, :kill)
+    assert_receive {:DOWN, ^ref, _, _, _}
+
+    assert Process.whereis(ShardManager) == manager
+    assert Process.alive?(bystander)
+    assert {:ok, restarted} = ShardManager.get_repo(shard)
+    assert restarted != victim and Process.alive?(restarted)
+  end
 end
