@@ -154,7 +154,7 @@ impl BehaviorTracker {
                 }
                 unique_paths.insert(path);
             }
-            if unique_paths.len() > self.rapid_file_threshold {
+            if unique_paths.len() >= self.rapid_file_threshold {
                 return Some(BehaviorPattern::RapidFileEncryption);
             }
         }
@@ -865,6 +865,39 @@ mod tests {
 
         // ModuleLoad alone should not trigger process injection
         assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
+    }
+
+    // --- Rapid File Encryption Tests ---
+
+    fn modify_distinct_files(count: usize) -> Vec<BehaviorPattern> {
+        let ctx = make_ctx(4242, "locker");
+        let mut tracker = BehaviorTracker::new();
+        for i in 0..count {
+            let path = format!("/home/user/doc{i}.txt");
+            tracker.track(RiggsEvent::new_file(
+                FileAction::Modify,
+                ctx.clone(),
+                path,
+                None,
+            ));
+        }
+        tracker.check_patterns(&ctx.storyline_id)
+    }
+
+    #[test]
+    fn test_rapid_encryption_fires_at_threshold() {
+        let threshold =
+            riggs_types::config::DetectionConfig::default().rapid_encryption_file_threshold;
+        assert!(modify_distinct_files(threshold).contains(&BehaviorPattern::RapidFileEncryption));
+    }
+
+    #[test]
+    fn test_rapid_encryption_quiet_below_threshold() {
+        let threshold =
+            riggs_types::config::DetectionConfig::default().rapid_encryption_file_threshold;
+        assert!(
+            !modify_distinct_files(threshold - 1).contains(&BehaviorPattern::RapidFileEncryption)
+        );
     }
 
     // --- Privilege Escalation Tests ---
