@@ -10,7 +10,7 @@ use riggs_engine::DetectionPipeline;
 use riggs_intel::clients::abuseipdb::AbuseIpdbClient;
 use riggs_intel::clients::virustotal::VtClient;
 use riggs_intel::{BloomFilter, FeedManager, FeedUpdate, HashVerdictCache, ThreatIntelStage};
-use riggs_rules::{Ioc, IocMatcher, IocType, RulesStage};
+use riggs_rules::{CustomRuleEngine, Ioc, IocMatcher, IocType, RulesStage, YaraEngine};
 use riggs_static_ai::StaticAiStage;
 use riggs_store::RiggsStore;
 use riggs_storyline::StorylineCorrelator;
@@ -291,9 +291,31 @@ impl RiggsDaemon {
 
         let ioc_handle: Arc<StdRwLock<Option<IocMatcher>>> = Arc::new(StdRwLock::new(None));
 
+        // YARA + custom rules, shared with the hot-reload watcher started below.
+        let rules_dir = PathBuf::from(&self.config.rules.rules_dir);
+        let (yara, custom_rules) = if self.config.engine.rules_enabled && rules_dir.is_dir() {
+            let yara = match YaraEngine::new(rules_dir.clone()) {
+                Ok(engine) => Some(Arc::new(StdRwLock::new(engine))),
+                Err(e) => {
+                    warn!(error = %e, "YARA rules failed to load; YARA scanning disabled");
+                    None
+                }
+            };
+            let custom = CustomRuleEngine::load_dir(&rules_dir);
+            (yara, Some(Arc::new(StdRwLock::new(custom))))
+        } else {
+            if self.config.engine.rules_enabled {
+                warn!(dir = %rules_dir.display(), "rules_dir missing; YARA and custom rules disabled");
+            }
+            (None, None)
+        };
+
         if self.config.engine.rules_enabled {
-            let rules_stage = RulesStage::new_with_shared_ioc(None, Arc::clone(&ioc_handle), None);
-            pipeline.add_stage(Box::new(rules_stage));
+            pipeline.add_stage(Box::new(RulesStage::new_shared(
+                yara.clone(),
+                Arc::clone(&ioc_handle),
+                custom_rules.clone(),
+            )));
         }
 
         if self.config.engine.behavioral_ai_enabled {
@@ -702,12 +724,13 @@ impl RiggsDaemon {
         info!(socket = %self.config.comms.socket_path, "IPC server started");
 
         // -- Rule hot-reload watcher --
-        let rules_dir = PathBuf::from("rules/default");
-        if rules_dir.is_dir() {
+        if yara.is_some() || custom_rules.is_some() {
             self.supervisor.spawn("rule-watcher", move || {
                 let dir = rules_dir.clone();
+                let yara = yara.clone();
+                let custom = custom_rules.clone();
                 Box::pin(async move {
-                    let loader = riggs_rules::RuleLoader::new(dir, None, None);
+                    let loader = riggs_rules::RuleLoader::new(dir, yara, custom);
                     if let Err(e) = loader.watch().await {
                         tracing::error!(error = %e, "rule watcher error");
                     }

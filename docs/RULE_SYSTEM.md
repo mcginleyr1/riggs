@@ -19,6 +19,11 @@ into efficient matching structures, and published to the engine via a
 
 ## Directory Layout
 
+The daemon loads rules from `[rules] rules_dir` in `riggs.toml` (default
+`/etc/riggs/rules`). All `.yar`/`.yara` files and custom-rule `.toml` files
+under it are loaded recursively, and changes are hot-reloaded. If the
+directory is missing, YARA and custom rules are disabled with a warning.
+
 ```
 rules/
   default/           # shipped with Riggs, updated by vendor

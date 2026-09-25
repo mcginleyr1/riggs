@@ -1,5 +1,5 @@
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use riggs_types::errors::RiggsError;
@@ -57,89 +57,84 @@ impl RuleLoader {
 
         while let Some(result) = rx.recv().await {
             match result {
-                Ok(event) => match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => {
-                        info!(paths = ?event.paths, "rule file created or modified");
-                        self.reload_affected(&event.paths);
+                Ok(event)
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) =>
+                {
+                    info!(paths = ?event.paths, "rule files changed");
+                    // Reading and compiling rules is blocking work; keep it off
+                    // the async runtime.
+                    let dir = self.rules_dir.clone();
+                    let yara = self.yara.clone();
+                    let custom = self.custom.clone();
+                    let reload = tokio::task::spawn_blocking(move || {
+                        reload_affected(&dir, yara, custom, &event.paths)
+                    });
+                    if let Err(e) = reload.await {
+                        warn!(error = %e, "rule reload task failed");
                     }
-                    EventKind::Remove(_) => {
-                        info!(paths = ?event.paths, "rule file removed");
-                        self.reload_affected(&event.paths);
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    warn!(error = %e, "file watcher error");
                 }
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "file watcher error"),
             }
         }
 
         Ok(())
     }
+}
 
-    fn reload_affected(&self, paths: &[PathBuf]) {
-        let has_yara_change = paths.iter().any(|p| {
-            p.extension()
-                .is_some_and(|ext| ext == "yar" || ext == "yara")
-        });
+/// Recompile whichever rule sets the changed paths belong to. New engines are
+/// built without holding a lock, then swapped in, so scans never wait on a compile.
+fn reload_affected(
+    dir: &Path,
+    yara: Option<Arc<RwLock<YaraEngine>>>,
+    custom: Option<Arc<RwLock<CustomRuleEngine>>>,
+    paths: &[PathBuf],
+) {
+    let touches = |exts: &[&str]| paths.iter().any(|p| crate::has_extension(p, exts));
 
-        let has_toml_change = paths
-            .iter()
-            .any(|p| p.extension().is_some_and(|ext| ext == "toml"));
-
-        if has_yara_change {
-            self.reload_yara_rules();
-        }
-        if has_toml_change {
-            self.rebuild_custom_rules();
+    if let Some(yara) = yara.filter(|_| touches(crate::YARA_EXTENSIONS)) {
+        match YaraEngine::new(dir.to_path_buf()) {
+            Ok(fresh) => {
+                *yara.write().unwrap_or_else(PoisonError::into_inner) = fresh;
+                info!("yara rules reloaded");
+            }
+            Err(e) => warn!(error = %e, "failed to reload yara rules; keeping previous set"),
         }
     }
 
-    fn reload_yara_rules(&self) {
-        if let Some(ref yara) = self.yara {
-            match yara.write() {
-                Ok(mut engine) => match engine.load_rules() {
-                    Ok(()) => info!("yara rules reloaded"),
-                    Err(e) => warn!(error = %e, "failed to reload yara rules"),
-                },
-                Err(e) => warn!(error = %e, "failed to acquire yara engine write lock"),
-            }
-        }
+    if let Some(custom) = custom.filter(|_| touches(crate::CUSTOM_RULE_EXTENSIONS)) {
+        let fresh = CustomRuleEngine::load_dir(dir);
+        *custom.write().unwrap_or_else(PoisonError::into_inner) = fresh;
+        info!("custom rules reloaded");
     }
+}
 
-    fn rebuild_custom_rules(&self) {
-        if let Some(ref custom) = self.custom {
-            let mut engine = CustomRuleEngine::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            if let Ok(entries) = std::fs::read_dir(&self.rules_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "toml") {
-                        match CustomRuleEngine::load_from_file(&path) {
-                            Ok(rules) => {
-                                for rule in rules {
-                                    engine.add_rule(rule);
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    path = %path.display(),
-                                    error = %e,
-                                    "failed to load custom rules"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+    #[test]
+    fn reload_swaps_in_newly_added_yara_rules() {
+        let dir = std::env::temp_dir().join(format!("riggs-loader-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sample = dir.join("sample.bin");
+        std::fs::write(&sample, b"xxNEW_MARKERxx").unwrap();
+        let yara = Arc::new(RwLock::new(YaraEngine::new(dir.clone()).unwrap()));
+        assert!(yara.read().unwrap().scan_file(&sample).unwrap().is_empty());
 
-            match custom.write() {
-                Ok(mut guard) => {
-                    *guard = engine;
-                    info!("custom rules reloaded");
-                }
-                Err(e) => warn!(error = %e, "failed to acquire custom engine write lock"),
-            }
-        }
+        let rule = dir.join("new.yar");
+        std::fs::write(
+            &rule,
+            r#"rule fresh { strings: $a = "NEW_MARKER" condition: $a }"#,
+        )
+        .unwrap();
+        reload_affected(&dir, Some(Arc::clone(&yara)), None, &[rule]);
+        let matches = yara.read().unwrap().scan_file(&sample).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(matches[0].rule_name, "fresh");
     }
 }

@@ -15,6 +15,29 @@ pub struct RiggsConfig {
     pub detection: DetectionConfig,
     #[serde(default)]
     pub egress: EgressConfig,
+    #[serde(default)]
+    pub rules: RulesConfig,
+}
+
+/// Detection rule sources. YARA (`.yar`/`.yara`) and custom TOML rules are
+/// loaded recursively from `rules_dir` (e.g. `default/yara`, `custom/yara`)
+/// and hot-reloaded on change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesConfig {
+    #[serde(default = "default_rules_dir")]
+    pub rules_dir: String,
+}
+
+fn default_rules_dir() -> String {
+    "/etc/riggs/rules".into()
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self {
+        Self {
+            rules_dir: default_rules_dir(),
+        }
+    }
 }
 
 /// Default-deny egress allowlist: an endpoint may only reach the hosts an

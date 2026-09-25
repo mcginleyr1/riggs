@@ -41,33 +41,18 @@ impl YaraEngine {
         let mut compiler = yara_x::Compiler::new();
         let mut count = 0;
 
-        let entries = std::fs::read_dir(&self.rules_dir)
-            .map_err(|e| RiggsError::Io(format!("failed to read rules dir: {e}")))?;
+        for path in crate::rule_files(&self.rules_dir, crate::YARA_EXTENSIONS) {
+            let source = std::fs::read_to_string(&path)
+                .map_err(|e| RiggsError::Io(format!("failed to read {}: {e}", path.display())))?;
 
-        for entry in entries {
-            let entry = entry.map_err(|e| RiggsError::Io(format!("dir entry error: {e}")))?;
-            let path = entry.path();
-
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext == "yar" || ext == "yara" {
-                        let source = std::fs::read_to_string(&path).map_err(|e| {
-                            RiggsError::Io(format!("failed to read {}: {e}", path.display()))
-                        })?;
-
-                        match compiler.add_source(source.as_str()) {
-                            Ok(_) => {
-                                count += 1;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    path = %path.display(),
-                                    error = %e,
-                                    "failed to compile YARA rule, skipping"
-                                );
-                            }
-                        }
-                    }
+            match compiler.add_source(source.as_str()) {
+                Ok(_) => count += 1,
+                Err(e) => {
+                    warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to compile YARA rule, skipping"
+                    );
                 }
             }
         }
