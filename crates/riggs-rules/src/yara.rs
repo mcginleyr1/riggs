@@ -1,8 +1,13 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use riggs_types::RiggsError;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+
+/// Only the file prefix is scanned so a huge file can't exhaust agent memory
+/// (same bound as static-ai's default).
+const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YaraMatch {
@@ -79,7 +84,9 @@ impl YaraEngine {
             .as_ref()
             .ok_or_else(|| RiggsError::Engine("YARA rules not compiled yet".to_string()))?;
 
-        let data = std::fs::read(path)
+        let mut data = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|f| f.take(MAX_SCAN_BYTES).read_to_end(&mut data))
             .map_err(|e| RiggsError::Io(format!("failed to read {}: {e}", path.display())))?;
 
         let mut scanner = yara_x::Scanner::new(rules);
@@ -108,5 +115,32 @@ impl YaraEngine {
             .collect();
 
         Ok(matches)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_file_matches_rule() {
+        let dir = std::env::temp_dir().join(format!("riggs-yara-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("t.yar"),
+            r#"rule evil { strings: $a = "EVIL_MARKER" condition: $a }"#,
+        )
+        .unwrap();
+        let sample = dir.join("sample.bin");
+        std::fs::write(&sample, b"xxEVIL_MARKERxx").unwrap();
+
+        let matches = YaraEngine::new(dir.clone())
+            .unwrap()
+            .scan_file(&sample)
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_name, "evil");
     }
 }
