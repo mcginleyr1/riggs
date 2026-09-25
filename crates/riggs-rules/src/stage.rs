@@ -163,7 +163,7 @@ impl DetectionStage for RulesStage {
         if let (Some(yara), RiggsEvent::File(fe)) = (&self.yara, event) {
             if matches!(
                 fe.action,
-                FileAction::Create | FileAction::Modify | FileAction::Rename
+                FileAction::Create | FileAction::Modify | FileAction::Rename | FileAction::Scan
             ) {
                 let yara = Arc::clone(yara);
                 let path = PathBuf::from(&fe.path);

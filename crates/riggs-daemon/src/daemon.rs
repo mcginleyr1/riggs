@@ -216,19 +216,25 @@ async fn shutdown_signal() {
 
 pub struct RiggsDaemon {
     config: RiggsConfig,
+    /// The riggs.toml the config was read from (target of `riggs config`).
+    config_path: Option<PathBuf>,
     supervisor: Supervisor,
 }
 
 impl RiggsDaemon {
     pub async fn new() -> Result<Self, RiggsError> {
-        let config = Self::load_config()?;
+        let (config, config_path) = Self::load_config()?;
         let supervisor = Supervisor::new();
 
-        Ok(Self { config, supervisor })
+        Ok(Self {
+            config,
+            config_path,
+            supervisor,
+        })
     }
 
-    fn load_config() -> Result<RiggsConfig, RiggsError> {
-        let mut config = 'file: {
+    fn load_config() -> Result<(RiggsConfig, Option<PathBuf>), RiggsError> {
+        let (mut config, config_path) = 'file: {
             for config_path in CONFIG_PATHS {
                 let path = std::path::Path::new(config_path);
                 if path.exists() {
@@ -239,11 +245,11 @@ impl RiggsDaemon {
                         RiggsError::Config(format!("failed to parse {config_path}: {e}"))
                     })?;
                     info!(path = config_path, "loaded configuration");
-                    break 'file cfg;
+                    break 'file (cfg, Some(path.to_path_buf()));
                 }
             }
             info!("no config file found, using defaults");
-            RiggsConfig::default()
+            (RiggsConfig::default(), None)
         };
 
         // Environment variable overrides (useful for Docker/container deployments)
@@ -255,7 +261,7 @@ impl RiggsDaemon {
             config.comms.enrollment_token = Some(token);
         }
 
-        Ok(config)
+        Ok((config, config_path))
     }
 
     pub async fn run(&mut self) -> Result<(), RiggsError> {
@@ -490,6 +496,7 @@ impl RiggsDaemon {
         let pipeline = Arc::new(pipeline);
 
         // -- Feed manager & dispatcher --
+        let mut feed_handle: Option<Arc<FeedManager>> = None;
         if self.config.intel.enabled {
             let (feed_tx, feed_rx) = mpsc::channel::<FeedUpdate>(256);
 
@@ -500,6 +507,7 @@ impl RiggsDaemon {
                 self.config.intel.bloom_false_positive_rate,
             ));
 
+            feed_handle = Some(Arc::clone(&feed_manager));
             let fm = Arc::clone(&feed_manager);
             self.supervisor.spawn("feed-manager", move || {
                 let fm = Arc::clone(&fm);
@@ -617,6 +625,18 @@ impl RiggsDaemon {
         let sensor = Box::new(riggs_platform_macos::MacOsSensor::new());
         #[cfg(not(target_os = "macos"))]
         let sensor = Box::new(riggs_platform_linux::LinuxSensor::new());
+        // -- Privileged CLI operations (config/scan/feeds/vuln) --
+        let console: crate::control::ConsoleSlot = Arc::new(StdRwLock::new(None));
+        if let Ok(mut guard) = daemon_state.control.write() {
+            *guard = Some(Arc::new(crate::control::ControlAdapter {
+                config_path: self.config_path.clone(),
+                events: event_tx.clone(),
+                feeds: feed_handle,
+                console: Arc::clone(&console),
+                vuln_running: Arc::default(),
+            }));
+        }
+
         let mut collector = riggs_sensor::EventCollector::new(sensor, event_tx);
         collector.start().await?;
         info!("sensor and event collector started");
@@ -760,6 +780,9 @@ impl RiggsDaemon {
                                 Ok(agent_id) => {
                                     cc.agent_id = Some(agent_id.clone());
                                     info!(agent_id = %agent_id, "enrolled with console");
+                                    if let Ok(mut slot) = console.write() {
+                                        *slot = Some((cc.clone(), agent_id.clone()));
+                                    }
 
                                     // Heartbeat loop
                                     let hb_client = cc.clone();

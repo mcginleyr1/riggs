@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::Utc;
@@ -7,6 +8,7 @@ use riggs_types::errors::RiggsError;
 
 use crate::cve::{VulnMatch, VulnReport};
 use crate::database::CveDatabase;
+use crate::osv::OsvClient;
 use crate::packages::{self, InstalledPackage};
 
 pub struct VulnScanner {
@@ -42,6 +44,43 @@ impl VulnScanner {
         info!(
             "Scanning {} installed packages for vulnerabilities",
             packages.len()
+        );
+        self.scan_packages(&packages)
+    }
+
+    /// Refresh the CVE database from OSV.dev for every installed package OSV
+    /// tracks, then scan those packages against it.
+    pub async fn update_from_osv_and_scan(&mut self) -> Result<VulnReport, RiggsError> {
+        let packages = tokio::task::spawn_blocking(packages::enumerate_packages)
+            .await
+            .map_err(|e| RiggsError::Other(format!("package enumeration failed: {e}")))?;
+
+        let mut by_ecosystem: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+        for package in &packages {
+            if let Some(ecosystem) = package.source.osv_ecosystem() {
+                by_ecosystem
+                    .entry(ecosystem)
+                    .or_default()
+                    .insert(package.name.clone());
+            }
+        }
+
+        let osv = OsvClient::new();
+        let mut cves = Vec::new();
+        for (ecosystem, names) in by_ecosystem {
+            let names: Vec<String> = names.into_iter().collect();
+            cves.extend(
+                osv.query_batch(ecosystem, &names)
+                    .await
+                    .map_err(RiggsError::Other)?,
+            );
+        }
+
+        self.db.replace_all(cves);
+        info!(
+            "CVE database refreshed from OSV: {} CVEs across {} packages",
+            self.db.total_cves(),
+            self.db.package_count()
         );
         self.scan_packages(&packages)
     }

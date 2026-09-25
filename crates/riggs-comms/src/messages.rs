@@ -66,6 +66,8 @@ pub enum DaemonMessage {
         feeds_last_updated: Option<String>,
     },
     Ok,
+    /// A privileged command succeeded; the text describes what happened.
+    Done(String),
     Error(String),
     DlpVerdict {
         allow: bool,

@@ -17,6 +17,19 @@ pub enum PackageSource {
     Binary,
 }
 
+impl PackageSource {
+    /// The OSV.dev ecosystem name, when OSV tracks this source.
+    pub fn osv_ecosystem(&self) -> Option<&'static str> {
+        match self {
+            Self::Npm => Some("npm"),
+            Self::Pip => Some("PyPI"),
+            Self::Gem => Some("RubyGems"),
+            Self::Dpkg => Some("Debian"),
+            Self::Homebrew | Self::System | Self::Application | Self::Rpm | Self::Binary => None,
+        }
+    }
+}
+
 impl fmt::Display for PackageSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

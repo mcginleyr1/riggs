@@ -2,8 +2,8 @@ mod ipc;
 mod messages;
 
 pub use ipc::{
-    DaemonState, DlpFlowVerdict, DlpQuery, DlpQueryStatus, EgressFlowVerdict, EgressQuery,
-    EgressQueryStatus, IpcClient, IpcError, IpcServer, StoreQuery,
+    ControlOps, DaemonState, DlpFlowVerdict, DlpQuery, DlpQueryStatus, EgressFlowVerdict,
+    EgressQuery, EgressQueryStatus, IpcClient, IpcError, IpcServer, StoreQuery,
 };
 pub use messages::{ClientMessage, DaemonMessage};
 

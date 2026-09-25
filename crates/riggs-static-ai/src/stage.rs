@@ -69,8 +69,12 @@ impl DetectionStage for StaticAiStage {
             }
         };
 
-        // Only scan newly created files — modifications/deletes don't introduce new binaries
-        if file_event.action != riggs_types::events::FileAction::Create {
+        // Only newly created files (and on-demand scans): modifications/deletes
+        // don't introduce new binaries.
+        if !matches!(
+            file_event.action,
+            riggs_types::events::FileAction::Create | riggs_types::events::FileAction::Scan
+        ) {
             return Ok(StageVerdict::Clean);
         }
 

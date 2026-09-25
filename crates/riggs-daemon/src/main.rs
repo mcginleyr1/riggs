@@ -1,6 +1,7 @@
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+mod control;
 mod daemon;
 mod supervisor;
 

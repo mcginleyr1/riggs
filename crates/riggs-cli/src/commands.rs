@@ -215,6 +215,7 @@ fn event_summary(event: &riggs_types::events::RiggsEvent) -> (&'static str, Stri
                 riggs_types::events::FileAction::Rename => "rename",
                 riggs_types::events::FileAction::Open => "open",
                 riggs_types::events::FileAction::Close => "close",
+                riggs_types::events::FileAction::Scan => "scan",
             };
             ("FILE", format!("{} {}", action, e.path))
         }
@@ -262,7 +263,7 @@ pub async fn config(socket_path: &Path, args: &[String]) -> Result<(), RiggsErro
         };
         let response = send(&mut client, &msg).await?;
         match response {
-            DaemonMessage::Ok => println!("{GREEN}Configuration updated.{RESET}"),
+            DaemonMessage::Done(outcome) => println!("{GREEN}{outcome}{RESET}"),
             DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
             _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
         }
@@ -283,19 +284,19 @@ pub async fn config(socket_path: &Path, args: &[String]) -> Result<(), RiggsErro
 }
 
 pub async fn scan(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
-    let path = args.first().map(|s| s.as_str()).unwrap_or(".");
+    // The daemon has its own working directory, so send an absolute path.
+    let requested = args.first().map(|s| s.as_str()).unwrap_or(".");
+    let path = std::fs::canonicalize(requested)
+        .map_err(|e| RiggsError::Io(format!("cannot scan {requested}: {e}")))?;
+    let path = path.to_string_lossy().to_string();
 
     let mut client = connect(socket_path).await?;
-    let msg = ClientMessage::TriggerScan {
-        path: path.to_string(),
-    };
-
     println!("{BOLD}Requesting scan:{RESET} {path}");
 
-    let response = send(&mut client, &msg).await?;
+    let response = send(&mut client, &ClientMessage::TriggerScan { path }).await?;
     match response {
-        DaemonMessage::Ok => {
-            println!("{GREEN}Scan initiated successfully.{RESET}");
+        DaemonMessage::Done(outcome) => {
+            println!("{GREEN}{outcome}{RESET}");
         }
         DaemonMessage::Error(e) => {
             eprintln!("{RED}Scan failed:{RESET} {e}");
@@ -336,7 +337,7 @@ pub async fn intel(socket_path: &Path, args: &[String]) -> Result<(), RiggsError
             println!("{BOLD}Refreshing threat intelligence feeds...{RESET}");
             let response = send(&mut client, &ClientMessage::RefreshFeeds).await?;
             match response {
-                DaemonMessage::Ok => println!("{GREEN}Feed refresh initiated.{RESET}"),
+                DaemonMessage::Done(outcome) => println!("{GREEN}{outcome}{RESET}"),
                 DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
                 _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
             }
@@ -554,9 +555,7 @@ pub async fn vuln(socket_path: &Path, args: &[String]) -> Result<(), RiggsError>
             println!("{BOLD}Refreshing vulnerability database from OSV.dev...{RESET}");
             let response = send(&mut client, &ClientMessage::VulnUpdate).await?;
             match response {
-                DaemonMessage::Ok => {
-                    println!("{GREEN}Vulnerability database update initiated.{RESET}")
-                }
+                DaemonMessage::Done(outcome) => println!("{GREEN}{outcome}{RESET}"),
                 DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
                 _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
             }

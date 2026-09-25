@@ -85,6 +85,16 @@ pub trait EgressQuery: Send + Sync {
     fn set_mode(&self, mode: &str) -> std::result::Result<(), String>;
 }
 
+/// Privileged daemon operations requested from the CLI. Each returns a
+/// human-readable outcome. Long-running work must be spawned, not awaited:
+/// the IPC request has a short deadline.
+pub trait ControlOps: Send + Sync {
+    fn update_config(&self, key: &str, value: &str) -> std::result::Result<String, String>;
+    fn trigger_scan(&self, path: &str) -> std::result::Result<String, String>;
+    fn refresh_feeds(&self) -> std::result::Result<String, String>;
+    fn vuln_update(&self) -> std::result::Result<String, String>;
+}
+
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("IO error: {0}")]
@@ -108,6 +118,7 @@ pub struct DaemonState {
     pub store: std::sync::RwLock<Option<Arc<dyn StoreQuery>>>,
     pub dlp: std::sync::RwLock<Option<Arc<dyn DlpQuery>>>,
     pub egress: std::sync::RwLock<Option<Arc<dyn EgressQuery>>>,
+    pub control: std::sync::RwLock<Option<Arc<dyn ControlOps>>>,
 }
 
 impl DaemonState {
@@ -121,6 +132,7 @@ impl DaemonState {
             store: std::sync::RwLock::new(None),
             dlp: std::sync::RwLock::new(None),
             egress: std::sync::RwLock::new(None),
+            control: std::sync::RwLock::new(None),
         }
     }
 }
@@ -171,8 +183,21 @@ fn egress_mutate(
     }
 }
 
-fn not_implemented(what: &str) -> DaemonMessage {
-    DaemonMessage::Error(format!("{what} are not implemented by the daemon yet"))
+fn control(
+    state: &DaemonState,
+    op: impl FnOnce(&dyn ControlOps) -> std::result::Result<String, String>,
+) -> DaemonMessage {
+    let guard = match state.control.read() {
+        Ok(guard) => guard,
+        Err(_) => return DaemonMessage::Error("daemon control unavailable".into()),
+    };
+    match guard.as_ref() {
+        Some(control) => match op(control.as_ref()) {
+            Ok(outcome) => DaemonMessage::Done(outcome),
+            Err(e) => DaemonMessage::Error(e),
+        },
+        None => DaemonMessage::Error("daemon control not initialized".into()),
+    }
 }
 
 /// True when the connecting peer runs as the same user as the daemon.
@@ -347,10 +372,12 @@ impl IpcServer {
                     .unwrap_or_else(|_| "{}".to_string());
                 DaemonMessage::Config(config)
             }
-            ClientMessage::UpdateConfig { .. } => not_implemented("runtime config updates"),
-            ClientMessage::TriggerScan { .. } => not_implemented("on-demand scans"),
-            ClientMessage::RefreshFeeds => not_implemented("on-demand feed refresh"),
-            ClientMessage::VulnUpdate => not_implemented("on-demand vuln database updates"),
+            ClientMessage::UpdateConfig { key, value } => {
+                control(state, |c| c.update_config(&key, &value))
+            }
+            ClientMessage::TriggerScan { path } => control(state, |c| c.trigger_scan(&path)),
+            ClientMessage::RefreshFeeds => control(state, |c| c.refresh_feeds()),
+            ClientMessage::VulnUpdate => control(state, |c| c.vuln_update()),
             ClientMessage::IntelStatus => DaemonMessage::IntelStatus {
                 bloom_size: state.bloom_size.load(Ordering::Relaxed) as usize,
                 cache_entries: state.cache_entries.load(Ordering::Relaxed),
@@ -495,9 +522,18 @@ mod tests {
     use super::*;
 
     async fn start_server(name: &str, max_connections: usize) -> PathBuf {
+        start_server_with(Arc::new(DaemonState::new()), name, max_connections).await
+    }
+
+    async fn start_server_with(
+        state: Arc<DaemonState>,
+        name: &str,
+        max_connections: usize,
+    ) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("riggs-ipc-{name}-{}.sock", std::process::id()));
-        let server = IpcServer::new(path.clone()).with_limits(DEFAULT_MAX_MSG_LEN, max_connections);
+        let server = IpcServer::with_state(path.clone(), state)
+            .with_limits(DEFAULT_MAX_MSG_LEN, max_connections);
         tokio::spawn(async move { server.start().await });
         while !path.exists() {
             tokio::task::yield_now().await;
@@ -518,11 +554,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unimplemented_commands_report_errors() {
-        let path = start_server("stub", 4).await;
-        let mut client = IpcClient::connect(&path).await.unwrap();
-        let response = client.send(&ClientMessage::RefreshFeeds).await.unwrap();
-        assert!(matches!(response, DaemonMessage::Error(_)));
-        std::fs::remove_file(path).unwrap();
+    async fn control_commands_route_to_control_ops() {
+        struct StubControl;
+        impl ControlOps for StubControl {
+            fn update_config(&self, key: &str, value: &str) -> std::result::Result<String, String> {
+                Ok(format!("{key}={value}"))
+            }
+            fn trigger_scan(&self, path: &str) -> std::result::Result<String, String> {
+                Err(format!("{path} missing"))
+            }
+            fn refresh_feeds(&self) -> std::result::Result<String, String> {
+                Ok("refreshing".into())
+            }
+            fn vuln_update(&self) -> std::result::Result<String, String> {
+                Ok("scanning".into())
+            }
+        }
+
+        let state = Arc::new(DaemonState::new());
+        let path = start_server_with(Arc::clone(&state), "control", 4).await;
+        let send = |msg: ClientMessage| {
+            let path = path.clone();
+            async move {
+                let mut client = IpcClient::connect(&path).await.unwrap();
+                client.send(&msg).await.unwrap()
+            }
+        };
+
+        let before_init = send(ClientMessage::RefreshFeeds).await;
+        *state.control.write().unwrap() = Some(Arc::new(StubControl));
+        let config = send(ClientMessage::UpdateConfig {
+            key: "engine.rules_enabled".into(),
+            value: "false".into(),
+        })
+        .await;
+        let scan = send(ClientMessage::TriggerScan {
+            path: "/nope".into(),
+        })
+        .await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(before_init, DaemonMessage::Error(_)));
+        assert!(matches!(config, DaemonMessage::Done(s) if s == "engine.rules_enabled=false"));
+        assert!(matches!(scan, DaemonMessage::Error(e) if e == "/nope missing"));
     }
 }
