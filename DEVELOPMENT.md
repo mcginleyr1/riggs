@@ -128,7 +128,19 @@ For development with the DLP module:
 ```sh
 cargo test -p riggs-dlp       # DLP tests
 cargo test -p riggs-engine     # Pipeline tests
-cargo clippy                   # Lint everything
+make fmt clippy test           # What CI gates on (warnings are errors)
+```
+
+Murtaugh's checks (CI runs them against a TimescaleDB service; the tests
+provision a real tenant database). `PGHOST`/`PGPORT` override the test DB
+location:
+
+```sh
+cd murtaugh
+mix compile --warnings-as-errors
+mix format --check-formatted
+mix credo
+mix test
 ```
 
 The agent runs as a daemon (requires root on macOS for Endpoint Security):
@@ -205,11 +217,12 @@ Meta DB (always):
 cd murtaugh && mix ecto.migrate
 ```
 
-Tenant DB migrations are run automatically by `Murtaugh.Tenancy.ensure_tenant_db/1`
-when a new shard is provisioned. To run them manually:
+Tenant DBs are not provisioned automatically yet. `Murtaugh.Tenancy.ensure_tenant_db/1`
+creates the database if missing, enables TimescaleDB, runs the tenant
+migrations and applies the retention policy. Run it for a shard with:
 
 ```sh
-cd murtaugh && mix run -e 'Murtaugh.Tenancy.run_tenant_migrations(shard)'
+cd murtaugh && mix run -e 'Murtaugh.Repo.get_by!(Murtaugh.Org.Shard, name: "shard-demo") |> Murtaugh.Tenancy.ensure_tenant_db()'
 ```
 
 ### Adding a new tenant

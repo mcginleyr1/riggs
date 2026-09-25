@@ -234,13 +234,16 @@ to `.txt` — the OOXML `PK` header is still detected).
 ## Development
 
 ```
-cargo check              # type check
-cargo clippy             # lint
-cargo test               # run all tests
+make fmt                 # cargo fmt --check
+make clippy              # clippy, warnings are errors
+make test                # run all tests
 cargo test -p riggs-dlp  # test a specific crate
 ```
 
-The workspace has 23 crates. Each crate is independently testable. See
+CI runs the same checks on Linux, plus `mix format --check-formatted`,
+`mix credo` and `mix test` for Murtaugh (see `DEVELOPMENT.md`).
+
+The workspace has 25 crates. Each crate is independently testable. See
 `docs/DEVELOPMENT_PHASES.md` for the implementation roadmap.
 
 ## Documentation
