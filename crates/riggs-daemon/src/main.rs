@@ -1,6 +1,7 @@
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+mod control;
 mod daemon;
 mod supervisor;
 
@@ -24,9 +25,7 @@ fn print_banner() {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive("riggs=info".parse().unwrap()),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive("riggs=info".parse().unwrap()))
         .init();
 
     print_banner();

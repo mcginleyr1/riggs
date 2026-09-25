@@ -166,8 +166,7 @@ impl PlatformSensor for LinuxSensor {
                                 .unwrap_or_else(|| "unknown".to_string()),
                             StorylineId::new(),
                         );
-                        let event =
-                            RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
+                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
                         if proc_tx.send(event).await.is_err() {
                             return;
                         }
@@ -185,8 +184,7 @@ impl PlatformSensor for LinuxSensor {
                         "unknown",
                         StorylineId::new(),
                     );
-                    let event =
-                        RiggsEvent::new_process(ProcessAction::Exit, ctx, None);
+                    let event = RiggsEvent::new_process(ProcessAction::Exit, ctx, None);
                     if proc_tx.send(event).await.is_err() {
                         return;
                     }
@@ -233,7 +231,11 @@ impl PlatformSensor for LinuxSensor {
             if let Some(val) = line.strip_prefix("PPid:\t") {
                 ppid = val.trim().parse().unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("Uid:\t") {
-                uid_str = val.split_whitespace().next().unwrap_or("unknown").to_string();
+                uid_str = val
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
             }
         }
 
@@ -276,11 +278,15 @@ impl NetworkContainment for LinuxSensor {
     async fn contain(&self, allowed_ips: &[std::net::IpAddr]) -> Result<(), RiggsError> {
         let mut rules = String::from("flush ruleset\ntable inet riggs_containment {\n  chain input {\n    type filter hook input priority 0; policy drop;\n    ct state established,related accept\n    iif lo accept\n");
         for ip in allowed_ips {
-            rules.push_str(&format!("    ip saddr {ip} accept\n    ip daddr {ip} accept\n"));
+            rules.push_str(&format!(
+                "    ip saddr {ip} accept\n    ip daddr {ip} accept\n"
+            ));
         }
         rules.push_str("  }\n  chain output {\n    type filter hook output priority 0; policy drop;\n    ct state established,related accept\n    oif lo accept\n");
         for ip in allowed_ips {
-            rules.push_str(&format!("    ip daddr {ip} accept\n    ip saddr {ip} accept\n"));
+            rules.push_str(&format!(
+                "    ip daddr {ip} accept\n    ip saddr {ip} accept\n"
+            ));
         }
         rules.push_str("  }\n}\n");
 

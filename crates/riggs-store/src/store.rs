@@ -134,7 +134,8 @@ impl RiggsStore {
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
             for (event, verdict) in batch {
                 let ekey = event_id_from(event);
-                let ejson = serde_json::to_vec(event).map_err(|e| RiggsError::Store(e.to_string()))?;
+                let ejson =
+                    serde_json::to_vec(event).map_err(|e| RiggsError::Store(e.to_string()))?;
                 events
                     .insert(ekey.as_slice(), self.encode(&ejson)?.as_slice())
                     .map_err(|e| RiggsError::Store(e.to_string()))?;
@@ -172,8 +173,8 @@ impl RiggsStore {
         match value {
             Some(data) => {
                 let json = decode(data.value());
-                let event: RiggsEvent = serde_json::from_slice(&json)
-                    .map_err(|e| RiggsError::Store(e.to_string()))?;
+                let event: RiggsEvent =
+                    serde_json::from_slice(&json).map_err(|e| RiggsError::Store(e.to_string()))?;
                 Ok(Some(event))
             }
             None => Ok(None),
@@ -193,15 +194,13 @@ impl RiggsStore {
             .map_err(|e| RiggsError::Store(e.to_string()))?;
 
         let mut results = Vec::new();
-        let iter = table
-            .iter()
-            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let iter = table.iter().map_err(|e| RiggsError::Store(e.to_string()))?;
 
         for entry in iter {
             let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
             let json = decode(value.value());
-            let event: RiggsEvent = serde_json::from_slice(&json)
-                .map_err(|e| RiggsError::Store(e.to_string()))?;
+            let event: RiggsEvent =
+                serde_json::from_slice(&json).map_err(|e| RiggsError::Store(e.to_string()))?;
 
             if event_storyline_id(&event) == Some(storyline_id) {
                 results.push(event);
@@ -224,9 +223,7 @@ impl RiggsStore {
 
         // UUIDv7 keys are time-ordered; iterate from the newest end and stop at
         // `limit` instead of materializing the whole table.
-        let iter = table
-            .iter()
-            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let iter = table.iter().map_err(|e| RiggsError::Store(e.to_string()))?;
         for entry in iter.rev() {
             if events.len() >= limit {
                 break;
@@ -253,9 +250,7 @@ impl RiggsStore {
             .map_err(|e| RiggsError::Store(e.to_string()))?;
 
         let mut verdicts = Vec::new();
-        let iter = table
-            .iter()
-            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let iter = table.iter().map_err(|e| RiggsError::Store(e.to_string()))?;
 
         for entry in iter {
             let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
@@ -351,8 +346,8 @@ pub mod riggs_response_record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use riggs_types::events::ProcessContext;
     use riggs_types::events::ProcessAction;
+    use riggs_types::events::ProcessContext;
     use riggs_types::verdict::MergedVerdict;
 
     fn tmp_db() -> std::path::PathBuf {
@@ -407,7 +402,10 @@ mod tests {
         let e = proc_event(20);
         store.store_event(&e).unwrap();
         let got = store.get_event(e.event_id()).unwrap();
-        assert_eq!(got.map(|g| g.event_id().clone()), Some(e.event_id().clone()));
+        assert_eq!(
+            got.map(|g| g.event_id().clone()),
+            Some(e.event_id().clone())
+        );
         let _ = std::fs::remove_file(&path);
     }
 

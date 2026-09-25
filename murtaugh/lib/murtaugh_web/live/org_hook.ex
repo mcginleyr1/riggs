@@ -20,14 +20,26 @@ defmodule MurtaughWeb.OrgHook do
       current_user ->
         {current_org, current_shard} = resolve_org(org_slug)
 
-        {:cont, assign(socket,
-          org_slug: org_slug,
-          current_org: current_org,
-          current_user: current_user,
-          current_shard: current_shard
-        )}
+        if authorized?(current_user, current_org) do
+          {:cont,
+           assign(socket,
+             org_slug: org_slug,
+             current_org: current_org,
+             current_user: current_user,
+             current_shard: current_shard
+           )}
+        else
+          {:halt,
+           socket
+           |> put_flash(:error, "You don't have access to that organization.")
+           |> redirect(to: "/login")}
+        end
     end
   end
+
+  # Unknown slugs resolve to a shard-less placeholder org with no tenant data.
+  defp authorized?(user, %Org.Node{} = node), do: Accounts.user_can_access?(user, node)
+  defp authorized?(_user, _placeholder_org), do: true
 
   defp resolve_org(slug) do
     org_node = Org.get_node_by_slug!(slug)
@@ -44,7 +56,11 @@ defmodule MurtaughWeb.OrgHook do
       fallback = %{
         id: "00000000-0000-0000-0000-000000000001",
         slug: slug,
-        name: slug |> String.replace("-", " ") |> String.split() |> Enum.map(&String.capitalize/1) |> Enum.join(" "),
+        name:
+          slug
+          |> String.replace("-", " ")
+          |> String.split()
+          |> Enum.map_join(" ", &String.capitalize/1),
         node_type: "account"
       }
 

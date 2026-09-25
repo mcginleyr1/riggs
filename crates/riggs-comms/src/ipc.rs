@@ -12,12 +12,17 @@ use tracing::{error, info, warn};
 const DEFAULT_MAX_MSG_LEN: usize = 8 * 1024 * 1024;
 
 /// Default cap on concurrent client handlers so a flood can't exhaust the daemon.
+/// Applied separately to owner and non-owner peers.
 const DEFAULT_MAX_CONCURRENT_CLIENTS: usize = 32;
+
+/// Deadline for reading a request and writing its response. A peer that
+/// connects and stalls would otherwise pin a handler slot forever.
+const CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 use riggs_types::events::RiggsEvent;
 use riggs_types::verdict::MergedVerdict;
 
-use crate::messages::{ClientMessage, DaemonMessage};
+use crate::messages::{ClientMessage, DaemonMessage, QuarantinedFile};
 
 pub trait StoreQuery: Send + Sync {
     fn recent_events(&self, limit: usize) -> Vec<RiggsEvent>;
@@ -80,6 +85,18 @@ pub trait EgressQuery: Send + Sync {
     fn set_mode(&self, mode: &str) -> std::result::Result<(), String>;
 }
 
+/// Privileged daemon operations requested from the CLI. Each returns a
+/// human-readable outcome. Long-running work must be spawned, not awaited:
+/// the IPC request has a short deadline.
+pub trait ControlOps: Send + Sync {
+    fn update_config(&self, key: &str, value: &str) -> std::result::Result<String, String>;
+    fn trigger_scan(&self, path: &str) -> std::result::Result<String, String>;
+    fn refresh_feeds(&self) -> std::result::Result<String, String>;
+    fn vuln_update(&self) -> std::result::Result<String, String>;
+    fn quarantine_list(&self) -> std::result::Result<Vec<QuarantinedFile>, String>;
+    fn quarantine_restore(&self, id: &str) -> std::result::Result<String, String>;
+}
+
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("IO error: {0}")]
@@ -103,6 +120,7 @@ pub struct DaemonState {
     pub store: std::sync::RwLock<Option<Arc<dyn StoreQuery>>>,
     pub dlp: std::sync::RwLock<Option<Arc<dyn DlpQuery>>>,
     pub egress: std::sync::RwLock<Option<Arc<dyn EgressQuery>>>,
+    pub control: std::sync::RwLock<Option<Arc<dyn ControlOps>>>,
 }
 
 impl DaemonState {
@@ -116,6 +134,7 @@ impl DaemonState {
             store: std::sync::RwLock::new(None),
             dlp: std::sync::RwLock::new(None),
             egress: std::sync::RwLock::new(None),
+            control: std::sync::RwLock::new(None),
         }
     }
 }
@@ -166,14 +185,28 @@ fn egress_mutate(
     }
 }
 
+fn control(
+    state: &DaemonState,
+    op: impl FnOnce(&dyn ControlOps) -> std::result::Result<String, String>,
+) -> DaemonMessage {
+    let guard = match state.control.read() {
+        Ok(guard) => guard,
+        Err(_) => return DaemonMessage::Error("daemon control unavailable".into()),
+    };
+    match guard.as_ref() {
+        Some(control) => match op(control.as_ref()) {
+            Ok(outcome) => DaemonMessage::Done(outcome),
+            Err(e) => DaemonMessage::Error(e),
+        },
+        None => DaemonMessage::Error("daemon control not initialized".into()),
+    }
+}
+
 /// True when the connecting peer runs as the same user as the daemon.
-/// Uses `getpeereid` on the connected socket (works on macOS and Linux).
 fn peer_is_owner(stream: &UnixStream) -> bool {
-    use std::os::unix::io::AsRawFd;
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-    let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
-    ok && uid == unsafe { libc::geteuid() }
+    stream
+        .peer_cred()
+        .is_ok_and(|cred| cred.uid() == unsafe { libc::geteuid() })
 }
 
 pub struct IpcServer {
@@ -232,24 +265,43 @@ impl IpcServer {
 
         info!("IPC server listening on {:?}", self.socket_path);
 
-        let limiter = Arc::new(Semaphore::new(self.max_connections));
+        // Separate pools so unprivileged peers (the socket is 0666) can never
+        // starve the root NEFilter extension, which fails open on timeout.
+        let owner_limiter = Arc::new(Semaphore::new(self.max_connections));
+        let other_limiter = Arc::new(Semaphore::new(self.max_connections));
         let max_message_bytes = self.max_message_bytes;
 
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let permit = match Arc::clone(&limiter).try_acquire_owned() {
+                    let is_owner = peer_is_owner(&stream);
+                    let limiter = if is_owner {
+                        &owner_limiter
+                    } else {
+                        &other_limiter
+                    };
+                    let permit = match Arc::clone(limiter).try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
-                            warn!("IPC connection limit reached, dropping connection");
+                            warn!(
+                                is_owner,
+                                "IPC connection limit reached, dropping connection"
+                            );
                             continue;
                         }
                     };
                     let state = Arc::clone(&self.state);
                     tokio::spawn(async move {
                         let _permit = permit; // released when the handler finishes
-                        if let Err(e) = Self::handle_client(stream, &state, max_message_bytes).await {
-                            error!("Client handler error: {}", e);
+                        let handled = tokio::time::timeout(
+                            CLIENT_IO_TIMEOUT,
+                            Self::handle_client(stream, &state, max_message_bytes, is_owner),
+                        )
+                        .await;
+                        match handled {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => error!("Client handler error: {}", e),
+                            Err(_) => warn!(is_owner, "IPC client timed out"),
                         }
                     });
                 }
@@ -264,6 +316,7 @@ impl IpcServer {
         mut stream: UnixStream,
         state: &DaemonState,
         max_message_bytes: usize,
+        is_owner: bool,
     ) -> Result<()> {
         let raw = read_length_prefixed(&mut stream, max_message_bytes).await?;
         let msg: ClientMessage = serde_json::from_slice(&raw)?;
@@ -276,11 +329,12 @@ impl IpcServer {
                 | ClientMessage::TriggerScan { .. }
                 | ClientMessage::RefreshFeeds
                 | ClientMessage::VulnUpdate
+                | ClientMessage::QuarantineRestore { .. }
                 | ClientMessage::EgressAllow { .. }
                 | ClientMessage::EgressDeny { .. }
                 | ClientMessage::EgressSetMode { .. }
         );
-        if needs_privilege && !peer_is_owner(&stream) {
+        if needs_privilege && !is_owner {
             let denied = DaemonMessage::Error(
                 "permission denied: command requires daemon-owner privilege".into(),
             );
@@ -321,18 +375,22 @@ impl IpcServer {
                     .unwrap_or_else(|_| "{}".to_string());
                 DaemonMessage::Config(config)
             }
-            ClientMessage::UpdateConfig { .. } => DaemonMessage::Ok,
-            ClientMessage::TriggerScan { path } => {
-                info!("Scan requested for: {}", path);
-                DaemonMessage::Ok
+            ClientMessage::UpdateConfig { key, value } => {
+                control(state, |c| c.update_config(&key, &value))
             }
-            ClientMessage::RefreshFeeds => {
-                info!("Feed refresh requested");
-                DaemonMessage::Ok
-            }
-            ClientMessage::VulnUpdate => {
-                info!("Vulnerability database update requested");
-                DaemonMessage::Ok
+            ClientMessage::TriggerScan { path } => control(state, |c| c.trigger_scan(&path)),
+            ClientMessage::RefreshFeeds => control(state, |c| c.refresh_feeds()),
+            ClientMessage::VulnUpdate => control(state, |c| c.vuln_update()),
+            ClientMessage::QuarantineList => match state.control.read() {
+                Ok(guard) => match guard.as_ref().map(|c| c.quarantine_list()) {
+                    Some(Ok(files)) => DaemonMessage::Quarantine(files),
+                    Some(Err(e)) => DaemonMessage::Error(e),
+                    None => DaemonMessage::Error("daemon control not initialized".into()),
+                },
+                Err(_) => DaemonMessage::Error("daemon control unavailable".into()),
+            },
+            ClientMessage::QuarantineRestore { id } => {
+                control(state, |c| c.quarantine_restore(&id))
             }
             ClientMessage::IntelStatus => DaemonMessage::IntelStatus {
                 bloom_size: state.bloom_size.load(Ordering::Relaxed) as usize,
@@ -397,7 +455,13 @@ impl IpcServer {
                     .ok()
                     .and_then(|guard| {
                         guard.as_ref().map(|eg| {
-                            eg.check(pid, &process_path, &remote_hostname, &remote_ip, remote_port)
+                            eg.check(
+                                pid,
+                                &process_path,
+                                &remote_hostname,
+                                &remote_ip,
+                                remote_port,
+                            )
                         })
                     })
                     // No policy loaded -> allow (fail-open until egress is enabled).
@@ -433,8 +497,12 @@ impl IpcServer {
                     },
                 }
             }
-            ClientMessage::EgressAllow { domain } => egress_mutate(state, |eg| eg.allow_domain(&domain)),
-            ClientMessage::EgressDeny { domain } => egress_mutate(state, |eg| eg.deny_domain(&domain)),
+            ClientMessage::EgressAllow { domain } => {
+                egress_mutate(state, |eg| eg.allow_domain(&domain))
+            }
+            ClientMessage::EgressDeny { domain } => {
+                egress_mutate(state, |eg| eg.deny_domain(&domain))
+            }
             ClientMessage::EgressSetMode { mode } => egress_mutate(state, |eg| eg.set_mode(&mode)),
         };
 
@@ -460,5 +528,103 @@ impl IpcClient {
         let response_bytes = read_length_prefixed(&mut self.stream, DEFAULT_MAX_MSG_LEN).await?;
         let response: DaemonMessage = serde_json::from_slice(&response_bytes)?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn start_server(name: &str, max_connections: usize) -> PathBuf {
+        start_server_with(Arc::new(DaemonState::new()), name, max_connections).await
+    }
+
+    async fn start_server_with(
+        state: Arc<DaemonState>,
+        name: &str,
+        max_connections: usize,
+    ) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("riggs-ipc-{name}-{}.sock", std::process::id()));
+        let server = IpcServer::with_state(path.clone(), state)
+            .with_limits(DEFAULT_MAX_MSG_LEN, max_connections);
+        tokio::spawn(async move { server.start().await });
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+        path
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_client_releases_its_slot() {
+        let path = start_server("stall", 1).await;
+        let _stalled = UnixStream::connect(&path).await.unwrap();
+        tokio::time::sleep(CLIENT_IO_TIMEOUT * 2).await;
+
+        let mut client = IpcClient::connect(&path).await.unwrap();
+        let response = client.send(&ClientMessage::GetStatus).await.unwrap();
+        assert!(matches!(response, DaemonMessage::Status { .. }));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_commands_route_to_control_ops() {
+        struct StubControl;
+        impl ControlOps for StubControl {
+            fn update_config(&self, key: &str, value: &str) -> std::result::Result<String, String> {
+                Ok(format!("{key}={value}"))
+            }
+            fn trigger_scan(&self, path: &str) -> std::result::Result<String, String> {
+                Err(format!("{path} missing"))
+            }
+            fn refresh_feeds(&self) -> std::result::Result<String, String> {
+                Ok("refreshing".into())
+            }
+            fn vuln_update(&self) -> std::result::Result<String, String> {
+                Ok("scanning".into())
+            }
+            fn quarantine_list(&self) -> std::result::Result<Vec<QuarantinedFile>, String> {
+                Ok(vec![QuarantinedFile {
+                    id: "q1".into(),
+                    original_path: "/tmp/evil".into(),
+                    quarantined_at: "now".into(),
+                    file_size: 3,
+                    sha256: None,
+                }])
+            }
+            fn quarantine_restore(&self, id: &str) -> std::result::Result<String, String> {
+                Ok(format!("restored {id}"))
+            }
+        }
+
+        let state = Arc::new(DaemonState::new());
+        let path = start_server_with(Arc::clone(&state), "control", 4).await;
+        let send = |msg: ClientMessage| {
+            let path = path.clone();
+            async move {
+                let mut client = IpcClient::connect(&path).await.unwrap();
+                client.send(&msg).await.unwrap()
+            }
+        };
+
+        let before_init = send(ClientMessage::RefreshFeeds).await;
+        *state.control.write().unwrap() = Some(Arc::new(StubControl));
+        let config = send(ClientMessage::UpdateConfig {
+            key: "engine.rules_enabled".into(),
+            value: "false".into(),
+        })
+        .await;
+        let scan = send(ClientMessage::TriggerScan {
+            path: "/nope".into(),
+        })
+        .await;
+        let listed = send(ClientMessage::QuarantineList).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(listed, DaemonMessage::Quarantine(files) if files[0].id == "q1"));
+
+        assert!(matches!(before_init, DaemonMessage::Error(_)));
+        assert!(matches!(config, DaemonMessage::Done(s) if s == "engine.rules_enabled=false"));
+        assert!(matches!(scan, DaemonMessage::Error(e) if e == "/nope missing"));
     }
 }

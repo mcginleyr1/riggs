@@ -22,9 +22,7 @@ pub async fn enroll(
         enrollment_token: client.config.enrollment_token.clone(),
     };
 
-    let mut grpc = client
-        .grpc_client()
-        .ok_or("not connected to console")?;
+    let mut grpc = client.grpc_client().ok_or("not connected to console")?;
 
     let response = grpc.enroll(request).await?.into_inner();
     info!(

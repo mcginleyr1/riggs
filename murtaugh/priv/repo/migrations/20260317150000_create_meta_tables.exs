@@ -73,7 +73,10 @@ defmodule Murtaugh.Repo.Migrations.CreateMetaTables do
     create table(:user_grants, primary_key: false) do
       add :id, :binary_id, primary_key: true
       add :user_id, references(:users, type: :binary_id, on_delete: :delete_all), null: false
-      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :delete_all), null: false
+
+      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :delete_all),
+        null: false
+
       add :role, :text, null: false
 
       timestamps(type: :utc_datetime, updated_at: false)
@@ -88,7 +91,10 @@ defmodule Murtaugh.Repo.Migrations.CreateMetaTables do
     # -------------------------------------------------------------------
     create table(:enrollment_tokens, primary_key: false) do
       add :id, :binary_id, primary_key: true
-      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :delete_all), null: false
+
+      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :delete_all),
+        null: false
+
       add :token, :text, null: false
       add :label, :text
       add :uses_remaining, :integer
@@ -122,7 +128,10 @@ defmodule Murtaugh.Repo.Migrations.CreateMetaTables do
     # -------------------------------------------------------------------
     create table(:alert_integrations, primary_key: false) do
       add :id, :binary_id, primary_key: true
-      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :delete_all), null: false
+
+      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :delete_all),
+        null: false
+
       add :integration_type, :text, null: false
       add :name, :text, null: false
       add :config, :map, null: false
@@ -156,7 +165,10 @@ defmodule Murtaugh.Repo.Migrations.CreateMetaTables do
     # -------------------------------------------------------------------
     create table(:archive_manifests, primary_key: false) do
       add :id, :binary_id, primary_key: true
-      add :tenant_shard_id, references(:tenant_shards, type: :binary_id, on_delete: :delete_all), null: false
+
+      add :tenant_shard_id, references(:tenant_shards, type: :binary_id, on_delete: :delete_all),
+        null: false
+
       add :table_name, :text, null: false
       add :year_month, :text, null: false
       add :object_key, :text, null: false
@@ -176,7 +188,10 @@ defmodule Murtaugh.Repo.Migrations.CreateMetaTables do
     # -------------------------------------------------------------------
     create table(:legal_holds, primary_key: false) do
       add :id, :binary_id, primary_key: true
-      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :restrict), null: false
+
+      add :org_node_id, references(:org_nodes, type: :binary_id, on_delete: :restrict),
+        null: false
+
       add :reason, :text, null: false
       add :created_by, references(:users, type: :binary_id, on_delete: :nilify_all), null: false
       add :active, :boolean, null: false, default: true

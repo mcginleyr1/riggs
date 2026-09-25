@@ -1,11 +1,12 @@
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
 
 use riggs_engine::{DetectionStage, StageVerdict};
 use riggs_types::errors::RiggsError;
-use riggs_types::events::{EventId, RiggsEvent};
+use riggs_types::events::{EventId, FileAction, RiggsEvent};
 use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
 use riggs_types::Severity;
 
@@ -13,10 +14,13 @@ use crate::custom::CustomRuleEngine;
 use crate::ioc::IocMatcher;
 use crate::yara::YaraEngine;
 
+pub type SharedYara = Arc<RwLock<YaraEngine>>;
+pub type SharedCustomRules = Arc<RwLock<CustomRuleEngine>>;
+
 pub struct RulesStage {
-    yara: Option<YaraEngine>,
+    yara: Option<SharedYara>,
     ioc: Arc<RwLock<Option<IocMatcher>>>,
-    custom: Option<CustomRuleEngine>,
+    custom: Option<SharedCustomRules>,
 }
 
 impl RulesStage {
@@ -26,22 +30,20 @@ impl RulesStage {
         custom: Option<CustomRuleEngine>,
     ) -> Self {
         Self {
-            yara,
+            yara: yara.map(|y| Arc::new(RwLock::new(y))),
             ioc: Arc::new(RwLock::new(ioc)),
-            custom,
+            custom: custom.map(|c| Arc::new(RwLock::new(c))),
         }
     }
 
-    pub fn new_with_shared_ioc(
-        yara: Option<YaraEngine>,
+    /// Build from handles shared with the feed dispatcher (IOC) and the rule
+    /// hot-reload watcher (YARA, custom rules).
+    pub fn new_shared(
+        yara: Option<SharedYara>,
         ioc: Arc<RwLock<Option<IocMatcher>>>,
-        custom: Option<CustomRuleEngine>,
+        custom: Option<SharedCustomRules>,
     ) -> Self {
-        Self {
-            yara,
-            ioc,
-            custom,
-        }
+        Self { yara, ioc, custom }
     }
 
     pub fn ioc_handle(&self) -> Arc<RwLock<Option<IocMatcher>>> {
@@ -140,7 +142,10 @@ impl DetectionStage for RulesStage {
 
         // Custom rule evaluation
         if let Some(custom_engine) = &self.custom {
-            let matched_rules = custom_engine.evaluate(event);
+            let matched_rules = custom_engine
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .evaluate(event);
             if !matched_rules.is_empty() {
                 candidates.push(Verdict {
                     event_id: eid.clone(),
@@ -153,34 +158,48 @@ impl DetectionStage for RulesStage {
             }
         }
 
-        // YARA scanning — only applies to file events with existing paths
-        if let Some(ref yara) = self.yara {
-            if let RiggsEvent::File(fe) = event {
-                let path = std::path::Path::new(&fe.path);
-                if path.exists() && path.is_file() {
-                    match yara.scan_file(path) {
-                        Ok(matches) if !matches.is_empty() => {
-                            let rule_names: Vec<&str> =
-                                matches.iter().map(|m| m.rule_name.as_str()).collect();
-                            candidates.push(Verdict {
-                                event_id: eid.clone(),
-                                threat_level: ThreatLevel::Malicious,
-                                confidence: 0.9,
-                                source: DetectionSource::YaraRule,
-                                description: format!("YARA rules matched: {}", rule_names.join(", ")),
-                                timestamp: Utc::now(),
-                            });
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, path = %fe.path, "YARA scan failed");
-                        }
-                        _ => {}
+        // YARA scanning — only when a file's content may have changed (not on
+        // every Open/Close), and on the blocking pool since it reads the file.
+        if let (Some(yara), RiggsEvent::File(fe)) = (&self.yara, event) {
+            if matches!(
+                fe.action,
+                FileAction::Create | FileAction::Modify | FileAction::Rename | FileAction::Scan
+            ) {
+                let yara = Arc::clone(yara);
+                let path = PathBuf::from(&fe.path);
+                let scan = tokio::task::spawn_blocking(move || {
+                    if !path.is_file() {
+                        return Ok(Vec::new());
                     }
+                    yara.read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .scan_file(&path)
+                })
+                .await
+                .map_err(|e| RiggsError::Engine(format!("YARA scan task failed: {e}")))?;
+
+                match scan {
+                    Ok(matches) if !matches.is_empty() => {
+                        let rule_names: Vec<&str> =
+                            matches.iter().map(|m| m.rule_name.as_str()).collect();
+                        candidates.push(Verdict {
+                            event_id: eid.clone(),
+                            threat_level: ThreatLevel::Malicious,
+                            confidence: 0.9,
+                            source: DetectionSource::YaraRule,
+                            description: format!("YARA rules matched: {}", rule_names.join(", ")),
+                            timestamp: Utc::now(),
+                        });
+                    }
+                    Err(e) => tracing::debug!(error = %e, path = %fe.path, "YARA scan failed"),
+                    _ => {}
                 }
             }
         }
 
-        Ok(strongest(candidates).map(stage_verdict).unwrap_or(StageVerdict::Clean))
+        Ok(strongest(candidates)
+            .map(stage_verdict)
+            .unwrap_or(StageVerdict::Clean))
     }
 }
 
@@ -224,5 +243,36 @@ mod tests {
     #[test]
     fn strongest_is_none_for_no_matches() {
         assert!(strongest(vec![]).is_none());
+    }
+
+    #[tokio::test]
+    async fn yara_rules_in_nested_dirs_detect_created_files_only() {
+        use riggs_types::events::{ProcessContext, StorylineId};
+
+        let dir = std::env::temp_dir().join(format!("riggs-stage-yara-{}", std::process::id()));
+        let yara_dir = dir.join("custom").join("yara");
+        std::fs::create_dir_all(&yara_dir).unwrap();
+        std::fs::write(
+            yara_dir.join("t.yar"),
+            r#"rule evil { strings: $a = "EVIL_MARKER" condition: $a }"#,
+        )
+        .unwrap();
+        let sample = dir.join("dropped.bin");
+        std::fs::write(&sample, b"xxEVIL_MARKERxx").unwrap();
+
+        let stage = RulesStage::new(Some(YaraEngine::new(dir.clone()).unwrap()), None, None);
+        let ctx = ProcessContext::new(1, 0, "curl", "/usr/bin/curl", "", "u", StorylineId::new());
+        let path = sample.to_string_lossy().to_string();
+
+        let created = RiggsEvent::new_file(FileAction::Create, ctx.clone(), path.clone(), None);
+        let opened = RiggsEvent::new_file(FileAction::Open, ctx, path, None);
+        let on_create = stage.analyze(&created).await.unwrap();
+        let on_open = stage.analyze(&opened).await.unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            matches!(on_create, StageVerdict::Malicious(v) if v.source == DetectionSource::YaraRule)
+        );
+        assert!(matches!(on_open, StageVerdict::Clean));
     }
 }

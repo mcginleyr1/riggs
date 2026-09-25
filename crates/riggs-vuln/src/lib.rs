@@ -8,6 +8,6 @@ mod version;
 pub use cve::{Cve, CveSeverity, VulnMatch, VulnReport};
 pub use database::CveDatabase;
 pub use osv::OsvClient;
-pub use packages::{InstalledPackage, PackageSource};
+pub use packages::{debian_ecosystem, InstalledPackage, PackageSource};
 pub use scanner::VulnScanner;
 pub use version::Version;

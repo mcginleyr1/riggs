@@ -5,8 +5,9 @@ use tracing::{info, warn};
 
 use riggs_types::errors::RiggsError;
 
-use crate::cve::{VulnMatch, VulnReport};
+use crate::cve::{Cve, VulnMatch, VulnReport};
 use crate::database::CveDatabase;
+use crate::osv::OsvClient;
 use crate::packages::{self, InstalledPackage};
 
 pub struct VulnScanner {
@@ -39,8 +40,52 @@ impl VulnScanner {
     /// Scan all installed packages on the system against the CVE database.
     pub async fn scan_system(&self) -> Result<VulnReport, RiggsError> {
         let packages = packages::enumerate_packages();
-        info!("Scanning {} installed packages for vulnerabilities", packages.len());
+        info!(
+            "Scanning {} installed packages for vulnerabilities",
+            packages.len()
+        );
         self.scan_packages(&packages)
+    }
+
+    /// Refresh the CVE database from OSV.dev for every installed package OSV
+    /// tracks, then scan those packages against it.
+    pub async fn update_from_osv_and_scan(&mut self) -> Result<VulnReport, RiggsError> {
+        let packages = tokio::task::spawn_blocking(packages::enumerate_packages)
+            .await
+            .map_err(|e| RiggsError::Other(format!("package enumeration failed: {e}")))?;
+        let debian = tokio::fs::read_to_string("/etc/os-release")
+            .await
+            .ok()
+            .and_then(|text| packages::debian_ecosystem(&text));
+
+        // OSV matches each installed version itself, with the ecosystem's own
+        // ordering, so only advisories that affect this exact build come back.
+        let osv = OsvClient::new();
+        let mut vulnerabilities = Vec::new();
+        let mut cves = Vec::new();
+        for package in &packages {
+            let Some(ecosystem) = package.source.osv_ecosystem(debian.as_deref()) else {
+                continue;
+            };
+            match osv
+                .query_installed(&ecosystem, &package.name, &package.version)
+                .await
+            {
+                Ok(affecting) => {
+                    vulnerabilities.extend(affecting.iter().map(|cve| vuln_match(package, cve)));
+                    cves.extend(affecting);
+                }
+                Err(e) => warn!(package = %package, error = %e, "OSV query failed, skipping"),
+            }
+        }
+
+        self.db.replace_all(cves);
+        info!(
+            "CVE database refreshed from OSV: {} CVEs across {} packages",
+            self.db.total_cves(),
+            self.db.package_count()
+        );
+        Ok(build_report(packages.len(), vulnerabilities))
     }
 
     /// Scan packages at a specific path (e.g., a project's node_modules).
@@ -55,33 +100,16 @@ impl VulnScanner {
     }
 
     fn scan_packages(&self, packages: &[InstalledPackage]) -> Result<VulnReport, RiggsError> {
-        let mut vulnerabilities = Vec::new();
-
-        for package in packages {
-            let hits = self.db.lookup(&package.name, &package.version);
-            for cve in hits {
-                let remediation = VulnReport::suggest_remediation(package, cve);
-                vulnerabilities.push(VulnMatch {
-                    cve: cve.clone(),
-                    installed_version: package.version.clone(),
-                    package_name: package.name.clone(),
-                    path: package.install_path.clone().unwrap_or_default(),
-                    remediation,
-                });
-            }
-        }
-
-        // Sort by severity (critical first)
-        vulnerabilities.sort_by(|a, b| b.cve.cvss_score.partial_cmp(&a.cve.cvss_score).unwrap_or(std::cmp::Ordering::Equal));
-
-        let report = VulnReport {
-            scanned_at: Utc::now(),
-            total_packages: packages.len(),
-            vulnerabilities,
-        };
-
-        info!("{}", report.summary());
-        Ok(report)
+        let vulnerabilities = packages
+            .iter()
+            .flat_map(|package| {
+                self.db
+                    .lookup(&package.name, &package.version)
+                    .into_iter()
+                    .map(move |cve| vuln_match(package, cve))
+            })
+            .collect();
+        Ok(build_report(packages.len(), vulnerabilities))
     }
 
     pub fn database(&self) -> &CveDatabase {
@@ -91,6 +119,28 @@ impl VulnScanner {
     pub fn database_mut(&mut self) -> &mut CveDatabase {
         &mut self.db
     }
+}
+
+fn vuln_match(package: &InstalledPackage, cve: &Cve) -> VulnMatch {
+    VulnMatch {
+        remediation: VulnReport::suggest_remediation(package, cve),
+        cve: cve.clone(),
+        installed_version: package.version.clone(),
+        package_name: package.name.clone(),
+        path: package.install_path.clone().unwrap_or_default(),
+    }
+}
+
+/// Report with the most severe (highest CVSS) findings first.
+fn build_report(total_packages: usize, mut vulnerabilities: Vec<VulnMatch>) -> VulnReport {
+    vulnerabilities.sort_by(|a, b| b.cve.cvss_score.total_cmp(&a.cve.cvss_score));
+    let report = VulnReport {
+        scanned_at: Utc::now(),
+        total_packages,
+        vulnerabilities,
+    };
+    info!("{}", report.summary());
+    report
 }
 
 impl Default for VulnScanner {

@@ -5,9 +5,38 @@ defmodule Murtaugh.Fleet do
 
   import Ecto.Query
 
-  alias Murtaugh.TenantRepo
+  alias Murtaugh.{Repo, TenantRepo}
   alias Murtaugh.Tenancy
-  alias Murtaugh.Fleet.Agent
+  alias Murtaugh.Fleet.{Agent, EnrollmentToken}
+
+  @doc "Enrollment tokens for an org node, newest first."
+  def list_enrollment_tokens(%{id: node_id}) do
+    from(t in EnrollmentToken,
+      where: t.org_node_id == ^node_id,
+      order_by: [desc: t.inserted_at],
+      preload: :creator
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Creates an enrollment token for `node`. Returns `{:ok, token, plaintext}`;
+  only the hash is stored, so the plaintext must be shown to the operator now.
+  """
+  def create_enrollment_token(%{id: node_id}, %{id: user_id}, attrs) do
+    plaintext = "enrl_" <> Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+
+    attrs =
+      Map.merge(attrs, %{
+        "org_node_id" => node_id,
+        "created_by" => user_id,
+        "token" => EnrollmentToken.hash_token(plaintext)
+      })
+
+    with {:ok, token} <- %EnrollmentToken{} |> EnrollmentToken.changeset(attrs) |> Repo.insert() do
+      {:ok, token, plaintext}
+    end
+  end
 
   def list_agents(shard, opts \\ []) do
     Tenancy.with_tenant(shard, fn ->

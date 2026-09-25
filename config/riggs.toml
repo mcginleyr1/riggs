@@ -64,6 +64,10 @@ kill_on_critical = true
 quarantine_on_malicious = true
 quarantine_path = "/var/lib/riggs/quarantine"
 pf_conf_path = "/var/lib/riggs/pf-containment.conf"   # macOS containment ruleset (off /tmp)
+preemptive_snapshots = true              # copy files a threat storyline opens, for Rollback
+snapshot_path = "/var/lib/riggs/snapshots"
+snapshot_max_file_mib = 64
+snapshot_retention_hours = 24
 
 # Behavioral detection tuning and signatures (adjust sensitivity per environment).
 [detection]

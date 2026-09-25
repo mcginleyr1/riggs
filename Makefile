@@ -1,4 +1,4 @@
-.PHONY: build install uninstall check clippy test clean
+.PHONY: build install uninstall check fmt clippy test clean
 
 build:
 	cargo build --release
@@ -12,8 +12,11 @@ uninstall:
 check:
 	cargo check --workspace
 
+fmt:
+	cargo fmt --all --check
+
 clippy:
-	cargo clippy --workspace
+	cargo clippy --workspace --all-targets -- -D warnings
 
 test:
 	cargo test --workspace

@@ -6,7 +6,10 @@
         <p class="text-gray-400 mt-2 text-sm">Endpoint Protection Console</p>
       </div>
 
-      <div :if={@error} class="mb-4 p-3 rounded-lg bg-red-900/40 border border-red-800 text-red-300 text-sm">
+      <div
+        :if={@error}
+        class="mb-4 p-3 rounded-lg bg-red-900/40 border border-red-800 text-red-300 text-sm"
+      >
         {@error}
       </div>
 
@@ -27,7 +30,9 @@
         </div>
 
         <div>
-          <label for="password" class="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
+          <label for="password" class="block text-sm font-medium text-gray-300 mb-1.5">
+            Password
+          </label>
           <input
             type="password"
             name="password"

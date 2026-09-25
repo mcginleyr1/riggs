@@ -9,9 +9,8 @@ const DEFAULT_SOCKET_PATH: &str = "/var/run/riggs.sock";
 async fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mut socket_path = PathBuf::from(
-        env::var("RIGGS_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string()),
-    );
+    let mut socket_path =
+        PathBuf::from(env::var("RIGGS_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string()));
     let mut cmd_args: Vec<String> = Vec::new();
     let mut found_command = false;
 
@@ -75,7 +74,10 @@ fn print_usage() {
     println!("Usage: riggs [--socket <path>] <command> [options]");
     println!();
     println!("Options:");
-    println!("  --socket <path>  Override daemon socket path (default: {})", DEFAULT_SOCKET_PATH);
+    println!(
+        "  --socket <path>  Override daemon socket path (default: {})",
+        DEFAULT_SOCKET_PATH
+    );
     println!();
     println!("Commands:");
     println!("  status       Show daemon status and active threats");

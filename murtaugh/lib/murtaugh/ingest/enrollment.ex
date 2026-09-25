@@ -30,7 +30,9 @@ defmodule Murtaugh.Ingest.Enrollment do
           }
 
           TenantRepo.insert(Agent.changeset(%Agent{}, attrs),
-            on_conflict: {:replace, [:ip_address, :agent_version, :status, :last_heartbeat, :os_version, :arch]},
+            on_conflict:
+              {:replace,
+               [:ip_address, :agent_version, :status, :last_heartbeat, :os_version, :arch]},
             conflict_target: [:hostname, :org_node_id],
             returning: true
           )
@@ -40,7 +42,13 @@ defmodule Murtaugh.Ingest.Enrollment do
         {:ok, agent} ->
           AgentRegistry.register(agent.id, shard, token_record.org_node_id)
           maybe_decrement_token(token_record)
-          Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.fleet(agent.org_node_id), {:agent_online, agent})
+
+          Phoenix.PubSub.broadcast(
+            Murtaugh.PubSub,
+            Murtaugh.Topics.fleet(agent.org_node_id),
+            {:agent_online, agent}
+          )
+
           {:ok, agent.id}
 
         {:error, changeset} ->

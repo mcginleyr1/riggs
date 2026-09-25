@@ -111,12 +111,21 @@ impl StorylineCorrelator {
         storyline_id
     }
 
-    fn assign(&mut self, ctx: &ProcessContext, event_id: EventId, now: DateTime<Utc>) -> StorylineId {
+    fn assign(
+        &mut self,
+        ctx: &ProcessContext,
+        event_id: EventId,
+        now: DateTime<Utc>,
+    ) -> StorylineId {
         // Check if this process already belongs to a storyline
         if let Some(existing_id) = self.pid_to_storyline.get(&ctx.pid) {
             let existing_id = existing_id.clone();
             if let Some(storyline) = self.storylines.get_mut(&existing_id) {
-                push_capped(&mut storyline.events, event_id, self.max_events_per_storyline);
+                push_capped(
+                    &mut storyline.events,
+                    event_id,
+                    self.max_events_per_storyline,
+                );
                 storyline.updated_at = now;
                 return existing_id;
             }
@@ -126,7 +135,11 @@ impl StorylineCorrelator {
         if let Some(parent_id) = self.pid_to_storyline.get(&ctx.ppid) {
             let parent_id = parent_id.clone();
             if let Some(storyline) = self.storylines.get_mut(&parent_id) {
-                push_capped(&mut storyline.events, event_id, self.max_events_per_storyline);
+                push_capped(
+                    &mut storyline.events,
+                    event_id,
+                    self.max_events_per_storyline,
+                );
                 storyline.updated_at = now;
                 let already_tracked = storyline.process_tree.iter().any(|p| p.pid == ctx.pid);
                 if !already_tracked {
@@ -187,6 +200,13 @@ impl StorylineCorrelator {
             .collect()
     }
 
+    /// True when the storyline's threat score is above the threat threshold.
+    pub fn is_threat(&self, id: &StorylineId) -> bool {
+        self.storylines
+            .get(id)
+            .is_some_and(|s| s.threat_score > self.threat_score_threshold)
+    }
+
     pub fn threat_storylines(&self) -> Vec<&Storyline> {
         self.storylines
             .values()
@@ -195,7 +215,8 @@ impl StorylineCorrelator {
     }
 
     pub fn prune_inactive(&mut self, max_age: Duration) {
-        let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
+        let cutoff =
+            Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
         let stale_ids: Vec<StorylineId> = self
             .storylines
             .iter()

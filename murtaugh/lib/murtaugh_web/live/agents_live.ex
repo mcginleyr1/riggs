@@ -9,16 +9,20 @@ defmodule MurtaughWeb.AgentsLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.fleet(socket.assigns.current_org.id))
+      Phoenix.PubSub.subscribe(
+        Murtaugh.PubSub,
+        Murtaugh.Topics.fleet(socket.assigns.current_org.id)
+      )
     end
 
     shard = socket.assigns[:current_shard]
 
-    {:ok, assign(socket,
-      page_title: "Agents",
-      agents: load_agents(shard),
-      filter_status: "all"
-    )}
+    {:ok,
+     assign(socket,
+       page_title: "Agents",
+       agents: load_agents(shard),
+       filter_status: "all"
+     )}
   end
 
   @impl true
@@ -132,16 +136,106 @@ defmodule MurtaughWeb.AgentsLive do
 
   defp placeholder_agents do
     [
-      %{id: "a1", hostname: "WS-NYC-042", os: "Windows 11", status: :online, last_heartbeat: "30s ago", threats: 3, dlp_blocks: 1, version: "0.4.2"},
-      %{id: "a2", hostname: "SRV-SF-003", os: "Ubuntu 22.04", status: :online, last_heartbeat: "15s ago", threats: 1, dlp_blocks: 0, version: "0.4.2"},
-      %{id: "a3", hostname: "WS-NYC-017", os: "Windows 10", status: :online, last_heartbeat: "45s ago", threats: 2, dlp_blocks: 4, version: "0.4.1"},
-      %{id: "a4", hostname: "WS-LON-008", os: "macOS 14.3", status: :degraded, last_heartbeat: "3m ago", threats: 1, dlp_blocks: 0, version: "0.4.2"},
-      %{id: "a5", hostname: "SRV-NYC-001", os: "RHEL 9", status: :online, last_heartbeat: "20s ago", threats: 0, dlp_blocks: 2, version: "0.4.2"},
-      %{id: "a6", hostname: "WS-SF-022", os: "Windows 11", status: :online, last_heartbeat: "10s ago", threats: 1, dlp_blocks: 0, version: "0.4.2"},
-      %{id: "a7", hostname: "SRV-LON-002", os: "Debian 12", status: :offline, last_heartbeat: "2h ago", threats: 0, dlp_blocks: 0, version: "0.4.0"},
-      %{id: "a8", hostname: "WS-NYC-055", os: "Windows 11", status: :online, last_heartbeat: "25s ago", threats: 1, dlp_blocks: 3, version: "0.4.2"},
-      %{id: "a9", hostname: "SRV-SF-011", os: "Ubuntu 24.04", status: :contained, last_heartbeat: "1m ago", threats: 5, dlp_blocks: 0, version: "0.4.2"},
-      %{id: "a10", hostname: "WS-NYC-033", os: "Windows 10", status: :offline, last_heartbeat: "5h ago", threats: 0, dlp_blocks: 0, version: "0.3.9"}
+      %{
+        id: "a1",
+        hostname: "WS-NYC-042",
+        os: "Windows 11",
+        status: :online,
+        last_heartbeat: "30s ago",
+        threats: 3,
+        dlp_blocks: 1,
+        version: "0.4.2"
+      },
+      %{
+        id: "a2",
+        hostname: "SRV-SF-003",
+        os: "Ubuntu 22.04",
+        status: :online,
+        last_heartbeat: "15s ago",
+        threats: 1,
+        dlp_blocks: 0,
+        version: "0.4.2"
+      },
+      %{
+        id: "a3",
+        hostname: "WS-NYC-017",
+        os: "Windows 10",
+        status: :online,
+        last_heartbeat: "45s ago",
+        threats: 2,
+        dlp_blocks: 4,
+        version: "0.4.1"
+      },
+      %{
+        id: "a4",
+        hostname: "WS-LON-008",
+        os: "macOS 14.3",
+        status: :degraded,
+        last_heartbeat: "3m ago",
+        threats: 1,
+        dlp_blocks: 0,
+        version: "0.4.2"
+      },
+      %{
+        id: "a5",
+        hostname: "SRV-NYC-001",
+        os: "RHEL 9",
+        status: :online,
+        last_heartbeat: "20s ago",
+        threats: 0,
+        dlp_blocks: 2,
+        version: "0.4.2"
+      },
+      %{
+        id: "a6",
+        hostname: "WS-SF-022",
+        os: "Windows 11",
+        status: :online,
+        last_heartbeat: "10s ago",
+        threats: 1,
+        dlp_blocks: 0,
+        version: "0.4.2"
+      },
+      %{
+        id: "a7",
+        hostname: "SRV-LON-002",
+        os: "Debian 12",
+        status: :offline,
+        last_heartbeat: "2h ago",
+        threats: 0,
+        dlp_blocks: 0,
+        version: "0.4.0"
+      },
+      %{
+        id: "a8",
+        hostname: "WS-NYC-055",
+        os: "Windows 11",
+        status: :online,
+        last_heartbeat: "25s ago",
+        threats: 1,
+        dlp_blocks: 3,
+        version: "0.4.2"
+      },
+      %{
+        id: "a9",
+        hostname: "SRV-SF-011",
+        os: "Ubuntu 24.04",
+        status: :contained,
+        last_heartbeat: "1m ago",
+        threats: 5,
+        dlp_blocks: 0,
+        version: "0.4.2"
+      },
+      %{
+        id: "a10",
+        hostname: "WS-NYC-033",
+        os: "Windows 10",
+        status: :offline,
+        last_heartbeat: "5h ago",
+        threats: 0,
+        dlp_blocks: 0,
+        version: "0.3.9"
+      }
     ]
   end
 end

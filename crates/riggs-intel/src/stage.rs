@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::Utc;
 
-use riggs_engine::StageVerdict;
 use riggs_engine::DetectionStage;
+use riggs_engine::StageVerdict;
 use riggs_types::errors::RiggsError;
 use riggs_types::events::{EventId, RiggsEvent};
 use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
@@ -98,10 +98,7 @@ impl ThreatIntelStage {
                     (
                         ThreatLevel::Clean,
                         0.9,
-                        format!(
-                            "VirusTotal: clean across {} engines",
-                            vt.total_engines
-                        ),
+                        format!("VirusTotal: clean across {} engines", vt.total_engines),
                     )
                 };
 
@@ -238,12 +235,8 @@ impl DetectionStage for ThreatIntelStage {
                 };
                 self.analyze_file_hash(eid, hash).await
             }
-            RiggsEvent::Network(net_event) => {
-                self.analyze_network(eid, &net_event.dst_addr).await
-            }
-            RiggsEvent::Dns(dns_event) => {
-                Ok(self.analyze_dns(eid, &dns_event.query))
-            }
+            RiggsEvent::Network(net_event) => self.analyze_network(eid, &net_event.dst_addr).await,
+            RiggsEvent::Dns(dns_event) => Ok(self.analyze_dns(eid, &dns_event.query)),
             _ => Ok(StageVerdict::Clean),
         }
     }

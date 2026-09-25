@@ -26,7 +26,7 @@ defmodule Murtaugh.Ingest.DeviceIngester do
             policy_decision: report.policy_decision || "allow"
           }
 
-          TenantRepo.insert_all("device_events", [row])
+          TenantRepo.insert_all(Murtaugh.DeviceControl.Event, [row])
           :ok
         end)
 

@@ -20,11 +20,11 @@ defmodule Murtaugh.Accounts.User do
   end
 
   @required_fields ~w(email name)a
-  @optional_fields ~w(is_superadmin)a
 
+  # is_superadmin is never cast from attrs; set it on the struct server-side.
   def changeset(user, attrs) do
     user
-    |> cast(attrs, @required_fields ++ @optional_fields)
+    |> cast(attrs, @required_fields)
     |> validate_required(@required_fields)
     |> validate_format(:email, ~r/^[^\s]+@[^\s]+\.[^\s]+$/, message: "must be a valid email")
     |> validate_length(:email, max: 254)

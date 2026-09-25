@@ -3,8 +3,8 @@ use std::path::Path;
 use aho_corasick::AhoCorasick;
 use serde::{Deserialize, Serialize};
 
-use riggs_types::events::RiggsEvent;
 use riggs_types::errors::RiggsError;
+use riggs_types::events::RiggsEvent;
 use riggs_types::Severity;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,7 +35,10 @@ impl IocMatcher {
     pub fn new(iocs: Vec<Ioc>) -> Self {
         // Drop empty patterns (AhoCorasick rejects them) so patterns and iocs
         // stay index-aligned for check_string's self.iocs[pattern_index] lookup.
-        let iocs: Vec<Ioc> = iocs.into_iter().filter(|ioc| !ioc.value.is_empty()).collect();
+        let iocs: Vec<Ioc> = iocs
+            .into_iter()
+            .filter(|ioc| !ioc.value.is_empty())
+            .collect();
 
         let build = {
             let patterns: Vec<&str> = iocs.iter().map(|ioc| ioc.value.as_str()).collect();
@@ -61,10 +64,16 @@ impl IocMatcher {
     }
 
     pub fn load_from_file(path: &Path) -> Result<Vec<Ioc>, RiggsError> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| RiggsError::Io(format!("failed to read IOC file {}: {}", path.display(), e)))?;
-        let iocs: Vec<Ioc> = serde_json::from_str(&contents)
-            .map_err(|e| RiggsError::Config(format!("failed to parse IOC JSON from {}: {}", path.display(), e)))?;
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            RiggsError::Io(format!("failed to read IOC file {}: {}", path.display(), e))
+        })?;
+        let iocs: Vec<Ioc> = serde_json::from_str(&contents).map_err(|e| {
+            RiggsError::Config(format!(
+                "failed to parse IOC JSON from {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
         Ok(iocs)
     }
 

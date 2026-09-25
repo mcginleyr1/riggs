@@ -11,7 +11,7 @@ use crate::proto::{DlpEventReport, ThreatReport, VerdictDetail};
 pub async fn run_threat_reporter(
     client: ConsoleClient,
     agent_id: String,
-    mut verdict_rx: mpsc::Receiver<MergedVerdict>,
+    verdict_rx: &mut mpsc::Receiver<MergedVerdict>,
 ) {
     while let Some(verdict) = verdict_rx.recv().await {
         if verdict.final_threat_level == ThreatLevel::Clean {
@@ -54,7 +54,11 @@ pub async fn run_threat_reporter(
             verdicts,
             process_name: String::new(),
             process_path: String::new(),
-            summary: format!("{} detected by {} engines", threat_level, verdict.verdicts.len()),
+            summary: format!(
+                "{} detected by {} engines",
+                threat_level,
+                verdict.verdicts.len()
+            ),
         };
 
         match grpc.report_threat(report).await {
@@ -72,7 +76,7 @@ pub async fn run_threat_reporter(
 pub async fn run_dlp_reporter(
     client: ConsoleClient,
     agent_id: String,
-    mut dlp_rx: mpsc::Receiver<DlpDetection>,
+    dlp_rx: &mut mpsc::Receiver<DlpDetection>,
 ) {
     while let Some(det) = dlp_rx.recv().await {
         let Some(mut grpc) = client.grpc_client() else {

@@ -31,8 +31,8 @@ defmodule Murtaugh.Org.Shard do
     shard
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
-    |> validate_inclusion(:status, ~w(active migrating archived))
-    |> validate_number(:port, greater_than: 0, less_than: 65536)
+    |> validate_inclusion(:status, ~w(provisioning active migrating archived))
+    |> validate_number(:port, greater_than: 0, less_than: 65_536)
     |> validate_number(:pool_size, greater_than: 0)
     |> validate_number(:retention_days, greater_than: 0)
     |> validate_number(:archive_retention_days, greater_than: 0)

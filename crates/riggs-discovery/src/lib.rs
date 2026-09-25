@@ -1,5 +1,5 @@
-mod scanner;
 mod device;
+mod scanner;
 
-pub use scanner::{NetworkScanner, ScanError};
 pub use device::DiscoveredDevice;
+pub use scanner::{NetworkScanner, ScanError};

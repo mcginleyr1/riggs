@@ -1,4 +1,6 @@
 defmodule Murtaugh.Audit do
+  @moduledoc "Append-only audit log of user and system actions."
+
   import Ecto.Query
   alias Murtaugh.Repo
   alias Murtaugh.Audit.Entry

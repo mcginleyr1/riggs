@@ -156,7 +156,7 @@ impl RiggsEvent {
                 ProcessAction::Exit => Severity::Info,
             },
             RiggsEvent::File(e) => match e.action {
-                FileAction::Open | FileAction::Close => Severity::Info,
+                FileAction::Open | FileAction::Close | FileAction::Scan => Severity::Info,
                 FileAction::Create | FileAction::Modify | FileAction::Rename => Severity::Low,
                 FileAction::Delete => Severity::Medium,
             },
@@ -319,6 +319,7 @@ impl fmt::Display for RiggsEvent {
                     FileAction::Rename => "rename",
                     FileAction::Open => "open",
                     FileAction::Close => "close",
+                    FileAction::Scan => "scan",
                 };
                 write!(
                     f,
@@ -334,12 +335,7 @@ impl fmt::Display for RiggsEvent {
                 write!(
                     f,
                     "[NETWORK] pid={} {} {}:{} -> {}:{}",
-                    e.process_context.pid,
-                    dir,
-                    e.src_addr,
-                    e.src_port,
-                    e.dst_addr,
-                    e.dst_port
+                    e.process_context.pid, dir, e.src_addr, e.src_port, e.dst_addr, e.dst_port
                 )
             }
             RiggsEvent::Dns(e) => {
@@ -408,6 +404,9 @@ pub enum FileAction {
     /// File descriptor closed by the process.
     /// Only emitted by sensors that have fd-level visibility (macOS ES, eBPF).
     Close,
+    /// Observed by an on-demand scan (`riggs scan`), not a filesystem change.
+    /// Content stages inspect it; behavioral rules ignore it.
+    Scan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

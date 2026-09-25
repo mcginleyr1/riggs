@@ -25,9 +25,8 @@ impl CveDatabase {
     /// Expected format: array of Cve objects.
     pub fn load_from_file(path: &Path) -> Result<Self, std::io::Error> {
         let content = std::fs::read_to_string(path)?;
-        let cves: Vec<Cve> = serde_json::from_str(&content).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let cves: Vec<Cve> = serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         let mut db = Self::new();
         for cve in cves {
@@ -64,7 +63,9 @@ impl CveDatabase {
         };
 
         cves.iter()
-            .filter(|cve| version_is_affected(&installed, &cve.affected_versions, &cve.fixed_version))
+            .filter(|cve| {
+                version_is_affected(&installed, &cve.affected_versions, &cve.fixed_version)
+            })
             .collect()
     }
 
@@ -87,7 +88,11 @@ impl CveDatabase {
         for cve in cves {
             self.add(cve);
         }
-        info!("CVE database replaced: {} CVEs across {} packages", self.total_cves, self.entries.len());
+        info!(
+            "CVE database replaced: {} CVEs across {} packages",
+            self.total_cves,
+            self.entries.len()
+        );
     }
 
     pub fn package_count(&self) -> usize {
@@ -105,10 +110,7 @@ impl CveDatabase {
 
     /// Look up a specific CVE by ID.
     pub fn get_by_id(&self, cve_id: &str) -> Option<&Cve> {
-        self.entries
-            .values()
-            .flatten()
-            .find(|cve| cve.id == cve_id)
+        self.entries.values().flatten().find(|cve| cve.id == cve_id)
     }
 }
 
@@ -272,7 +274,11 @@ mod tests {
 
         assert_eq!(db.lookup("lib", "1.1.0").len(), 1, "in first range");
         assert_eq!(db.lookup("lib", "2.0.5").len(), 1, "in second range");
-        assert_eq!(db.lookup("lib", "1.5.0").len(), 0, "in the gap between ranges");
+        assert_eq!(
+            db.lookup("lib", "1.5.0").len(),
+            0,
+            "in the gap between ranges"
+        );
         assert_eq!(db.lookup("lib", "3.0.0").len(), 0, "past all ranges");
     }
 }

@@ -15,6 +15,29 @@ pub struct RiggsConfig {
     pub detection: DetectionConfig,
     #[serde(default)]
     pub egress: EgressConfig,
+    #[serde(default)]
+    pub rules: RulesConfig,
+}
+
+/// Detection rule sources. YARA (`.yar`/`.yara`) and custom TOML rules are
+/// loaded recursively from `rules_dir` (e.g. `default/yara`, `custom/yara`)
+/// and hot-reloaded on change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesConfig {
+    #[serde(default = "default_rules_dir")]
+    pub rules_dir: String,
+}
+
+fn default_rules_dir() -> String {
+    "/etc/riggs/rules".into()
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self {
+        Self {
+            rules_dir: default_rules_dir(),
+        }
+    }
 }
 
 /// Default-deny egress allowlist: an endpoint may only reach the hosts an
@@ -385,6 +408,29 @@ pub struct ResponseConfig {
     /// Path the macOS network-containment pf ruleset is written to (off /tmp).
     #[serde(default = "default_pf_conf_path")]
     pub pf_conf_path: String,
+    /// Snapshot files a threat storyline opens so Rollback can restore them.
+    #[serde(default = "default_true")]
+    pub preemptive_snapshots: bool,
+    #[serde(default = "default_snapshot_path")]
+    pub snapshot_path: String,
+    /// Files larger than this are not snapshotted.
+    #[serde(default = "default_snapshot_max_file_mib")]
+    pub snapshot_max_file_mib: u64,
+    /// Snapshots older than this are discarded.
+    #[serde(default = "default_snapshot_retention_hours")]
+    pub snapshot_retention_hours: u64,
+}
+
+fn default_snapshot_path() -> String {
+    "/var/lib/riggs/snapshots".into()
+}
+
+fn default_snapshot_max_file_mib() -> u64 {
+    64
+}
+
+fn default_snapshot_retention_hours() -> u64 {
+    24
 }
 
 fn default_quarantine_path() -> String {
@@ -403,6 +449,10 @@ impl Default for ResponseConfig {
             quarantine_on_malicious: true,
             quarantine_path: default_quarantine_path(),
             pf_conf_path: default_pf_conf_path(),
+            preemptive_snapshots: true,
+            snapshot_path: default_snapshot_path(),
+            snapshot_max_file_mib: default_snapshot_max_file_mib(),
+            snapshot_retention_hours: default_snapshot_retention_hours(),
         }
     }
 }

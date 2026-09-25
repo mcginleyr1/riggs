@@ -93,8 +93,8 @@ defmodule MurtaughWeb.Presenters do
     cond do
       diff < 60 -> "#{diff}s ago"
       diff < 3600 -> "#{div(diff, 60)}m ago"
-      diff < 86400 -> "#{div(diff, 3600)}h ago"
-      true -> "#{div(diff, 86400)}d ago"
+      diff < 86_400 -> "#{div(diff, 3600)}h ago"
+      true -> "#{div(diff, 86_400)}d ago"
     end
   end
 
@@ -120,17 +120,25 @@ defmodule MurtaughWeb.Presenters do
 
   defp coerce_atom(_), do: :info
 
-  defp event_description(%{event_type: type, process_name: name, payload: payload}) do
-    case type do
-      "process_create" -> "#{name} spawned (PID #{payload["pid"] || "?"})"
-      "network_connect" -> "Connection to #{payload["dst_ip"] || "?"}:#{payload["dst_port"] || "?"}"
-      "file_create" -> "Created #{payload["path"] || "file"}"
-      "file_read" -> "Read #{payload["path"] || "file"}"
-      "dns_query" -> "DNS: #{payload["domain"] || "?"}"
-      "registry_set" -> "Registry: #{payload["key"] || "?"}"
-      _ -> "#{type}: #{name}"
-    end
-  end
+  defp event_description(%{event_type: "process_create", process_name: name, payload: p}),
+    do: "#{name} spawned (PID #{p["pid"] || "?"})"
+
+  defp event_description(%{event_type: "network_connect", payload: p}),
+    do: "Connection to #{p["dst_ip"] || "?"}:#{p["dst_port"] || "?"}"
+
+  defp event_description(%{event_type: "file_create", payload: p}),
+    do: "Created #{p["path"] || "file"}"
+
+  defp event_description(%{event_type: "file_read", payload: p}),
+    do: "Read #{p["path"] || "file"}"
+
+  defp event_description(%{event_type: "dns_query", payload: p}), do: "DNS: #{p["domain"] || "?"}"
+
+  defp event_description(%{event_type: "registry_set", payload: p}),
+    do: "Registry: #{p["key"] || "?"}"
+
+  defp event_description(%{event_type: type, process_name: name, payload: _}),
+    do: "#{type}: #{name}"
 
   defp event_description(_), do: ""
 end

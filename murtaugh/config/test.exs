@@ -8,7 +8,8 @@ import Config
 config :murtaugh, Murtaugh.Repo,
   username: "postgres",
   password: "postgres",
-  hostname: "localhost",
+  hostname: System.get_env("PGHOST", "localhost"),
+  port: String.to_integer(System.get_env("PGPORT", "5432")),
   database: "murtaugh_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
@@ -19,6 +20,9 @@ config :murtaugh, MurtaughWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "Tv3AiDmsZmdBEyyYtjD7sGtgYxjRdnxQO4YzQ3XNy2IUl57MDtx5x06z5UOBCsp2",
   server: false
+
+# The meta DB is sandboxed in tests; tests provision tenants explicitly.
+config :murtaugh, provision_tenants_on_boot: false
 
 # In test we don't send emails
 config :murtaugh, Murtaugh.Mailer, adapter: Swoosh.Adapters.Test

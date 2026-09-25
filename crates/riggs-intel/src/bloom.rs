@@ -112,7 +112,10 @@ mod tests {
                 false_positives += 1;
             }
         }
-        assert!(false_positives < 50, "too many false positives: {false_positives}");
+        assert!(
+            false_positives < 50,
+            "too many false positives: {false_positives}"
+        );
     }
 
     #[test]

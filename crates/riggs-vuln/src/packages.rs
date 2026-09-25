@@ -17,6 +17,35 @@ pub enum PackageSource {
     Binary,
 }
 
+impl PackageSource {
+    /// The OSV.dev ecosystem for this source, when OSV tracks it. dpkg packages
+    /// need the Debian release (`Debian:12`, see [`debian_ecosystem`]).
+    pub fn osv_ecosystem(&self, debian_ecosystem: Option<&str>) -> Option<String> {
+        match self {
+            Self::Npm => Some("npm".into()),
+            Self::Pip => Some("PyPI".into()),
+            Self::Gem => Some("RubyGems".into()),
+            Self::Dpkg => debian_ecosystem.map(String::from),
+            Self::Homebrew | Self::System | Self::Application | Self::Rpm | Self::Binary => None,
+        }
+    }
+}
+
+/// OSV's release-specific Debian ecosystem (`Debian:12`) from /etc/os-release
+/// text, or `None` on other distributions.
+pub fn debian_ecosystem(os_release: &str) -> Option<String> {
+    let field = |name: &str| {
+        os_release
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|v| v.trim().trim_matches('"'))
+    };
+    match (field("ID="), field("VERSION_ID=")) {
+        (Some("debian"), Some(version)) if !version.is_empty() => Some(format!("Debian:{version}")),
+        _ => None,
+    }
+}
+
 impl fmt::Display for PackageSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -71,6 +100,7 @@ pub fn enumerate_packages() -> Vec<InstalledPackage> {
 }
 
 /// Parse Homebrew Cellar directory to find installed packages.
+#[cfg(target_os = "macos")]
 fn enumerate_homebrew() -> Vec<InstalledPackage> {
     let mut packages = Vec::new();
 
@@ -114,6 +144,7 @@ fn enumerate_homebrew() -> Vec<InstalledPackage> {
 }
 
 /// Scan /Applications for macOS app bundles and extract versions from Info.plist.
+#[cfg(target_os = "macos")]
 fn enumerate_macos_apps() -> Vec<InstalledPackage> {
     let mut packages = Vec::new();
     let app_dirs = ["/Applications"];
@@ -164,6 +195,7 @@ fn enumerate_macos_apps() -> Vec<InstalledPackage> {
 }
 
 /// Read CFBundleShortVersionString from an XML plist file.
+#[cfg(target_os = "macos")]
 fn read_plist_version(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
 
@@ -189,61 +221,62 @@ fn enumerate_dpkg() -> Vec<InstalledPackage> {
         return packages;
     }
 
-    let content = match std::fs::read_to_string(status_path) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to read dpkg status: {e}");
-            return packages;
-        }
-    };
+    match std::fs::read_to_string(status_path) {
+        Ok(content) => packages = parse_dpkg_status(&content),
+        Err(e) => tracing::warn!("Failed to read dpkg status: {e}"),
+    }
 
-    let mut current_name = None;
-    let mut current_version = None;
-    let mut is_installed = false;
+    debug!("Found {} dpkg source packages", packages.len());
+    packages
+}
 
-    for line in content.lines() {
-        if line.is_empty() {
-            // End of package block
-            if is_installed {
-                if let (Some(name), Some(version)) = (current_name.take(), current_version.take())
-                {
-                    packages.push(InstalledPackage {
-                        name,
-                        version,
-                        source: PackageSource::Dpkg,
-                        install_path: None,
-                    });
-                }
-            }
-            current_name = None;
-            current_version = None;
-            is_installed = false;
+/// Installed Debian *source* packages from dpkg status text. Debian security
+/// advisories (and OSV's Debian ecosystem) are keyed by source package and
+/// source version, so binaries built from one source (libssl3, openssl) collapse
+/// into a single entry.
+#[cfg(any(target_os = "linux", test))]
+fn parse_dpkg_status(content: &str) -> Vec<InstalledPackage> {
+    let mut sources = std::collections::BTreeSet::new();
+
+    for block in content.split("\n\n") {
+        let field = |name: &str| {
+            block
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .map(str::trim)
+        };
+
+        // "Status: install ok installed" -- the last word is the state, so
+        // "not-installed" and "config-files" don't count.
+        let installed =
+            field("Status:").is_some_and(|s| s.split_whitespace().last() == Some("installed"));
+        let (Some(binary), Some(version)) = (field("Package:"), field("Version:")) else {
+            continue;
+        };
+        if !installed {
             continue;
         }
 
-        if let Some(rest) = line.strip_prefix("Package: ") {
-            current_name = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("Version: ") {
-            current_version = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("Status: ") {
-            is_installed = rest.contains("installed");
-        }
+        // "Source: openssl" or "Source: openssl (3.0.11-1)" when versions differ.
+        let (name, version) = match field("Source:") {
+            Some(source) => match source.split_once(' ') {
+                Some((name, v)) => (name, v.trim_matches(|c| c == '(' || c == ')')),
+                None => (source, version),
+            },
+            None => (binary, version),
+        };
+        sources.insert((name.to_string(), version.to_string()));
     }
 
-    // Handle last block
-    if is_installed {
-        if let (Some(name), Some(version)) = (current_name, current_version) {
-            packages.push(InstalledPackage {
-                name,
-                version,
-                source: PackageSource::Dpkg,
-                install_path: None,
-            });
-        }
-    }
-
-    debug!("Found {} dpkg packages", packages.len());
-    packages
+    sources
+        .into_iter()
+        .map(|(name, version)| InstalledPackage {
+            name,
+            version,
+            source: PackageSource::Dpkg,
+            install_path: None,
+        })
+        .collect()
 }
 
 /// Parse pip packages from pip's metadata directories.
@@ -338,4 +371,37 @@ fn enumerate_npm_global() -> Vec<InstalledPackage> {
 
     debug!("Found {} npm packages", packages.len());
     packages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STATUS: &str = "Package: libssl3\nStatus: install ok installed\nSource: openssl\nVersion: 3.0.15-1~deb12u1\n\nPackage: openssl\nStatus: install ok installed\nVersion: 3.0.15-1~deb12u1\n\nPackage: bash\nStatus: install ok installed\nVersion: 5.2.15-2+b7\nSource: bash (5.2.15-2)\n\nPackage: telnet\nStatus: deinstall ok config-files\nVersion: 0.17-44\n\nPackage: old\nStatus: unknown ok not-installed\nVersion: 1.0\n";
+
+    #[test]
+    fn dpkg_status_reports_installed_source_packages() {
+        let found: Vec<(String, String)> = parse_dpkg_status(STATUS)
+            .into_iter()
+            .map(|p| (p.name, p.version))
+            .collect();
+
+        assert_eq!(
+            found,
+            vec![
+                ("bash".to_string(), "5.2.15-2".to_string()),
+                ("openssl".to_string(), "3.0.15-1~deb12u1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn debian_ecosystem_is_release_specific() {
+        let debian =
+            "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_ID=\"12\"\n";
+        let ubuntu = "ID=ubuntu\nVERSION_ID=\"22.04\"\n";
+        assert_eq!(debian_ecosystem(debian).as_deref(), Some("Debian:12"));
+        assert_eq!(debian_ecosystem(ubuntu), None);
+        assert_eq!(PackageSource::Dpkg.osv_ecosystem(None), None);
+    }
 }

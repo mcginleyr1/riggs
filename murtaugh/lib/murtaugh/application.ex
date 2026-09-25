@@ -9,17 +9,21 @@ defmodule Murtaugh.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      MurtaughWeb.Telemetry,
-      Murtaugh.Repo,
-      {DNSCluster, query: Application.get_env(:murtaugh, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: Murtaugh.PubSub},
-      Murtaugh.ShardManager,
-      Murtaugh.Ingest.AgentRegistry,
-      grpc_child_spec(),
-      # Start to serve requests, typically the last entry
-      MurtaughWeb.Endpoint
-    ]
+    children =
+      [
+        MurtaughWeb.Telemetry,
+        Murtaugh.Repo,
+        {DNSCluster, query: Application.get_env(:murtaugh, :dns_cluster_query) || :ignore},
+        {Phoenix.PubSub, name: Murtaugh.PubSub},
+        Murtaugh.ShardManager.supervisor_child_spec()
+      ] ++
+        tenant_provisioning() ++
+        [
+          Murtaugh.Ingest.AgentRegistry,
+          grpc_child_spec(),
+          # Start to serve requests, typically the last entry
+          MurtaughWeb.Endpoint
+        ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
@@ -33,6 +37,20 @@ defmodule Murtaugh.Application do
   def config_change(changed, _new, removed) do
     MurtaughWeb.Endpoint.config_change(changed, removed)
     :ok
+  end
+
+  # Provision/migrate tenant DBs synchronously before the AgentRegistry reads
+  # them and agents connect; the start function returns :ignore when done.
+  defp tenant_provisioning do
+    if Application.get_env(:murtaugh, :provision_tenants_on_boot, true),
+      do: [
+        %{
+          id: :tenant_provisioning,
+          start: {Murtaugh.Tenancy, :provision_all_on_boot, []},
+          restart: :temporary
+        }
+      ],
+      else: []
   end
 
   # Build the gRPC ingest server child spec. start_server: true is required for

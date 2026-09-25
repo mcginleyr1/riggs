@@ -197,9 +197,7 @@ impl FileFeatures {
 
         match object {
             Object::PE(pe) => Self::from_pe(&pe, bytes, file_size, entropy, suspicious_strings),
-            Object::Elf(elf) => {
-                Self::from_elf(&elf, bytes, file_size, entropy, suspicious_strings)
-            }
+            Object::Elf(elf) => Self::from_elf(&elf, bytes, file_size, entropy, suspicious_strings),
             Object::Mach(mach) => {
                 Self::from_mach(&mach, bytes, file_size, entropy, suspicious_strings)
             }
@@ -384,18 +382,14 @@ impl FileFeatures {
 
         let suspicious_imports: Vec<String> = import_names
             .iter()
-            .filter(|name| {
-                SUSPICIOUS_IMPORT_NAMES
-                    .iter()
-                    .any(|s| name.contains(s))
-            })
+            .filter(|name| SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)))
             .cloned()
             .collect();
 
         let has_debug_info = pe.debug_data.is_some();
 
-        let is_packed = section_entropies.iter().any(|&e| e > 7.0)
-            || (section_count <= 2 && entropy > 6.8);
+        let is_packed =
+            section_entropies.iter().any(|&e| e > 7.0) || (section_count <= 2 && entropy > 6.8);
 
         Ok(Self {
             file_size,
@@ -457,26 +451,19 @@ impl FileFeatures {
 
         let suspicious_imports: Vec<String> = import_names
             .iter()
-            .filter(|name| {
-                SUSPICIOUS_IMPORT_NAMES
-                    .iter()
-                    .any(|s| name.contains(s))
-            })
+            .filter(|name| SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)))
             .cloned()
             .collect();
 
-        let has_debug_info = elf
-            .section_headers
-            .iter()
-            .any(|sh| {
-                elf.shdr_strtab
-                    .get_at(sh.sh_name)
-                    .map(|n| n.starts_with(".debug"))
-                    .unwrap_or(false)
-            });
+        let has_debug_info = elf.section_headers.iter().any(|sh| {
+            elf.shdr_strtab
+                .get_at(sh.sh_name)
+                .map(|n| n.starts_with(".debug"))
+                .unwrap_or(false)
+        });
 
-        let is_packed = section_entropies.iter().any(|&e| e > 7.0)
-            || (section_count <= 3 && entropy > 6.8);
+        let is_packed =
+            section_entropies.iter().any(|&e| e > 7.0) || (section_count <= 3 && entropy > 6.8);
 
         Ok(Self {
             file_size,
@@ -501,33 +488,31 @@ impl FileFeatures {
     ) -> Result<Self, FeatureError> {
         let macho = match mach {
             goblin::mach::Mach::Binary(m) => m,
-            goblin::mach::Mach::Fat(fat) => {
-                match fat.get(0) {
-                    Ok(goblin::mach::SingleArch::MachO(m)) => {
-                        return Self::from_single_macho(
-                            &m,
-                            bytes,
-                            file_size,
-                            entropy,
-                            suspicious_strings,
-                        );
-                    }
-                    _ => {
-                        return Ok(Self {
-                            file_size,
-                            entropy,
-                            section_count: 0,
-                            import_count: 0,
-                            export_count: 0,
-                            has_debug_info: false,
-                            is_packed: entropy > 7.0,
-                            section_entropies: Vec::new(),
-                            suspicious_imports: Vec::new(),
-                            suspicious_strings,
-                        });
-                    }
+            goblin::mach::Mach::Fat(fat) => match fat.get(0) {
+                Ok(goblin::mach::SingleArch::MachO(m)) => {
+                    return Self::from_single_macho(
+                        &m,
+                        bytes,
+                        file_size,
+                        entropy,
+                        suspicious_strings,
+                    );
                 }
-            }
+                _ => {
+                    return Ok(Self {
+                        file_size,
+                        entropy,
+                        section_count: 0,
+                        import_count: 0,
+                        export_count: 0,
+                        has_debug_info: false,
+                        is_packed: entropy > 7.0,
+                        section_entropies: Vec::new(),
+                        suspicious_imports: Vec::new(),
+                        suspicious_strings,
+                    });
+                }
+            },
         };
 
         Self::from_single_macho(macho, bytes, file_size, entropy, suspicious_strings)
@@ -571,11 +556,7 @@ impl FileFeatures {
 
         let suspicious_imports: Vec<String> = import_names
             .iter()
-            .filter(|name| {
-                SUSPICIOUS_IMPORT_NAMES
-                    .iter()
-                    .any(|s| name.contains(s))
-            })
+            .filter(|name| SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)))
             .cloned()
             .collect();
 
@@ -584,8 +565,7 @@ impl FileFeatures {
             .iter()
             .any(|seg| seg.name().map(|n| n == "__DWARF").unwrap_or(false));
 
-        let is_packed =
-            section_entropies.iter().any(|&e| e > 7.0) || entropy > 7.0;
+        let is_packed = section_entropies.iter().any(|&e| e > 7.0) || entropy > 7.0;
 
         Ok(Self {
             file_size,

@@ -74,7 +74,10 @@ impl Supervisor {
     }
 
     pub fn shutdown_all(&mut self) {
-        info!(count = self.tasks.len(), "supervisor: shutting down all tasks");
+        info!(
+            count = self.tasks.len(),
+            "supervisor: shutting down all tasks"
+        );
         for (name, entry) in self.tasks.drain() {
             info!(task = %name, "aborting task");
             entry.handle.abort();

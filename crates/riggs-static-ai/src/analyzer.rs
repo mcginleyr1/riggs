@@ -14,6 +14,7 @@ pub enum AnalyzerError {
     Inference(String),
 }
 
+#[derive(Clone)]
 pub struct StaticAnalyzer {
     model_path: Option<PathBuf>,
     max_scan_bytes: u64,

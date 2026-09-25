@@ -1,10 +1,15 @@
 use std::collections::HashSet;
 
+#[cfg(target_os = "macos")]
 use serde_json::Value;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::info;
+#[cfg(target_os = "macos")]
+use tracing::{error, warn};
 
-use crate::policy::{DeviceAction, DeviceClass, DevicePolicy};
+use crate::policy::DevicePolicy;
+#[cfg(target_os = "macos")]
+use crate::policy::{DeviceAction, DeviceClass};
 
 #[derive(Debug, Error)]
 pub enum MonitorError {
@@ -20,6 +25,7 @@ type Result<T> = std::result::Result<T, MonitorError>;
 pub struct DeviceMonitor {
     policies: Vec<DevicePolicy>,
     running: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     known_devices: HashSet<String>,
 }
 

@@ -5,7 +5,7 @@ defmodule Murtaugh.MixProject do
     [
       app: :murtaugh,
       version: "0.1.0",
-      elixir: "~> 1.15",
+      elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
@@ -72,8 +72,10 @@ defmodule Murtaugh.MixProject do
       {:sweet_xml, "~> 0.7"},
       {:csv, "~> 3.2"},
       # gRPC server for agent communication
-      {:grpc, "~> 0.9"},
-      {:protobuf, "~> 0.14"}
+      {:grpc, "~> 1.0"},
+      {:grpc_server, "~> 1.0"},
+      {:protobuf, "~> 0.17"},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 

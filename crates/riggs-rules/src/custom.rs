@@ -55,6 +55,21 @@ impl CustomRuleEngine {
         self.rules.push(rule);
     }
 
+    /// Build an engine from every custom-rule TOML file under `dir` (recursive).
+    /// Unparseable files are logged and skipped so one bad file can't drop the rest.
+    pub fn load_dir(dir: &Path) -> Self {
+        let mut engine = Self::new();
+        for path in crate::rule_files(dir, crate::CUSTOM_RULE_EXTENSIONS) {
+            match Self::load_from_file(&path) {
+                Ok(rules) => rules.into_iter().for_each(|r| engine.add_rule(r)),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to load custom rules")
+                }
+            }
+        }
+        engine
+    }
+
     pub fn load_from_file(path: &Path) -> Result<Vec<CustomRule>, RiggsError> {
         let contents = std::fs::read_to_string(path).map_err(|e| {
             RiggsError::Io(format!(
@@ -292,8 +307,11 @@ mod tests {
         // Step 1 in one process tree, step 2 in an unrelated one: must NOT match.
         let matched = engine.evaluate(&file_event("cat", "/etc/passwd", &StorylineId::new()));
         assert!(matched.is_empty());
-        let matched =
-            engine.evaluate(&network_event("curl", "evil.example.com", &StorylineId::new()));
+        let matched = engine.evaluate(&network_event(
+            "curl",
+            "evil.example.com",
+            &StorylineId::new(),
+        ));
         assert!(matched.is_empty());
     }
 

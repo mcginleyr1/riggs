@@ -8,7 +8,7 @@ use tracing::debug;
 
 use riggs_engine::{DetectionStage, StageVerdict};
 use riggs_types::errors::RiggsError;
-use riggs_types::events::{FileAction, NetworkDirection, RiggsEvent};
+use riggs_types::events::{FileAction, NetworkDirection, ProcessAction, RiggsEvent};
 use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
 
 use crate::correlator::{DlpCorrelator, FlowAction};
@@ -36,7 +36,10 @@ pub struct DlpStage {
 
 impl DlpStage {
     pub fn new(correlator: Arc<DlpCorrelator>) -> Self {
-        Self { correlator, detection_tx: None }
+        Self {
+            correlator,
+            detection_tx: None,
+        }
     }
 
     /// Attach a channel to receive structured DLP detection events.
@@ -72,13 +75,21 @@ impl DetectionStage for DlpStage {
 
             RiggsEvent::File(fe) if fe.action == FileAction::Close => {
                 if let Some(fd) = fe.fd {
-                    self.correlator.record_file_close(fe.process_context.pid, fd);
+                    self.correlator
+                        .record_file_close(fe.process_context.pid, fd);
                 }
                 Ok(StageVerdict::Clean)
             }
 
+            RiggsEvent::Process(pe) if pe.action == ProcessAction::Exit => {
+                self.correlator.record_process_exit(pe.process_context.pid);
+                Ok(StageVerdict::Clean)
+            }
+
             RiggsEvent::Network(ne) if ne.direction == NetworkDirection::Outbound => {
-                let verdict = self.correlator.check_flow(ne.process_context.pid, &ne.dst_addr);
+                let verdict = self
+                    .correlator
+                    .check_flow(ne.process_context.pid, &ne.dst_addr);
 
                 match verdict.action {
                     FlowAction::Block => {
@@ -230,7 +241,9 @@ mod tests {
     #[tokio::test]
     async fn open_with_fd_blocks() {
         let s = DlpStage::new(test_correlator());
-        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5)))
+            .await
+            .unwrap();
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Malicious(_)));
     }
@@ -238,7 +251,9 @@ mod tests {
     #[tokio::test]
     async fn close_removes_fd_but_fallback_catches() {
         let s = DlpStage::new(test_correlator());
-        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5)))
+            .await
+            .unwrap();
         s.analyze(&file_close(1234, 5)).await.unwrap();
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Malicious(_)));
@@ -247,7 +262,9 @@ mod tests {
     #[tokio::test]
     async fn no_fd_sensor_still_blocks() {
         let s = DlpStage::new(test_correlator());
-        s.analyze(&file_open(1234, "/docs/earnings.pptx", None)).await.unwrap();
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", None))
+            .await
+            .unwrap();
         let r = s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
         assert!(matches!(r, StageVerdict::Malicious(_)));
     }
@@ -257,7 +274,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let s = DlpStage::new(test_correlator()).with_detection_channel(tx);
 
-        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5))).await.unwrap();
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(5)))
+            .await
+            .unwrap();
         s.analyze(&net_out(1234, "claude.ai")).await.unwrap();
 
         let det = rx.try_recv().expect("detection should have been emitted");
@@ -284,19 +303,24 @@ mod tests {
     #[tokio::test]
     async fn inbound_traffic_ignored() {
         let s = DlpStage::new(test_correlator());
-        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(3))).await.unwrap();
+        s.analyze(&file_open(1234, "/docs/earnings.pptx", Some(3)))
+            .await
+            .unwrap();
 
-        let r = s.analyze(&RiggsEvent::Network(NetworkEvent {
-            event_id: EventId::new(),
-            timestamp: Utc::now(),
-            process_context: process(1234),
-            direction: NetworkDirection::Inbound,
-            src_addr: "claude.ai".into(),
-            dst_addr: "192.168.1.100".into(),
-            src_port: 443,
-            dst_port: 54321,
-            protocol: "tcp".into(),
-        })).await.unwrap();
+        let r = s
+            .analyze(&RiggsEvent::Network(NetworkEvent {
+                event_id: EventId::new(),
+                timestamp: Utc::now(),
+                process_context: process(1234),
+                direction: NetworkDirection::Inbound,
+                src_addr: "claude.ai".into(),
+                dst_addr: "192.168.1.100".into(),
+                src_port: 443,
+                dst_port: 54321,
+                protocol: "tcp".into(),
+            }))
+            .await
+            .unwrap();
 
         assert!(matches!(r, StageVerdict::Clean));
     }

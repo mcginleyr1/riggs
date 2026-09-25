@@ -29,25 +29,37 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # NOTE: `cargo fmt --all --check` is not gated yet — the tree has never
-      # been run through rustfmt (~all files differ). Do a one-shot
-      # `cargo fmt --all` in its own commit, then add the check step here.
+      - name: Format
+        run: cargo fmt --all --check
 
-      # Matches `make clippy`. Hard errors (non-exhaustive matches, missing
-      # fields) still fail the build; pre-existing style warnings do not block
-      # yet. Tighten to `-- -D warnings` once the warning backlog is cleared.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
 
   elixir:
-    name: Murtaugh (compile)
+    name: Murtaugh (compile, format, credo, test)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: murtaugh
+    env:
+      MIX_ENV: test
+      PGHOST: localhost
+      PGPORT: "5432"
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -56,8 +68,8 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "27"
-          elixir-version: "1.17"
+          otp-version: "29"
+          elixir-version: "1.20"
 
       - name: Cache deps and build
         uses: actions/cache@v4
@@ -74,13 +86,11 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
-      # NOTE: `mix format --check-formatted` is not run yet. The formatter's
-      # `lib/**` glob pulls in generated `*.pb.ex` protobuf files, which are not
-      # hand-formatted; scope the formatter inputs to hand-written code first.
+      - name: Format
+        run: mix format --check-formatted
 
-      # NOTE: `mix test` is intentionally not run yet. The tenant DB migrations
-      # currently fail at create_hypertable (the events primary key omits the
-      # `timestamp` partition column). Once that Phase 1 fix lands, add a
-      # TimescaleDB service container and enable:
-      #   - name: Test
-      #     run: mix test
+      - name: Credo
+        run: mix credo
+
+      - name: Test
+        run: mix test

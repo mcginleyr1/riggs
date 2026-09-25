@@ -3103,6 +3103,7 @@ dependencies = [
 name = "riggs-daemon"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "riggs-behavioral-ai",
  "riggs-cloud",
  "riggs-comms",
@@ -3123,11 +3124,14 @@ dependencies = [
  "riggs-vuln",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -3297,6 +3301,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

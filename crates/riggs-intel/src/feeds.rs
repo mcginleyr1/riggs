@@ -45,9 +45,20 @@ pub struct FeedManager {
     known_hashes: Mutex<HashSet<String>>,
     bloom_min_capacity: usize,
     bloom_false_positive_rate: f64,
+    refresh_requested: tokio::sync::Notify,
 }
 
 impl FeedManager {
+    /// Ask the running manager to refresh every enabled feed now. Returns
+    /// false when no feed is enabled.
+    pub fn request_refresh(&self) -> bool {
+        let any_enabled = self.config.malwarebazaar_enabled || self.config.urlhaus_enabled;
+        if any_enabled {
+            self.refresh_requested.notify_one();
+        }
+        any_enabled
+    }
+
     pub fn new(
         config: FeedsConfig,
         tx: mpsc::Sender<FeedUpdate>,
@@ -62,6 +73,7 @@ impl FeedManager {
             known_hashes: Mutex::new(HashSet::new()),
             bloom_min_capacity: bloom_min_capacity.max(1),
             bloom_false_positive_rate,
+            refresh_requested: tokio::sync::Notify::new(),
         }
     }
 
@@ -69,9 +81,8 @@ impl FeedManager {
         let mb_interval = tokio::time::Duration::from_secs(
             self.config.malwarebazaar_interval_hours as u64 * 3600,
         );
-        let uh_interval = tokio::time::Duration::from_secs(
-            self.config.urlhaus_interval_hours as u64 * 3600,
-        );
+        let uh_interval =
+            tokio::time::Duration::from_secs(self.config.urlhaus_interval_hours as u64 * 3600);
 
         let mut mb_ticker = tokio::time::interval(mb_interval);
         let mut uh_ticker = tokio::time::interval(uh_interval);
@@ -84,6 +95,15 @@ impl FeedManager {
                 }
                 _ = uh_ticker.tick(), if self.config.urlhaus_enabled => {
                     self.refresh_urlhaus().await;
+                }
+                _ = self.refresh_requested.notified() => {
+                    tracing::info!("feed refresh requested");
+                    if self.config.malwarebazaar_enabled {
+                        self.refresh_malwarebazaar().await;
+                    }
+                    if self.config.urlhaus_enabled {
+                        self.refresh_urlhaus().await;
+                    }
                 }
             }
         }
@@ -111,7 +131,12 @@ impl FeedManager {
                     bloom
                 };
                 tracing::info!("bloom filter now holds {} cumulative hashes", bloom.len());
-                if self.tx.send(FeedUpdate::BloomFilterReady(bloom)).await.is_err() {
+                if self
+                    .tx
+                    .send(FeedUpdate::BloomFilterReady(bloom))
+                    .await
+                    .is_err()
+                {
                     tracing::warn!("feed update receiver dropped");
                 }
             }

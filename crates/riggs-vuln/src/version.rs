@@ -19,7 +19,9 @@ impl Version {
 
         // Strip a Debian/dpkg epoch prefix ("2:1.2.3-1" -> "1.2.3-1").
         let s = match s.split_once(':') {
-            Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) => {
+            Some((epoch, rest))
+                if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) =>
+            {
                 rest
             }
             _ => s,
@@ -38,8 +40,14 @@ impl Version {
 
         let parts: Vec<&str> = version_part.split('.').collect();
         let major = parts.first().and_then(|p| parse_leading_digits(p))?;
-        let minor = parts.get(1).and_then(|p| parse_leading_digits(p)).unwrap_or(0);
-        let patch = parts.get(2).and_then(|p| parse_leading_digits(p)).unwrap_or(0);
+        let minor = parts
+            .get(1)
+            .and_then(|p| parse_leading_digits(p))
+            .unwrap_or(0);
+        let patch = parts
+            .get(2)
+            .and_then(|p| parse_leading_digits(p))
+            .unwrap_or(0);
 
         Some(Self {
             major,
@@ -165,7 +173,11 @@ impl fmt::Display for Version {
         if self.pre.is_empty() {
             write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
         } else {
-            write!(f, "{}.{}.{}-{}", self.major, self.minor, self.patch, self.pre)
+            write!(
+                f,
+                "{}.{}.{}-{}",
+                self.major, self.minor, self.patch, self.pre
+            )
         }
     }
 }

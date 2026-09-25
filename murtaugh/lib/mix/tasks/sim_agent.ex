@@ -38,7 +38,7 @@ defmodule Mix.Tasks.Sim.Agent do
 
     Logger.info("Sim agent connecting to #{host}:#{port}")
 
-    {:ok, channel} = GRPC.Stub.connect("#{host}:#{port}")
+    {:ok, channel} = GRPC.Stub.connect("#{host}:#{port}", adapter: GRPC.Client.Adapters.Mint)
 
     agent_id = enroll(channel, token)
     Logger.info("Enrolled as agent #{agent_id}")
@@ -139,7 +139,7 @@ defmodule Mix.Tasks.Sim.Agent do
         event_type: Enum.random(~w(process_create network_connect file_read dns_query)),
         severity: Enum.random(~w(info low medium)),
         process_context: %Riggs.V1.ProcessContext{
-          pid: :rand.uniform(65535),
+          pid: :rand.uniform(65_535),
           name: Enum.random(~w(chrome firefox curl wget python3 bash)),
           username: "ubuntu"
         },
@@ -164,7 +164,11 @@ defmodule Mix.Tasks.Sim.Agent do
   defp send_threat(channel, agent_id) do
     process = Enum.random(["powershell.exe", "cmd.exe", "python3", "bash", "curl"])
     level = Enum.random(["suspicious", "malicious"])
-    score = if level == "malicious", do: 0.85 + :rand.uniform() * 0.15, else: 0.4 + :rand.uniform() * 0.45
+
+    score =
+      if level == "malicious",
+        do: 0.85 + :rand.uniform() * 0.15,
+        else: 0.4 + :rand.uniform() * 0.45
 
     report = %Riggs.V1.ThreatReport{
       agent_id: agent_id,
@@ -193,12 +197,13 @@ defmodule Mix.Tasks.Sim.Agent do
 
   defp send_dlp(channel, agent_id) do
     domains = ["paste.ee", "dropbox.com", "mega.nz", "drive.google.com", "anonfiles.com"]
-    actions = ["block", "block", "block", "alert"]  # 3:1 ratio
+    # 3:1 ratio
+    actions = ["block", "block", "block", "alert"]
 
     report = %Riggs.V1.DlpEventReport{
       agent_id: agent_id,
       action: Enum.random(actions),
-      pid: :rand.uniform(65535),
+      pid: :rand.uniform(65_535),
       process_name: Enum.random(["chrome", "firefox", "curl", "python3"]),
       file_path: "/home/ubuntu/document.pdf",
       file_type: Enum.random(["application/pdf", "text/plain", "application/zip"]),

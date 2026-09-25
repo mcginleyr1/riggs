@@ -1,4 +1,6 @@
 defmodule Murtaugh.Accounts do
+  @moduledoc "Users, authentication, and org-node access grants."
+
   import Ecto.Query
   alias Murtaugh.Repo
   alias Murtaugh.Accounts.{User, Grant}
@@ -47,6 +49,44 @@ defmodule Murtaugh.Accounts do
     %Grant{}
     |> Grant.changeset(%{user_id: user_id, org_node_id: org_node_id, role: role})
     |> Repo.insert()
+  end
+
+  @doc "Users granted directly on `node`, with their role, ordered by email."
+  def list_node_users(%Node{id: node_id}) do
+    from(g in Grant,
+      join: u in assoc(g, :user),
+      where: g.org_node_id == ^node_id,
+      order_by: u.email,
+      select: {u, g.role}
+    )
+    |> Repo.all()
+  end
+
+  @doc "True for superadmins and users granted `admin` on `node` or an ancestor."
+  def admin?(%User{is_superadmin: true}, _node), do: true
+
+  def admin?(%User{id: user_id}, %Node{lft: lft, rgt: rgt}) do
+    from(g in Grant,
+      join: n in Node,
+      on: n.id == g.org_node_id,
+      where: g.user_id == ^user_id and g.role == "admin",
+      where: n.lft <= ^lft and n.rgt >= ^rgt
+    )
+    |> Repo.exists?()
+  end
+
+  def admin?(_user, _node), do: false
+
+  @doc "Registers a user and grants them `role` on `node` in one transaction."
+  def add_user_to_node(attrs, %Node{id: node_id}, role) do
+    Repo.transaction(fn ->
+      with {:ok, user} <- register_user(attrs),
+           {:ok, _grant} <- grant_access(user.id, node_id, role) do
+        user
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
   end
 
   def revoke_access(user_id, org_node_id) do

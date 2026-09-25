@@ -29,7 +29,9 @@ defmodule Murtaugh.Grpc.AgentServiceImpl do
         raise GRPC.RPCError, status: :unauthenticated, message: "invalid enrollment token"
 
       {:error, :no_shard} ->
-        raise GRPC.RPCError, status: :failed_precondition, message: "no tenant shard configured for org"
+        raise GRPC.RPCError,
+          status: :failed_precondition,
+          message: "no tenant shard configured for org"
 
       {:error, reason} ->
         Logger.error("Enrollment failed: #{inspect(reason)}")
@@ -37,25 +39,25 @@ defmodule Murtaugh.Grpc.AgentServiceImpl do
     end
   end
 
+  # Streaming-response RPCs must consume the request stream and send each reply;
+  # the server discards the handler's return value.
   def heartbeat(request_enum, stream) do
-    Stream.map(request_enum, fn req ->
+    Enum.each(request_enum, fn req ->
       AgentAuth.verify!(stream, req.agent_id)
       Ingest.record_heartbeat(req.agent_id, req.health)
-      %Riggs.V1.HeartbeatResponse{accepted: true}
+      GRPC.Server.send_reply(stream, %Riggs.V1.HeartbeatResponse{accepted: true})
     end)
   end
 
   def stream_events(request_enum, stream) do
-    Stream.map(request_enum, fn batch ->
+    Enum.each(request_enum, fn batch ->
       AgentAuth.verify!(stream, batch.agent_id)
+      accepted = match?({:ok, _count}, Ingest.ingest_events(batch.agent_id, batch.events))
 
-      case Ingest.ingest_events(batch.agent_id, batch.events) do
-        {:ok, _count} ->
-          %Riggs.V1.EventAck{batch_seq: batch.batch_seq, accepted: true}
-
-        {:error, _reason} ->
-          %Riggs.V1.EventAck{batch_seq: batch.batch_seq, accepted: false}
-      end
+      GRPC.Server.send_reply(stream, %Riggs.V1.EventAck{
+        batch_seq: batch.batch_seq,
+        accepted: accepted
+      })
     end)
   end
 

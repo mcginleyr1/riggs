@@ -12,12 +12,17 @@ defmodule Murtaugh.Ingest.EventIngester do
           rows = Enum.map(events, &to_row(&1, agent_id, org_node_id, now))
 
           {count, _} =
-            TenantRepo.insert_all("events", rows,
+            TenantRepo.insert_all(Murtaugh.Telemetry.Event, rows,
               on_conflict: :nothing,
-              conflict_target: [:id]
+              conflict_target: [:id, :timestamp]
             )
 
-          Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.throughput(org_node_id), {:events_ingested, count})
+          Phoenix.PubSub.broadcast(
+            Murtaugh.PubSub,
+            Murtaugh.Topics.throughput(org_node_id),
+            {:events_ingested, count}
+          )
+
           {:ok, count}
         end)
 
@@ -28,18 +33,6 @@ defmodule Murtaugh.Ingest.EventIngester do
 
   defp to_row(event, agent_id, org_node_id, now) do
     ctx = event[:process_context] || %{}
-
-    payload =
-      case event[:payload_json] do
-        nil -> %{}
-        "" -> %{}
-        bin when is_binary(bin) ->
-          case Jason.decode(bin) do
-            {:ok, map} -> map
-            _ -> %{}
-          end
-        map when is_map(map) -> map
-      end
 
     %{
       id: coerce_uuid(event[:event_id]),
@@ -56,9 +49,20 @@ defmodule Murtaugh.Ingest.EventIngester do
       process_path: ctx[:path],
       cmdline: ctx[:cmd_line],
       username: ctx[:username],
-      payload: payload
+      payload: decode_payload(event[:payload_json])
     }
   end
+
+  defp decode_payload(map) when is_map(map), do: map
+
+  defp decode_payload(bin) when is_binary(bin) and bin != "" do
+    case Jason.decode(bin) do
+      {:ok, map} -> map
+      _ -> %{}
+    end
+  end
+
+  defp decode_payload(_), do: %{}
 
   defp coerce_uuid(nil), do: Ecto.UUID.generate()
   defp coerce_uuid(""), do: Ecto.UUID.generate()
