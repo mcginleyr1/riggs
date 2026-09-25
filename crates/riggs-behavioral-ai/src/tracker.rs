@@ -393,8 +393,7 @@ impl BehaviorTracker {
         // Uses multi-signal scoring to reduce false positives.
         // No single signal is definitive — we look for combinations.
 
-        let mut score = 0;
-        let mut signals = Vec::new();
+        let mut score: u8 = 0;
 
         // === Signal 1: High volume outbound connections ===
         // Large number of EXTERNAL outbound connections in the storyline. Internal
@@ -411,7 +410,6 @@ impl BehaviorTracker {
 
         if outbound_count >= self.exfil_threshold {
             score += 1;
-            signals.push("high_outbound_volume".to_string());
         }
 
         // === Signal 2: External destination concentration ===
@@ -428,7 +426,6 @@ impl BehaviorTracker {
         const EXTERNAL_THRESHOLD: usize = 20;
         if external_outbound_count >= EXTERNAL_THRESHOLD {
             score += 1;
-            signals.push("external_destination_concentration".to_string());
         }
 
         // === Signal 3: Connection to unusual/suspicious ports ===
@@ -450,7 +447,6 @@ impl BehaviorTracker {
 
         if unusual_port_connections.len() >= 5 {
             score += 1;
-            signals.push("unusual_port_connections".to_string());
         }
 
         // === Signal 4: Data staging + exfiltration pattern ===
@@ -492,7 +488,6 @@ impl BehaviorTracker {
 
         if file_ops_count >= 3 && has_outbound_after_staging {
             score += 1;
-            signals.push("staging_then_exfiltration".to_string());
         }
 
         // === Decision: multi-signal scoring ===
@@ -500,7 +495,7 @@ impl BehaviorTracker {
         // 2+ signals: Malicious (strong indicator of exfiltration)
         match score {
             0 => None,
-            _ => Some(BehaviorPattern::DataExfiltration),
+            signals => Some(BehaviorPattern::DataExfiltration { signals }),
         }
     }
 
@@ -589,8 +584,7 @@ impl BehaviorTracker {
         // Uses multi-signal scoring to reduce false positives.
         // No single signal is definitive — we look for combinations.
 
-        let mut score = 0;
-        let mut signals = Vec::new();
+        let mut score: u8 = 0;
 
         // === Signal 1: Outbound connections to mining pool ports ===
         // Ports used by Stratum protocol and mining pool proxies
@@ -615,7 +609,6 @@ impl BehaviorTracker {
 
         if !mining_port_connections.is_empty() {
             score += 1;
-            signals.push("mining_port".to_string());
         }
 
         // === Signal 2: DNS queries to mining pool domains ===
@@ -666,7 +659,6 @@ impl BehaviorTracker {
 
         if !mining_domain_queries.is_empty() {
             score += 1;
-            signals.push("mining_domain".to_string());
         }
 
         // === Signal 3: Known miner binary/process name ===
@@ -705,7 +697,6 @@ impl BehaviorTracker {
 
         if miner_process_detected {
             score += 1;
-            signals.push("miner_binary".to_string());
         }
 
         // === Signal 4: High CPU heuristic (fork/exec storm) ===
@@ -742,7 +733,6 @@ impl BehaviorTracker {
 
         if fork_exec_storm {
             score += 1;
-            signals.push("fork_exec_storm".to_string());
         }
 
         // === Decision: multi-signal scoring ===
@@ -754,7 +744,7 @@ impl BehaviorTracker {
         // 443 was already excluded from the port list above.
         match score {
             0 => None,
-            _ => Some(BehaviorPattern::CryptoMining),
+            signals => Some(BehaviorPattern::CryptoMining { signals }),
         }
     }
 }
@@ -1438,7 +1428,7 @@ mod tests {
         // Mining port alone is suspicious but not conclusive (443 is noisy)
         // Port 3333 should trigger detection
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1453,7 +1443,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1468,7 +1458,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1483,7 +1473,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1561,7 +1551,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1576,7 +1566,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1592,7 +1582,7 @@ mod tests {
 
         // Domain in response also triggers detection
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1622,7 +1612,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1642,7 +1632,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1658,7 +1648,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1675,7 +1665,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1706,7 +1696,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1723,7 +1713,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1740,7 +1730,7 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining));
+        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1813,7 +1803,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -1889,7 +1882,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -1965,7 +1961,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -2054,7 +2053,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[events.len() - 1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -2191,7 +2193,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -2229,7 +2234,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -2341,7 +2349,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
     }
 
     #[test]
@@ -2380,10 +2391,15 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::DataExfiltration));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::DataExfiltration { .. }
+        ));
 
         // Verify it's ONLY DataExfiltration, not crypto mining or anything else
-        assert!(!patterns.contains(&BehaviorPattern::CryptoMining));
+        assert!(!patterns
+            .iter()
+            .any(|p| matches!(p, BehaviorPattern::CryptoMining { .. })));
     }
 
     // --- Resource-cap tests (hardening) ---
