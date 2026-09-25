@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use riggs_platform::{NetworkContainment, ProcessControl};
@@ -10,6 +11,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::actions::{ResponseAction, ResponseRecord};
+use crate::snapshots::SnapshotStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineEntry {
@@ -160,6 +162,7 @@ pub struct ResponseExecutor {
     process_ctl: Box<dyn ProcessControl>,
     network_ctl: Box<dyn NetworkContainment>,
     quarantine_vault: QuarantineVault,
+    snapshots: Option<Arc<SnapshotStore>>,
 }
 
 impl ResponseExecutor {
@@ -172,7 +175,14 @@ impl ResponseExecutor {
             process_ctl,
             network_ctl,
             quarantine_vault,
+            snapshots: None,
         }
+    }
+
+    /// Enable Rollback, restoring from the snapshots in `store`.
+    pub fn with_snapshots(mut self, store: Arc<SnapshotStore>) -> Self {
+        self.snapshots = Some(store);
+        self
     }
 
     pub async fn execute(&self, action: ResponseAction) -> Result<ResponseRecord, RiggsError> {
@@ -207,9 +217,19 @@ impl ResponseExecutor {
                 info!("releasing network containment");
                 self.network_ctl.release().await
             }
-            ResponseAction::Rollback { .. } => Err(RiggsError::Response(
-                "storyline rollback is not implemented".into(),
-            )),
+            ResponseAction::Rollback { storyline_id } => match &self.snapshots {
+                Some(store) => {
+                    info!(storyline = %storyline_id, "rolling back storyline");
+                    let (store, storyline) = (Arc::clone(store), storyline_id.clone());
+                    tokio::task::spawn_blocking(move || store.rollback(&storyline))
+                        .await
+                        .map_err(|e| RiggsError::Response(format!("rollback task failed: {e}")))
+                        .and_then(|restored| restored.map(|_| ()))
+                }
+                None => Err(RiggsError::Response(
+                    "rollback needs [response] preemptive_snapshots = true".into(),
+                )),
+            },
         };
 
         let (success, detail) = match result {
@@ -246,5 +266,85 @@ impl ResponseExecutor {
 
     pub fn vault(&self) -> &QuarantineVault {
         &self.quarantine_vault
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use riggs_types::events::StorylineId;
+
+    struct Inert;
+
+    #[async_trait]
+    impl ProcessControl for Inert {
+        async fn kill_process(&self, _pid: u32) -> Result<(), RiggsError> {
+            Ok(())
+        }
+        async fn suspend_process(&self, _pid: u32) -> Result<(), RiggsError> {
+            Ok(())
+        }
+        async fn resume_process(&self, _pid: u32) -> Result<(), RiggsError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl NetworkContainment for Inert {
+        async fn contain(&self, _allowed: &[std::net::IpAddr]) -> Result<(), RiggsError> {
+            Ok(())
+        }
+        async fn release(&self) -> Result<(), RiggsError> {
+            Ok(())
+        }
+        async fn is_contained(&self) -> Result<bool, RiggsError> {
+            Ok(false)
+        }
+    }
+
+    fn executor(dir: &Path, snapshots: Option<Arc<SnapshotStore>>) -> ResponseExecutor {
+        let exec = ResponseExecutor::new(
+            Box::new(Inert),
+            Box::new(Inert),
+            QuarantineVault::new(dir.join("vault")),
+        );
+        match snapshots {
+            Some(store) => exec.with_snapshots(store),
+            None => exec,
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_action_restores_snapshotted_files() {
+        let dir = std::env::temp_dir().join(format!("riggs-exec-rollback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("report.docx");
+        std::fs::write(&file, b"original").unwrap();
+        let store = Arc::new(SnapshotStore::new(dir.join("snapshots"), 1 << 20));
+        let storyline = StorylineId::new();
+        store.snapshot(&file, &storyline).unwrap();
+        std::fs::write(&file, b"ENCRYPTED").unwrap();
+
+        let with = executor(&dir, Some(store));
+        let without = executor(&dir, None);
+        let restored = with
+            .execute(ResponseAction::Rollback {
+                storyline_id: storyline.clone(),
+            })
+            .await
+            .unwrap();
+        let disabled = without
+            .execute(ResponseAction::Rollback {
+                storyline_id: storyline,
+            })
+            .await
+            .unwrap();
+        let content = std::fs::read(&file).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(restored.success);
+        assert_eq!(content, b"original");
+        assert!(!disabled.success);
     }
 }

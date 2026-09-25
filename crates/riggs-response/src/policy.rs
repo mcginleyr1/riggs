@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use riggs_types::errors::RiggsError;
+use riggs_types::events::StorylineId;
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 use serde::{Deserialize, Serialize};
 
@@ -30,14 +31,22 @@ impl Default for ResponsePolicy {
                         ResponseAction::QuarantineFile {
                             path: std::path::PathBuf::new(),
                         },
+                        ResponseAction::Rollback {
+                            storyline_id: DETECTED_STORYLINE,
+                        },
                     ],
                 },
                 PolicyRule {
                     min_threat_level: ThreatLevel::Malicious,
                     conditions: vec![],
-                    actions: vec![ResponseAction::QuarantineFile {
-                        path: std::path::PathBuf::new(),
-                    }],
+                    actions: vec![
+                        ResponseAction::QuarantineFile {
+                            path: std::path::PathBuf::new(),
+                        },
+                        ResponseAction::Rollback {
+                            storyline_id: DETECTED_STORYLINE,
+                        },
+                    ],
                 },
                 PolicyRule {
                     min_threat_level: ThreatLevel::Suspicious,
@@ -131,16 +140,16 @@ fn parse_action(toml_action: &TomlAction) -> Result<ResponseAction, RiggsError> 
             Ok(ResponseAction::NetworkContain { allowed_ips })
         }
         "NetworkRelease" => Ok(ResponseAction::NetworkRelease),
+        // Without storyline_id, Rollback targets the detection's storyline.
         "Rollback" => {
-            let raw = toml_action
-                .storyline_id
-                .as_deref()
-                .ok_or_else(|| RiggsError::Config("Rollback requires storyline_id".into()))?;
-            let uuid = uuid::Uuid::parse_str(raw)
-                .map_err(|e| RiggsError::Config(format!("invalid storyline_id UUID: {e}")))?;
-            Ok(ResponseAction::Rollback {
-                storyline_id: riggs_types::events::StorylineId(uuid),
-            })
+            let storyline_id =
+                match toml_action.storyline_id.as_deref() {
+                    None => DETECTED_STORYLINE,
+                    Some(raw) => StorylineId(uuid::Uuid::parse_str(raw).map_err(|e| {
+                        RiggsError::Config(format!("invalid storyline_id UUID: {e}"))
+                    })?),
+                };
+            Ok(ResponseAction::Rollback { storyline_id })
         }
         other => Err(RiggsError::Config(format!("unknown action type: {other}"))),
     }
@@ -184,6 +193,7 @@ impl ResponsePolicy {
         verdict: &MergedVerdict,
         target_pid: u32,
         target_path: Option<&Path>,
+        storyline: &StorylineId,
     ) -> Vec<ResponseAction> {
         let mut selected = Vec::new();
 
@@ -192,7 +202,9 @@ impl ResponsePolicy {
                 && self.conditions_met(&rule.conditions, verdict)
             {
                 for action in &rule.actions {
-                    if let Some(concrete) = concretize_action(action, target_pid, target_path) {
+                    if let Some(concrete) =
+                        concretize_action(action, target_pid, target_path, storyline)
+                    {
                         selected.push(concrete);
                     }
                 }
@@ -258,12 +270,21 @@ impl ResponsePolicy {
 /// target is only known at runtime). Returns `None` when a placeholder cannot
 /// be resolved, or when a process target resolves to pid <= 1 (which would
 /// signal the daemon's own process group or init).
+/// A Rollback with this storyline id targets the detection's own storyline.
+pub const DETECTED_STORYLINE: StorylineId = StorylineId(uuid::Uuid::nil());
+
 fn concretize_action(
     action: &ResponseAction,
     target_pid: u32,
     target_path: Option<&Path>,
+    storyline: &StorylineId,
 ) -> Option<ResponseAction> {
     match action {
+        ResponseAction::Rollback { storyline_id } if *storyline_id == DETECTED_STORYLINE => {
+            Some(ResponseAction::Rollback {
+                storyline_id: storyline.clone(),
+            })
+        }
         ResponseAction::KillProcess { pid } => {
             let pid = if *pid == 0 { target_pid } else { *pid };
             (pid > 1).then_some(ResponseAction::KillProcess { pid })
@@ -309,22 +330,51 @@ mod tests {
     fn default_policy_substitutes_real_pid_and_path() {
         // The default policy's second rule (Malicious, no conditions) quarantines.
         let policy = ResponsePolicy::default();
-        let actions = policy.evaluate(&malicious_verdict(), 4321, Some(Path::new("/tmp/evil")));
+        let storyline = StorylineId::new();
+        let actions = policy.evaluate(
+            &malicious_verdict(),
+            4321,
+            Some(Path::new("/tmp/evil")),
+            &storyline,
+        );
 
         assert!(actions.iter().any(|a| matches!(
             a,
             ResponseAction::QuarantineFile { path } if path == Path::new("/tmp/evil")
         )));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            ResponseAction::Rollback { storyline_id } if *storyline_id == storyline
+        )));
+    }
+
+    #[test]
+    fn toml_rollback_without_storyline_targets_the_detection() {
+        let action = TomlAction {
+            action_type: "Rollback".into(),
+            pid: None,
+            path: None,
+            allowed_ips: None,
+            storyline_id: None,
+        };
+        let parsed = parse_action(&action).unwrap();
+        let storyline = StorylineId::new();
+
+        assert!(matches!(
+            concretize_action(&parsed, 0, None, &storyline),
+            Some(ResponseAction::Rollback { storyline_id }) if storyline_id == storyline
+        ));
     }
 
     #[test]
     fn placeholder_kill_is_dropped_without_a_real_pid() {
         // pid 0 placeholder + unknown target (0) must not produce a kill(0).
         let action = ResponseAction::KillProcess { pid: 0 };
-        assert!(concretize_action(&action, 0, None).is_none());
-        assert!(concretize_action(&action, 1, None).is_none());
+        let storyline = StorylineId::new();
+        assert!(concretize_action(&action, 0, None, &storyline).is_none());
+        assert!(concretize_action(&action, 1, None, &storyline).is_none());
         assert!(matches!(
-            concretize_action(&action, 42, None),
+            concretize_action(&action, 42, None, &storyline),
             Some(ResponseAction::KillProcess { pid: 42 })
         ));
     }
@@ -334,14 +384,14 @@ mod tests {
         let action = ResponseAction::QuarantineFile {
             path: PathBuf::new(),
         };
-        assert!(concretize_action(&action, 42, None).is_none());
+        assert!(concretize_action(&action, 42, None, &StorylineId::new()).is_none());
     }
 
     #[test]
     fn explicit_targets_pass_through() {
         let action = ResponseAction::KillProcess { pid: 99 };
         assert!(matches!(
-            concretize_action(&action, 42, None),
+            concretize_action(&action, 42, None, &StorylineId::new()),
             Some(ResponseAction::KillProcess { pid: 99 })
         ));
     }

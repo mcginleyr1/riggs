@@ -16,7 +16,7 @@ use riggs_store::RiggsStore;
 use riggs_storyline::StorylineCorrelator;
 use riggs_types::config::RiggsConfig;
 use riggs_types::errors::RiggsError;
-use riggs_types::events::RiggsEvent;
+use riggs_types::events::{FileAction, RiggsEvent};
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 use riggs_types::Severity;
 use tokio::sync::mpsc;
@@ -693,11 +693,40 @@ impl RiggsDaemon {
         let response_sensor_pc = Box::new(riggs_platform_linux::LinuxSensor::new());
         #[cfg(not(target_os = "macos"))]
         let response_sensor_nc = Box::new(riggs_platform_linux::LinuxSensor::new());
-        let executor = Arc::new(riggs_response::ResponseExecutor::new(
-            response_sensor_pc,
-            response_sensor_nc,
-            vault,
-        ));
+        // Pre-modification snapshots backing Rollback (see snapshots.rs).
+        let snapshots = self.config.response.preemptive_snapshots.then(|| {
+            Arc::new(riggs_response::SnapshotStore::new(
+                PathBuf::from(&self.config.response.snapshot_path),
+                self.config.response.snapshot_max_file_mib * 1024 * 1024,
+            ))
+        });
+        let executor =
+            riggs_response::ResponseExecutor::new(response_sensor_pc, response_sensor_nc, vault);
+        let executor = Arc::new(match &snapshots {
+            Some(store) => executor.with_snapshots(Arc::clone(store)),
+            None => executor,
+        });
+        if let Some(store) = &snapshots {
+            let store = Arc::clone(store);
+            let max_age =
+                chrono::Duration::hours(self.config.response.snapshot_retention_hours as i64);
+            self.supervisor.spawn("snapshot-prune", move || {
+                let store = Arc::clone(&store);
+                Box::pin(async move {
+                    let mut interval = tokio::time::interval(retention_sweep);
+                    loop {
+                        interval.tick().await;
+                        let store = Arc::clone(&store);
+                        match tokio::task::spawn_blocking(move || store.prune(max_age)).await {
+                            Ok(Ok(0)) => {}
+                            Ok(Ok(removed)) => info!(removed, "expired snapshots pruned"),
+                            Ok(Err(e)) => error!(error = %e, "snapshot pruning failed"),
+                            Err(e) => error!(error = %e, "snapshot pruning task failed"),
+                        }
+                    }
+                })
+            });
+        }
 
         // -- Counters (shared with IPC state) --
         let events_processed = Arc::clone(&daemon_state.events_processed);
@@ -940,6 +969,21 @@ impl RiggsDaemon {
                         correlator.add_verdict(&storyline_id, v.clone());
                     }
 
+                    // A threat storyline opening a file may be about to change it:
+                    // keep a copy so Rollback can restore it.
+                    if let (Some(store), RiggsEvent::File(fe)) = (&snapshots, &event) {
+                        if fe.action == FileAction::Open && correlator.is_threat(&storyline_id) {
+                            let store = Arc::clone(store);
+                            let path = PathBuf::from(&fe.path);
+                            let storyline = storyline_id.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Err(e) = store.snapshot(&path, &storyline) {
+                                    warn!(error = %e, "pre-modification snapshot failed");
+                                }
+                            });
+                        }
+                    }
+
                     if merged.final_threat_level > ThreatLevel::Clean {
                         threats_detected.fetch_add(1, Ordering::Relaxed);
                         warn!(
@@ -955,7 +999,8 @@ impl RiggsDaemon {
                                 RiggsEvent::File(fe) => Some(std::path::Path::new(fe.path.as_str())),
                                 _ => None,
                             };
-                            let actions = policy.evaluate(&merged, target_pid, target_path);
+                            let actions =
+                                policy.evaluate(&merged, target_pid, target_path, &storyline_id);
                             if !actions.is_empty() {
                                 let exec = Arc::clone(&executor);
                                 tokio::spawn(async move {

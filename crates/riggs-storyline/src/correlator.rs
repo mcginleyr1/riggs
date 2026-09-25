@@ -200,6 +200,13 @@ impl StorylineCorrelator {
             .collect()
     }
 
+    /// True when the storyline's threat score is above the threat threshold.
+    pub fn is_threat(&self, id: &StorylineId) -> bool {
+        self.storylines
+            .get(id)
+            .is_some_and(|s| s.threat_score > self.threat_score_threshold)
+    }
+
     pub fn threat_storylines(&self) -> Vec<&Storyline> {
         self.storylines
             .values()

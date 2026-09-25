@@ -16,3 +16,4 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 toml = { workspace = true }
 sha2 = "0.10"
+zstd = { workspace = true }

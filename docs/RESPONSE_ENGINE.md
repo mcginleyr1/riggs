@@ -233,6 +233,16 @@ approach for monitored directories:
 On macOS, APFS snapshots can also be leveraged as a heavier-weight
 alternative via `tmutil localsnapshot`.
 
+**Current implementation:** `riggs_response::SnapshotStore` takes a snapshot
+when a process in a storyline already scored as a threat *opens* a file
+(`[response] preemptive_snapshots`, `snapshot_path`, `snapshot_max_file_mib`,
+`snapshot_retention_hours`). Policy `Rollback` actions without a
+`storyline_id` target the detection's storyline; the default Malicious rules
+end with one. This needs a sensor that reports process-attributed `Open`
+events. The current macOS and Linux file sensors are `notify`-based and emit
+unattributed Create/Modify/Delete only, so no snapshots are taken until such a
+sensor (Endpoint Security, fanotify) lands.
+
 **Rollback execution:**
 
 1. For each target path, look up the most recent pre-modification snapshot.
