@@ -207,10 +207,9 @@ impl ResponseExecutor {
                 info!("releasing network containment");
                 self.network_ctl.release().await
             }
-            ResponseAction::Rollback { storyline_id } => {
-                info!(?storyline_id, "rolling back storyline");
-                Ok(())
-            }
+            ResponseAction::Rollback { .. } => Err(RiggsError::Response(
+                "storyline rollback is not implemented".into(),
+            )),
         };
 
         let (success, detail) = match result {
