@@ -49,6 +49,16 @@ if database_url = System.get_env("DATABASE_URL") do
     pool_size: String.to_integer(System.get_env("POOL_SIZE", "10"))
 end
 
+# Server for newly provisioned tenant databases (Tenancy.create_tenant/1).
+# Unset: tenants go on the meta database's server.
+if tenant_host = System.get_env("TENANT_DATABASE_HOST") do
+  config :murtaugh, :tenant_database,
+    hostname: tenant_host,
+    port: String.to_integer(System.get_env("TENANT_DATABASE_PORT", "5432")),
+    username: System.get_env("TENANT_DATABASE_USER", "postgres"),
+    password: System.get_env("TENANT_DATABASE_PASSWORD", "postgres")
+end
+
 # gRPC agent-ingest server. mTLS (bring-your-own-PKI) is enabled only when all
 # three PEM paths are supplied; otherwise application.ex starts it in cleartext
 # and logs a warning. cacertfile is the CA that signed agent client certs.

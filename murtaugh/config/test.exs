@@ -21,6 +21,9 @@ config :murtaugh, MurtaughWeb.Endpoint,
   secret_key_base: "Tv3AiDmsZmdBEyyYtjD7sGtgYxjRdnxQO4YzQ3XNy2IUl57MDtx5x06z5UOBCsp2",
   server: false
 
+# The meta DB is sandboxed in tests; tests provision tenants explicitly.
+config :murtaugh, provision_tenants_on_boot: false
+
 # In test we don't send emails
 config :murtaugh, Murtaugh.Mailer, adapter: Swoosh.Adapters.Test
 

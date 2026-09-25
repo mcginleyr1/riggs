@@ -12,7 +12,11 @@ defmodule Murtaugh.Tenancy do
   alias Murtaugh.Repo
   alias Murtaugh.TenantRepo
   alias Murtaugh.ShardManager
+  alias Murtaugh.Org
   alias Murtaugh.Org.Node, as: OrgNode
+  alias Murtaugh.Org.Shard
+
+  require Logger
 
   @doc """
   Resolves the tenant shard for an org node.
@@ -60,6 +64,94 @@ defmodule Murtaugh.Tenancy do
     after
       TenantRepo.put_dynamic_repo(previous)
     end
+  end
+
+  @doc """
+  Provisions a tenant end to end: an account org node under `:parent` (the
+  root node by default), its shard, and its database. The shard stays
+  `provisioning` until the database is ready, so a failure is retried by
+  `provision_all/0` on the next boot.
+
+      create_tenant(%{name: "Acme Corp", slug: "acme"})
+  """
+  def create_tenant(%{name: name, slug: slug} = attrs) do
+    db_name = "murtaugh_tenant_" <> String.replace(slug, "-", "_")
+    url = tenant_database_url(db_name)
+    %URI{host: host, port: port} = URI.parse(url)
+    parent = attrs[:parent] || Repo.get_by!(OrgNode, node_type: "root")
+
+    shard_attrs = %{
+      name: db_name,
+      database_url: url,
+      database_name: db_name,
+      host: host,
+      port: port,
+      status: "provisioning",
+      retention_days: attrs[:retention_days] || 90
+    }
+
+    Ecto.Multi.new()
+    |> Ecto.Multi.insert(:shard, Shard.changeset(%Shard{}, shard_attrs))
+    |> Ecto.Multi.run(:node, fn _repo, %{shard: shard} ->
+      Org.insert_child(parent, %{
+        node_type: "account",
+        name: name,
+        slug: slug,
+        tenant_shard_id: shard.id,
+        metadata: attrs[:metadata] || %{}
+      })
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{shard: shard, node: node}} -> {:ok, %{node: node, shard: provision!(shard)}}
+      {:error, _step, changeset, _changes} -> {:error, changeset}
+    end
+  end
+
+  @doc """
+  Provisions or migrates every shard's database. Runs at boot so pending
+  tenants are finished and new tenant migrations roll out on deploy. One
+  unreachable tenant is logged and skipped rather than blocking the rest.
+  """
+  def provision_all do
+    from(s in Shard, where: s.status in ["provisioning", "active"])
+    |> Repo.all()
+    |> Enum.each(fn shard ->
+      try do
+        provision!(shard)
+      rescue
+        e -> Logger.error("tenant #{shard.name} provisioning failed: #{Exception.message(e)}")
+      end
+    end)
+  end
+
+  @doc false
+  def provision_all_on_boot do
+    provision_all()
+    :ignore
+  end
+
+  defp provision!(shard) do
+    ensure_tenant_db(shard)
+
+    if shard.status == "active",
+      do: shard,
+      else: shard |> Shard.changeset(%{status: "active"}) |> Repo.update!()
+  end
+
+  # New tenant DBs live on TENANT_DATABASE_* when configured, else on the meta
+  # database's server.
+  defp tenant_database_url(db_name) do
+    cfg = Application.get_env(:murtaugh, :tenant_database) || Repo.config()
+    userinfo = "#{URI.encode_www_form(cfg[:username])}:#{URI.encode_www_form(cfg[:password])}"
+
+    URI.to_string(%URI{
+      scheme: "postgres",
+      userinfo: userinfo,
+      host: cfg[:hostname],
+      port: cfg[:port] || 5432,
+      path: "/" <> db_name
+    })
   end
 
   @doc """

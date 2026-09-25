@@ -217,21 +217,21 @@ Meta DB (always):
 cd murtaugh && mix ecto.migrate
 ```
 
-Tenant DBs are not provisioned automatically yet. `Murtaugh.Tenancy.ensure_tenant_db/1`
-creates the database if missing, enables TimescaleDB, runs the tenant
-migrations and applies the retention policy. Run it for a shard with:
-
-```sh
-cd murtaugh && mix run -e 'Murtaugh.Repo.get_by!(Murtaugh.Org.Shard, name: "shard-demo") |> Murtaugh.Tenancy.ensure_tenant_db()'
-```
+Tenant DB migrations run automatically: on every boot Murtaugh provisions or
+migrates each `provisioning`/`active` shard (create database, enable
+TimescaleDB, migrate, apply retention) before agents connect, so new tenant
+migrations roll out on deploy. An unreachable tenant is logged and skipped.
 
 ### Adding a new tenant
 
-1. Create the database: `createdb murtaugh_tenant_newclient`
-2. Add an org node (type: account) in the admin UI or via seeds
-3. Add a shard record pointing to the new database
-4. Bind the org node to the shard
-5. Migrations run automatically on first connection
+```sh
+cd murtaugh && mix murtaugh.tenant.create "Acme Corp" acme [--retention-days 30]
+```
+
+or `Murtaugh.Tenancy.create_tenant(%{name: "Acme Corp", slug: "acme"})`. This
+adds an account org node under the root, a shard for `murtaugh_tenant_acme`,
+and creates and migrates that database. If provisioning fails the shard stays
+`provisioning` and is finished on the next boot.
 
 ## DLP Development
 
@@ -292,9 +292,10 @@ See `murtaugh/proto/README.md` for protoc installation and details.
 | `ARCHIVE_S3_ACCESS_KEY` | unset | S3 access key |
 | `ARCHIVE_S3_SECRET_KEY` | unset | S3 secret key |
 | `ARCHIVE_LOCAL_PATH` | /tmp/murtaugh-archive | Local archive directory |
-| `TENANT_DATABASE_HOST` | localhost | Default host for new tenant DBs |
-| `TENANT_DATABASE_USER` | postgres | Default user for new tenant DBs |
-| `TENANT_DATABASE_PASSWORD` | postgres | Default password for new tenant DBs |
+| `TENANT_DATABASE_HOST` | meta DB host | Server for new tenant DBs (unset: same server as the meta DB) |
+| `TENANT_DATABASE_PORT` | 5432 | Port for new tenant DBs (when `TENANT_DATABASE_HOST` is set) |
+| `TENANT_DATABASE_USER` | postgres | User for new tenant DBs (when `TENANT_DATABASE_HOST` is set) |
+| `TENANT_DATABASE_PASSWORD` | postgres | Password for new tenant DBs (when `TENANT_DATABASE_HOST` is set) |
 
 ### Riggs Agent
 

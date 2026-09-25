@@ -25,6 +25,31 @@ defmodule Murtaugh.Org do
     |> Repo.insert()
   end
 
+  @doc """
+  Inserts a node as the last child of `parent`, shifting the nested set to make
+  room. Must run inside a transaction; the table lock serializes concurrent inserts.
+  """
+  def insert_child(%Node{id: parent_id}, attrs) do
+    Repo.query!("LOCK TABLE org_nodes IN SHARE ROW EXCLUSIVE MODE")
+    parent = Repo.get!(Node, parent_id)
+
+    # lft/rgt have non-deferrable unique indexes, so shift through negative
+    # values: no intermediate row can collide with an unshifted one.
+    Repo.query!("UPDATE org_nodes SET rgt = -(rgt + 2) WHERE rgt >= $1", [parent.rgt])
+    Repo.query!("UPDATE org_nodes SET lft = -(lft + 2) WHERE lft > $1", [parent.rgt])
+    Repo.query!("UPDATE org_nodes SET rgt = -rgt WHERE rgt < 0")
+    Repo.query!("UPDATE org_nodes SET lft = -lft WHERE lft < 0")
+
+    attrs
+    |> Map.merge(%{
+      parent_id: parent.id,
+      lft: parent.rgt,
+      rgt: parent.rgt + 1,
+      depth: parent.depth + 1
+    })
+    |> create_node()
+  end
+
   def update_node(%Node{} = node, attrs) do
     node
     |> Node.changeset(attrs)
