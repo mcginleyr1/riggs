@@ -310,15 +310,38 @@ pub async fn scan(socket_path: &Path, args: &[String]) -> Result<(), RiggsError>
 }
 
 pub async fn quarantine(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
-    let _ = args;
     let mut client = connect(socket_path).await?;
-    let response = send(&mut client, &ClientMessage::GetStatus).await?;
 
-    match response {
-        DaemonMessage::Status { .. } => {
+    if args.first().map(String::as_str) == Some("restore") {
+        let Some(id) = args.get(1) else {
+            eprintln!("Usage: riggs quarantine restore <id>");
+            return Ok(());
+        };
+        let msg = ClientMessage::QuarantineRestore { id: id.clone() };
+        match send(&mut client, &msg).await? {
+            DaemonMessage::Done(outcome) => println!("{GREEN}{outcome}{RESET}"),
+            DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
+            _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
+        }
+        return Ok(());
+    }
+
+    match send(&mut client, &ClientMessage::QuarantineList).await? {
+        DaemonMessage::Quarantine(files) => {
             println!("{BOLD}Quarantine{RESET}");
             println!("{DIM}────────────────────────────────────{RESET}");
-            println!("  {DIM}No quarantined files.{RESET}");
+            if files.is_empty() {
+                println!("  {DIM}No quarantined files.{RESET}");
+            }
+            for f in &files {
+                println!(
+                    "  {}  {}  {} bytes  {DIM}{}{RESET}",
+                    f.id, f.original_path, f.file_size, f.quarantined_at
+                );
+            }
+            if !files.is_empty() {
+                println!("\n  {DIM}Restore with: riggs quarantine restore <id>{RESET}");
+            }
         }
         DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
         _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),

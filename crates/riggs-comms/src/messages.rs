@@ -22,6 +22,10 @@ pub enum ClientMessage {
         path: String,
     },
     RefreshFeeds,
+    QuarantineList,
+    QuarantineRestore {
+        id: String,
+    },
     VulnUpdate,
     IntelStatus,
     DlpCheckFlow {
@@ -59,6 +63,7 @@ pub enum DaemonMessage {
     },
     Events(Vec<RiggsEvent>),
     Threats(Vec<MergedVerdict>),
+    Quarantine(Vec<QuarantinedFile>),
     Config(String),
     IntelStatus {
         bloom_size: usize,
@@ -90,4 +95,14 @@ pub enum DaemonMessage {
         allow_domains: usize,
         process_rules: usize,
     },
+}
+
+/// A file held in the daemon's quarantine vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantinedFile {
+    pub id: String,
+    pub original_path: String,
+    pub quarantined_at: String,
+    pub file_size: u64,
+    pub sha256: Option<String>,
 }

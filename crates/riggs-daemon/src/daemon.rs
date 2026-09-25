@@ -634,6 +634,9 @@ impl RiggsDaemon {
                 feeds: feed_handle,
                 console: Arc::clone(&console),
                 vuln_running: Arc::default(),
+                vault: riggs_response::QuarantineVault::new(PathBuf::from(
+                    &self.config.response.quarantine_path,
+                )),
             }));
         }
 

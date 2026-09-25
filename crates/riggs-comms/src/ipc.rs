@@ -22,7 +22,7 @@ const CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 use riggs_types::events::RiggsEvent;
 use riggs_types::verdict::MergedVerdict;
 
-use crate::messages::{ClientMessage, DaemonMessage};
+use crate::messages::{ClientMessage, DaemonMessage, QuarantinedFile};
 
 pub trait StoreQuery: Send + Sync {
     fn recent_events(&self, limit: usize) -> Vec<RiggsEvent>;
@@ -93,6 +93,8 @@ pub trait ControlOps: Send + Sync {
     fn trigger_scan(&self, path: &str) -> std::result::Result<String, String>;
     fn refresh_feeds(&self) -> std::result::Result<String, String>;
     fn vuln_update(&self) -> std::result::Result<String, String>;
+    fn quarantine_list(&self) -> std::result::Result<Vec<QuarantinedFile>, String>;
+    fn quarantine_restore(&self, id: &str) -> std::result::Result<String, String>;
 }
 
 #[derive(Debug, Error)]
@@ -327,6 +329,7 @@ impl IpcServer {
                 | ClientMessage::TriggerScan { .. }
                 | ClientMessage::RefreshFeeds
                 | ClientMessage::VulnUpdate
+                | ClientMessage::QuarantineRestore { .. }
                 | ClientMessage::EgressAllow { .. }
                 | ClientMessage::EgressDeny { .. }
                 | ClientMessage::EgressSetMode { .. }
@@ -378,6 +381,17 @@ impl IpcServer {
             ClientMessage::TriggerScan { path } => control(state, |c| c.trigger_scan(&path)),
             ClientMessage::RefreshFeeds => control(state, |c| c.refresh_feeds()),
             ClientMessage::VulnUpdate => control(state, |c| c.vuln_update()),
+            ClientMessage::QuarantineList => match state.control.read() {
+                Ok(guard) => match guard.as_ref().map(|c| c.quarantine_list()) {
+                    Some(Ok(files)) => DaemonMessage::Quarantine(files),
+                    Some(Err(e)) => DaemonMessage::Error(e),
+                    None => DaemonMessage::Error("daemon control not initialized".into()),
+                },
+                Err(_) => DaemonMessage::Error("daemon control unavailable".into()),
+            },
+            ClientMessage::QuarantineRestore { id } => {
+                control(state, |c| c.quarantine_restore(&id))
+            }
             ClientMessage::IntelStatus => DaemonMessage::IntelStatus {
                 bloom_size: state.bloom_size.load(Ordering::Relaxed) as usize,
                 cache_entries: state.cache_entries.load(Ordering::Relaxed),
@@ -569,6 +583,18 @@ mod tests {
             fn vuln_update(&self) -> std::result::Result<String, String> {
                 Ok("scanning".into())
             }
+            fn quarantine_list(&self) -> std::result::Result<Vec<QuarantinedFile>, String> {
+                Ok(vec![QuarantinedFile {
+                    id: "q1".into(),
+                    original_path: "/tmp/evil".into(),
+                    quarantined_at: "now".into(),
+                    file_size: 3,
+                    sha256: None,
+                }])
+            }
+            fn quarantine_restore(&self, id: &str) -> std::result::Result<String, String> {
+                Ok(format!("restored {id}"))
+            }
         }
 
         let state = Arc::new(DaemonState::new());
@@ -592,7 +618,10 @@ mod tests {
             path: "/nope".into(),
         })
         .await;
+        let listed = send(ClientMessage::QuarantineList).await;
         std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(listed, DaemonMessage::Quarantine(files) if files[0].id == "q1"));
 
         assert!(matches!(before_init, DaemonMessage::Error(_)));
         assert!(matches!(config, DaemonMessage::Done(s) if s == "engine.rules_enabled=false"));

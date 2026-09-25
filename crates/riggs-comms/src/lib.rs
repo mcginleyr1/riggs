@@ -5,7 +5,7 @@ pub use ipc::{
     ControlOps, DaemonState, DlpFlowVerdict, DlpQuery, DlpQueryStatus, EgressFlowVerdict,
     EgressQuery, EgressQueryStatus, IpcClient, IpcError, IpcServer, StoreQuery,
 };
-pub use messages::{ClientMessage, DaemonMessage};
+pub use messages::{ClientMessage, DaemonMessage, QuarantinedFile};
 
 // Cloud module would use tonic - deferred to later phase
 // #[cfg(feature = "cloud")]

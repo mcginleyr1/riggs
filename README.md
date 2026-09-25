@@ -185,12 +185,12 @@ Changes take effect immediately.
 riggs status             Daemon status and active threat count
 riggs threats            List detected threats with severity
 riggs events             Query event log (--storyline, --limit)
-riggs config             View or update configuration
-riggs scan <path>        Trigger on-demand file scan
-riggs quarantine         Manage quarantined files
-riggs intel [status|update]   Threat intelligence feeds
+riggs config [<key> <value>]  View config, or save a change to riggs.toml (applies on restart)
+riggs scan <path>        Scan files through the detection pipeline (static AI, YARA, hash intel)
+riggs quarantine [restore <id>]  List quarantined files, or restore one
+riggs intel [status|update]   Threat intelligence feeds (update = refresh now)
 riggs dlp [status|policy]     DLP module status and active policy
-riggs vuln [update]           Vulnerability database management
+riggs vuln update             Scan installed packages against OSV.dev, report to console
 ```
 
 ## Detection Pipeline

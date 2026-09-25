@@ -28,6 +28,7 @@ pub struct ControlAdapter {
     pub feeds: Option<Arc<FeedManager>>,
     pub console: ConsoleSlot,
     pub vuln_running: Arc<AtomicBool>,
+    pub vault: riggs_response::QuarantineVault,
 }
 
 impl riggs_comms::ControlOps for ControlAdapter {
@@ -125,6 +126,36 @@ impl riggs_comms::ControlOps for ControlAdapter {
         });
 
         Ok("vulnerability database refresh and scan started; results are logged and sent to the console".into())
+    }
+
+    fn quarantine_list(&self) -> Result<Vec<riggs_comms::QuarantinedFile>, String> {
+        let entries = self.vault.list().map_err(|e| e.to_string())?;
+        Ok(entries
+            .into_iter()
+            .map(|e| riggs_comms::QuarantinedFile {
+                id: e.id.to_string(),
+                original_path: e.original_path.display().to_string(),
+                quarantined_at: e.quarantined_at.to_rfc3339(),
+                file_size: e.file_size,
+                sha256: e.sha256_hash,
+            })
+            .collect())
+    }
+
+    fn quarantine_restore(&self, id: &str) -> Result<String, String> {
+        let entry_id =
+            uuid::Uuid::parse_str(id).map_err(|_| format!("not a quarantine id: {id}"))?;
+        let original = self
+            .vault
+            .list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|e| e.id == entry_id)
+            .ok_or_else(|| format!("no quarantined file with id {id}"))?
+            .original_path;
+        self.vault.restore(entry_id).map_err(|e| e.to_string())?;
+        info!(id, path = %original.display(), "restored file from quarantine");
+        Ok(format!("restored {}", original.display()))
     }
 }
 

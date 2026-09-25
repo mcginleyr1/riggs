@@ -58,6 +58,33 @@ impl QuarantineVault {
             .map_err(|e| RiggsError::Io(format!("failed to write manifest: {e}")))
     }
 
+    /// Hashes of files an operator restored. Restoring means "this file is
+    /// fine", so auto-response must not quarantine the same bytes again.
+    fn released_path(&self) -> PathBuf {
+        self.vault_dir.join("released.json")
+    }
+
+    fn load_released(&self) -> Result<Vec<String>, RiggsError> {
+        match std::fs::read_to_string(self.released_path()) {
+            Ok(data) => serde_json::from_str(&data)
+                .map_err(|e| RiggsError::Io(format!("failed to parse released list: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(RiggsError::Io(format!("failed to read released list: {e}"))),
+        }
+    }
+
+    fn release(&self, hash: &str) -> Result<(), RiggsError> {
+        let mut released = self.load_released()?;
+        if !released.iter().any(|h| h == hash) {
+            released.push(hash.to_string());
+            let data = serde_json::to_string_pretty(&released)
+                .map_err(|e| RiggsError::Io(format!("failed to serialize released list: {e}")))?;
+            std::fs::write(self.released_path(), data)
+                .map_err(|e| RiggsError::Io(format!("failed to write released list: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn compute_sha256(path: &Path) -> Result<String, RiggsError> {
         let data = std::fs::read(path)
             .map_err(|e| RiggsError::Io(format!("failed to read file for hashing: {e}")))?;
@@ -80,6 +107,14 @@ impl QuarantineVault {
         let file_size = metadata.len();
 
         let sha256_hash = Self::compute_sha256(path).ok();
+        if let Some(hash) = &sha256_hash {
+            if self.load_released()?.contains(hash) {
+                return Err(RiggsError::Response(format!(
+                    "not re-quarantining {}: an operator restored this file (sha256 {hash})",
+                    path.display()
+                )));
+            }
+        }
 
         let id = Uuid::now_v7();
         let vault_path = self.vault_dir.join(id.to_string());
@@ -128,6 +163,12 @@ impl QuarantineVault {
             return Err(RiggsError::Io(format!(
                 "quarantined file missing from vault: {entry_id}"
             )));
+        }
+
+        // Record the release before the file reappears, so the sensor event it
+        // triggers can't race a re-quarantine.
+        if let Some(hash) = &entry.sha256_hash {
+            self.release(hash)?;
         }
 
         if let Some(parent) = entry.original_path.parent() {
@@ -313,6 +354,28 @@ mod tests {
             Some(store) => exec.with_snapshots(store),
             None => exec,
         }
+    }
+
+    #[test]
+    fn restored_files_are_not_requarantined_but_changed_ones_are() {
+        let dir = std::env::temp_dir().join(format!("riggs-vault-release-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = QuarantineVault::new(dir.join("vault"));
+        let file = dir.join("tool.bin");
+        std::fs::write(&file, b"flagged but fine").unwrap();
+
+        let entry = vault.quarantine(&file).unwrap();
+        vault.restore(entry.id).unwrap();
+        let again = vault.quarantine(&file);
+        std::fs::write(&file, b"now actually malicious").unwrap();
+        let changed = vault.quarantine(&file);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            again.is_err(),
+            "operator-restored bytes must not be re-quarantined"
+        );
+        assert!(changed.is_ok(), "a modified file is quarantined again");
     }
 
     #[tokio::test]
