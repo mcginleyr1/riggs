@@ -12,7 +12,12 @@ use tracing::{error, info, warn};
 const DEFAULT_MAX_MSG_LEN: usize = 8 * 1024 * 1024;
 
 /// Default cap on concurrent client handlers so a flood can't exhaust the daemon.
+/// Applied separately to owner and non-owner peers.
 const DEFAULT_MAX_CONCURRENT_CLIENTS: usize = 32;
+
+/// Deadline for reading a request and writing its response. A peer that
+/// connects and stalls would otherwise pin a handler slot forever.
+const CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 use riggs_types::events::RiggsEvent;
 use riggs_types::verdict::MergedVerdict;
@@ -166,6 +171,10 @@ fn egress_mutate(
     }
 }
 
+fn not_implemented(what: &str) -> DaemonMessage {
+    DaemonMessage::Error(format!("{what} are not implemented by the daemon yet"))
+}
+
 /// True when the connecting peer runs as the same user as the daemon.
 fn peer_is_owner(stream: &UnixStream) -> bool {
     stream
@@ -229,25 +238,43 @@ impl IpcServer {
 
         info!("IPC server listening on {:?}", self.socket_path);
 
-        let limiter = Arc::new(Semaphore::new(self.max_connections));
+        // Separate pools so unprivileged peers (the socket is 0666) can never
+        // starve the root NEFilter extension, which fails open on timeout.
+        let owner_limiter = Arc::new(Semaphore::new(self.max_connections));
+        let other_limiter = Arc::new(Semaphore::new(self.max_connections));
         let max_message_bytes = self.max_message_bytes;
 
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let permit = match Arc::clone(&limiter).try_acquire_owned() {
+                    let is_owner = peer_is_owner(&stream);
+                    let limiter = if is_owner {
+                        &owner_limiter
+                    } else {
+                        &other_limiter
+                    };
+                    let permit = match Arc::clone(limiter).try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
-                            warn!("IPC connection limit reached, dropping connection");
+                            warn!(
+                                is_owner,
+                                "IPC connection limit reached, dropping connection"
+                            );
                             continue;
                         }
                     };
                     let state = Arc::clone(&self.state);
                     tokio::spawn(async move {
                         let _permit = permit; // released when the handler finishes
-                        if let Err(e) = Self::handle_client(stream, &state, max_message_bytes).await
-                        {
-                            error!("Client handler error: {}", e);
+                        let handled = tokio::time::timeout(
+                            CLIENT_IO_TIMEOUT,
+                            Self::handle_client(stream, &state, max_message_bytes, is_owner),
+                        )
+                        .await;
+                        match handled {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => error!("Client handler error: {}", e),
+                            Err(_) => warn!(is_owner, "IPC client timed out"),
                         }
                     });
                 }
@@ -262,6 +289,7 @@ impl IpcServer {
         mut stream: UnixStream,
         state: &DaemonState,
         max_message_bytes: usize,
+        is_owner: bool,
     ) -> Result<()> {
         let raw = read_length_prefixed(&mut stream, max_message_bytes).await?;
         let msg: ClientMessage = serde_json::from_slice(&raw)?;
@@ -278,7 +306,7 @@ impl IpcServer {
                 | ClientMessage::EgressDeny { .. }
                 | ClientMessage::EgressSetMode { .. }
         );
-        if needs_privilege && !peer_is_owner(&stream) {
+        if needs_privilege && !is_owner {
             let denied = DaemonMessage::Error(
                 "permission denied: command requires daemon-owner privilege".into(),
             );
@@ -319,19 +347,10 @@ impl IpcServer {
                     .unwrap_or_else(|_| "{}".to_string());
                 DaemonMessage::Config(config)
             }
-            ClientMessage::UpdateConfig { .. } => DaemonMessage::Ok,
-            ClientMessage::TriggerScan { path } => {
-                info!("Scan requested for: {}", path);
-                DaemonMessage::Ok
-            }
-            ClientMessage::RefreshFeeds => {
-                info!("Feed refresh requested");
-                DaemonMessage::Ok
-            }
-            ClientMessage::VulnUpdate => {
-                info!("Vulnerability database update requested");
-                DaemonMessage::Ok
-            }
+            ClientMessage::UpdateConfig { .. } => not_implemented("runtime config updates"),
+            ClientMessage::TriggerScan { .. } => not_implemented("on-demand scans"),
+            ClientMessage::RefreshFeeds => not_implemented("on-demand feed refresh"),
+            ClientMessage::VulnUpdate => not_implemented("on-demand vuln database updates"),
             ClientMessage::IntelStatus => DaemonMessage::IntelStatus {
                 bloom_size: state.bloom_size.load(Ordering::Relaxed) as usize,
                 cache_entries: state.cache_entries.load(Ordering::Relaxed),
@@ -468,5 +487,42 @@ impl IpcClient {
         let response_bytes = read_length_prefixed(&mut self.stream, DEFAULT_MAX_MSG_LEN).await?;
         let response: DaemonMessage = serde_json::from_slice(&response_bytes)?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn start_server(name: &str, max_connections: usize) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("riggs-ipc-{name}-{}.sock", std::process::id()));
+        let server = IpcServer::new(path.clone()).with_limits(DEFAULT_MAX_MSG_LEN, max_connections);
+        tokio::spawn(async move { server.start().await });
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+        path
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_client_releases_its_slot() {
+        let path = start_server("stall", 1).await;
+        let _stalled = UnixStream::connect(&path).await.unwrap();
+        tokio::time::sleep(CLIENT_IO_TIMEOUT * 2).await;
+
+        let mut client = IpcClient::connect(&path).await.unwrap();
+        let response = client.send(&ClientMessage::GetStatus).await.unwrap();
+        assert!(matches!(response, DaemonMessage::Status { .. }));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unimplemented_commands_report_errors() {
+        let path = start_server("stub", 4).await;
+        let mut client = IpcClient::connect(&path).await.unwrap();
+        let response = client.send(&ClientMessage::RefreshFeeds).await.unwrap();
+        assert!(matches!(response, DaemonMessage::Error(_)));
+        std::fs::remove_file(path).unwrap();
     }
 }
