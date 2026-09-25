@@ -55,12 +55,11 @@ unless Repo.get_by(Node, node_type: "root") do
 
   # Create superadmin user
   {:ok, admin} =
-    %User{}
+    %User{is_superadmin: true}
     |> User.registration_changeset(%{
       email: "admin@murtaugh.local",
       name: "Murtaugh Admin",
-      password: "murtaugh",
-      is_superadmin: true
+      password: "murtaugh"
     })
     |> Repo.insert()
 
