@@ -29,15 +29,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # NOTE: `cargo fmt --all --check` is not gated yet — the tree has never
-      # been run through rustfmt (~all files differ). Do a one-shot
-      # `cargo fmt --all` in its own commit, then add the check step here.
+      - name: Format
+        run: cargo fmt --all --check
 
-      # Matches `make clippy`. Hard errors (non-exhaustive matches, missing
-      # fields) still fail the build; pre-existing style warnings do not block
-      # yet. Tighten to `-- -D warnings` once the warning backlog is cleared.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace

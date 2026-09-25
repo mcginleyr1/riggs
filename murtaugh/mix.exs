@@ -73,7 +73,8 @@ defmodule Murtaugh.MixProject do
       {:csv, "~> 3.2"},
       # gRPC server for agent communication
       {:grpc, "~> 0.9"},
-      {:protobuf, "~> 0.14"}
+      {:protobuf, "~> 0.14"},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 
