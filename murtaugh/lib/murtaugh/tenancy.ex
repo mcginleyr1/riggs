@@ -125,6 +125,39 @@ defmodule Murtaugh.Tenancy do
     end)
   end
 
+  @doc "Account org nodes with their shard (nil when unassigned), in tree order."
+  def list_tenants do
+    from(n in OrgNode,
+      left_join: s in assoc(n, :tenant_shard),
+      where: n.node_type == "account",
+      order_by: n.lft,
+      select: {n, s}
+    )
+    |> Repo.all()
+  end
+
+  @doc "Changes a shard's event retention and re-registers its TimescaleDB policy."
+  def update_retention(%Shard{} = shard, days) do
+    with {:ok, shard} <- shard |> Shard.changeset(%{retention_days: days}) |> Repo.update() do
+      with_raw_connection(shard.database_url, fn conn ->
+        Postgrex.query!(conn, "SELECT remove_retention_policy('events', if_exists => true)", [])
+      end)
+
+      apply_retention_policy(shard)
+      {:ok, shard}
+    end
+  end
+
+  defp with_raw_connection(url, fun) do
+    {:ok, conn} = Postgrex.start_link(Ecto.Repo.Supervisor.parse_url(url))
+
+    try do
+      fun.(conn)
+    after
+      GenServer.stop(conn)
+    end
+  end
+
   @doc false
   def provision_all_on_boot do
     provision_all()

@@ -57,6 +57,24 @@ defmodule Murtaugh.TenancyTest do
              Tenancy.with_tenant(shard, fn -> TenantRepo.query!("SELECT count(*) FROM events") end)
   end
 
+  test "update_retention re-registers the TimescaleDB retention policy" do
+    {:ok, %{shard: shard}} =
+      Tenancy.create_tenant(%{name: "Ret", slug: "ret", retention_days: 90})
+
+    drop_on_exit(shard)
+
+    assert {:ok, %Shard{retention_days: 30}} = Tenancy.update_retention(shard, 30)
+
+    %{rows: [[drop_after]]} =
+      Tenancy.with_tenant(shard, fn ->
+        TenantRepo.query!(
+          "SELECT config->>'drop_after' FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention'"
+        )
+      end)
+
+    assert drop_after == "30 days"
+  end
+
   test "provision_all finishes shards left in provisioning" do
     db = "murtaugh_tenant_pending_#{System.unique_integer([:positive])}"
     cfg = Repo.config()
