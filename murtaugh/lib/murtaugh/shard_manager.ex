@@ -59,7 +59,8 @@ defmodule Murtaugh.ShardManager do
             new_state = %{
               state
               | repos: Map.put(state.repos, shard_id, pid),
-                last_access: Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
+                last_access:
+                  Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
             }
 
             {:reply, {:ok, pid}, new_state}
@@ -72,7 +73,8 @@ defmodule Murtaugh.ShardManager do
         if Process.alive?(pid) do
           new_state = %{
             state
-            | last_access: Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
+            | last_access:
+                Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
           }
 
           {:reply, {:ok, pid}, new_state}
@@ -85,7 +87,8 @@ defmodule Murtaugh.ShardManager do
               new_state = %{
                 state
                 | repos: Map.put(state.repos, shard_id, new_pid),
-                  last_access: Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
+                  last_access:
+                    Map.put(state.last_access, shard_id, System.monotonic_time(:millisecond))
               }
 
               {:reply, {:ok, new_pid}, new_state}

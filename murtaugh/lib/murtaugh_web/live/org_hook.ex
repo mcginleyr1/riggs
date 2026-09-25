@@ -20,12 +20,13 @@ defmodule MurtaughWeb.OrgHook do
       current_user ->
         {current_org, current_shard} = resolve_org(org_slug)
 
-        {:cont, assign(socket,
-          org_slug: org_slug,
-          current_org: current_org,
-          current_user: current_user,
-          current_shard: current_shard
-        )}
+        {:cont,
+         assign(socket,
+           org_slug: org_slug,
+           current_org: current_org,
+           current_user: current_user,
+           current_shard: current_shard
+         )}
     end
   end
 
@@ -44,7 +45,12 @@ defmodule MurtaughWeb.OrgHook do
       fallback = %{
         id: "00000000-0000-0000-0000-000000000001",
         slug: slug,
-        name: slug |> String.replace("-", " ") |> String.split() |> Enum.map(&String.capitalize/1) |> Enum.join(" "),
+        name:
+          slug
+          |> String.replace("-", " ")
+          |> String.split()
+          |> Enum.map(&String.capitalize/1)
+          |> Enum.join(" "),
         node_type: "account"
       }
 

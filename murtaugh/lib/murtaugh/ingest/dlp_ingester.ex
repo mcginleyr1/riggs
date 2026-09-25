@@ -29,7 +29,12 @@ defmodule Murtaugh.Ingest.DlpIngester do
 
           case TenantRepo.insert(Event.changeset(%Event{}, attrs)) do
             {:ok, event} ->
-              Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.dlp(org_node_id), {:dlp_event, event})
+              Phoenix.PubSub.broadcast(
+                Murtaugh.PubSub,
+                Murtaugh.Topics.dlp(org_node_id),
+                {:dlp_event, event}
+              )
+
               {:ok, event.id}
 
             {:error, changeset} ->

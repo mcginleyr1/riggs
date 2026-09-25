@@ -30,7 +30,9 @@ defmodule Murtaugh.Ingest.VulnIngester do
 
           {count, _} =
             TenantRepo.insert_all("vulnerabilities", rows,
-              on_conflict: {:replace, [:package_version, :cvss_score, :severity, :fixed_version, :scan_timestamp]},
+              on_conflict:
+                {:replace,
+                 [:package_version, :cvss_score, :severity, :fixed_version, :scan_timestamp]},
               conflict_target: [:agent_id, :cve_id, :package_name]
             )
 

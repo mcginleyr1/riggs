@@ -3,12 +3,13 @@ defmodule MurtaughWeb.SettingsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket,
-      page_title: "Settings",
-      active_tab: "users",
-      users: placeholder_users(),
-      enrollment_tokens: placeholder_tokens()
-    )}
+    {:ok,
+     assign(socket,
+       page_title: "Settings",
+       active_tab: "users",
+       users: placeholder_users(),
+       enrollment_tokens: placeholder_tokens()
+     )}
   end
 
   @impl true
@@ -25,7 +26,15 @@ defmodule MurtaughWeb.SettingsLive do
       <%!-- Tab bar --%>
       <div class="flex gap-1 bg-gray-800 border border-gray-700 rounded-xl p-1">
         <button
-          :for={tab <- [{"users", "Users"}, {"tokens", "Enrollment Tokens"}, {"alerts", "Alert Integrations"}, {"retention", "Retention"}, {"mtls", "mTLS CA"}]}
+          :for={
+            tab <- [
+              {"users", "Users"},
+              {"tokens", "Enrollment Tokens"},
+              {"alerts", "Alert Integrations"},
+              {"retention", "Retention"},
+              {"mtls", "mTLS CA"}
+            ]
+          }
           phx-click="switch_tab"
           phx-value-tab={elem(tab, 0)}
           class={"px-4 py-2 text-sm rounded-lg transition-colors " <> if @active_tab == elem(tab, 0), do: "bg-gray-700 text-white", else: "text-gray-400 hover:text-gray-200"}
@@ -104,7 +113,9 @@ defmodule MurtaughWeb.SettingsLive do
       <%!-- Alerts tab --%>
       <div :if={@active_tab == "alerts"} class="bg-gray-800 border border-gray-700 rounded-xl p-5">
         <h2 class="text-lg font-semibold text-white mb-4">Alert Integrations</h2>
-        <p class="text-gray-400 text-sm">Configure webhooks for Slack, PagerDuty, and email alerts.</p>
+        <p class="text-gray-400 text-sm">
+          Configure webhooks for Slack, PagerDuty, and email alerts.
+        </p>
         <div class="mt-4 text-gray-500 text-sm text-center py-8 border-2 border-dashed border-gray-700 rounded-lg">
           No integrations configured yet.
         </div>
@@ -174,9 +185,27 @@ defmodule MurtaughWeb.SettingsLive do
 
   defp placeholder_tokens do
     [
-      %{label: "NYC Office Deploy Batch 2", token_preview: "enrl_a1b2c3...d4e5", uses_remaining: 50, expires: "2026-04-17", created_by: "Operator"},
-      %{label: "SF Office Initial", token_preview: "enrl_f6g7h8...i9j0", uses_remaining: nil, expires: "2026-06-01", created_by: "Operator"},
-      %{label: "London Refresh", token_preview: "enrl_k1l2m3...n4o5", uses_remaining: 10, expires: "2026-03-30", created_by: "Alice Chen"}
+      %{
+        label: "NYC Office Deploy Batch 2",
+        token_preview: "enrl_a1b2c3...d4e5",
+        uses_remaining: 50,
+        expires: "2026-04-17",
+        created_by: "Operator"
+      },
+      %{
+        label: "SF Office Initial",
+        token_preview: "enrl_f6g7h8...i9j0",
+        uses_remaining: nil,
+        expires: "2026-06-01",
+        created_by: "Operator"
+      },
+      %{
+        label: "London Refresh",
+        token_preview: "enrl_k1l2m3...n4o5",
+        uses_remaining: 10,
+        expires: "2026-03-30",
+        created_by: "Alice Chen"
+      }
     ]
   end
 end

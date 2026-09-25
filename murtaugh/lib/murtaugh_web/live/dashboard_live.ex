@@ -16,35 +16,45 @@ defmodule MurtaughWeb.DashboardLive do
 
     shard = socket.assigns[:current_shard]
 
-    {agents_online, agents_offline, agents_degraded, threats_today,
-     recent_threats, recent_dlp_blocks, dlp_blocks_today, events_per_sec} =
+    {agents_online, agents_offline, agents_degraded, threats_today, recent_threats,
+     recent_dlp_blocks, dlp_blocks_today, events_per_sec} =
       load_dashboard_data(shard)
 
-    {:ok, assign(socket,
-      page_title: "Dashboard",
-      agents_online: agents_online,
-      agents_offline: agents_offline,
-      agents_degraded: agents_degraded,
-      threats_today: threats_today,
-      dlp_blocks_today: dlp_blocks_today,
-      dlp_alerts_today: 0,
-      events_per_sec: events_per_sec,
-      recent_threats: recent_threats,
-      recent_dlp_blocks: recent_dlp_blocks
-    )}
+    {:ok,
+     assign(socket,
+       page_title: "Dashboard",
+       agents_online: agents_online,
+       agents_offline: agents_offline,
+       agents_degraded: agents_degraded,
+       threats_today: threats_today,
+       dlp_blocks_today: dlp_blocks_today,
+       dlp_alerts_today: 0,
+       events_per_sec: events_per_sec,
+       recent_threats: recent_threats,
+       recent_dlp_blocks: recent_dlp_blocks
+     )}
   end
 
   @impl true
   def handle_info({:new_threat, threat}, socket) do
     threats = [Presenters.present_threat(threat) | Enum.take(socket.assigns.recent_threats, 9)]
-    {:noreply, assign(socket, threats_today: socket.assigns.threats_today + 1, recent_threats: threats)}
+
+    {:noreply,
+     assign(socket, threats_today: socket.assigns.threats_today + 1, recent_threats: threats)}
   end
 
   def handle_info({:threat_updated, _threat}, socket), do: {:noreply, socket}
 
   def handle_info({:dlp_event, event}, socket) do
-    blocks = [Presenters.present_dlp_event(event) | Enum.take(socket.assigns.recent_dlp_blocks, 4)]
-    {:noreply, assign(socket, dlp_blocks_today: socket.assigns.dlp_blocks_today + 1, recent_dlp_blocks: blocks)}
+    blocks = [
+      Presenters.present_dlp_event(event) | Enum.take(socket.assigns.recent_dlp_blocks, 4)
+    ]
+
+    {:noreply,
+     assign(socket,
+       dlp_blocks_today: socket.assigns.dlp_blocks_today + 1,
+       recent_dlp_blocks: blocks
+     )}
   end
 
   def handle_info({:agent_online, _agent}, socket),
@@ -54,18 +64,23 @@ defmodule MurtaughWeb.DashboardLive do
     do: {:noreply, update(socket, :agents_offline, &(&1 + 1))}
 
   def handle_info({:agent_status_change, _agent}, socket), do: {:noreply, socket}
-  def handle_info({:throughput_update, eps}, socket), do: {:noreply, assign(socket, events_per_sec: eps)}
+
+  def handle_info({:throughput_update, eps}, socket),
+    do: {:noreply, assign(socket, events_per_sec: eps)}
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do
     total_agents = assigns.agents_online + assigns.agents_offline + assigns.agents_degraded
-    online_pct = if total_agents > 0, do: round(assigns.agents_online / total_agents * 100), else: 0
+
+    online_pct =
+      if total_agents > 0, do: round(assigns.agents_online / total_agents * 100), else: 0
+
     assigns = assign(assigns, total_agents: total_agents, online_pct: online_pct)
 
     ~H"""
     <div class="flex flex-col gap-5 h-full">
-
       <%!-- ── Metric strip ─────────────────────────────────────────────── --%>
       <div class="grid grid-cols-5 gap-3">
         <.metric
@@ -107,18 +122,28 @@ defmodule MurtaughWeb.DashboardLive do
 
       <%!-- ── Main grid ──────────────────────────────────────────────────── --%>
       <div class="flex gap-4 flex-1 min-h-0">
-
         <%!-- Left col: threats + DLP --%>
         <div class="flex flex-col gap-4 flex-1 min-w-0">
-
           <%!-- Threat table --%>
-          <div class="flex-1 flex flex-col rounded-lg overflow-hidden" style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="flex items-center justify-between px-4 py-3" style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+          <div
+            class="flex-1 flex flex-col rounded-lg overflow-hidden"
+            style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);"
+          >
+            <div
+              class="flex items-center justify-between px-4 py-3"
+              style="border-bottom: 1px solid rgba(255,255,255,0.05);"
+            >
               <div class="flex items-center gap-2">
                 <span class="w-1.5 h-1.5 rounded-full" style="background: #ef4444;"></span>
-                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">Recent Threats</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">
+                  Recent Threats
+                </span>
               </div>
-              <.link navigate={~p"/orgs/#{@org_slug}/threats"} style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.25); letter-spacing: 0.05em;" class="hover:text-white/50 transition-colors">
+              <.link
+                navigate={~p"/orgs/#{@org_slug}/threats"}
+                style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.25); letter-spacing: 0.05em;"
+                class="hover:text-white/50 transition-colors"
+              >
                 view all →
               </.link>
             </div>
@@ -127,27 +152,69 @@ defmodule MurtaughWeb.DashboardLive do
               <table class="w-full text-sm">
                 <thead>
                   <tr style="border-bottom: 1px solid rgba(255,255,255,0.04);">
-                    <th class="text-left px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);">Time</th>
-                    <th class="text-left px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);">Level</th>
-                    <th class="text-left px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);">Process</th>
-                    <th class="text-left px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);">Agent</th>
+                    <th
+                      class="text-left px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);"
+                    >
+                      Time
+                    </th>
+                    <th
+                      class="text-left px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);"
+                    >
+                      Level
+                    </th>
+                    <th
+                      class="text-left px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);"
+                    >
+                      Process
+                    </th>
+                    <th
+                      class="text-left px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.25);"
+                    >
+                      Agent
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr :for={threat <- @recent_threats}
+                  <tr
+                    :for={threat <- @recent_threats}
                     class="cursor-pointer transition-colors"
                     style="border-bottom: 1px solid rgba(255,255,255,0.03);"
                     phx-click={JS.navigate(~p"/orgs/#{@org_slug}/threats/#{threat.id}")}
                   >
-                    <td class="px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.3);">{threat.time}</td>
+                    <td
+                      class="px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.3);"
+                    >
+                      {threat.time}
+                    </td>
                     <td class="px-4 py-2.5">
                       <.threat_chip level={threat.level} />
                     </td>
-                    <td class="px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: rgba(255,255,255,0.75);">{threat.process}</td>
-                    <td class="px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.4);">{threat.agent}</td>
+                    <td
+                      class="px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: rgba(255,255,255,0.75);"
+                    >
+                      {threat.process}
+                    </td>
+                    <td
+                      class="px-4 py-2.5"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.4);"
+                    >
+                      {threat.agent}
+                    </td>
                   </tr>
                   <tr :if={@recent_threats == []}>
-                    <td colspan="4" class="px-4 py-8 text-center" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.2);">no threats detected</td>
+                    <td
+                      colspan="4"
+                      class="px-4 py-8 text-center"
+                      style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.2);"
+                    >
+                      no threats detected
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -155,32 +222,66 @@ defmodule MurtaughWeb.DashboardLive do
           </div>
 
           <%!-- DLP blocks --%>
-          <div class="rounded-lg overflow-hidden" style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="flex items-center justify-between px-4 py-3" style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+          <div
+            class="rounded-lg overflow-hidden"
+            style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);"
+          >
+            <div
+              class="flex items-center justify-between px-4 py-3"
+              style="border-bottom: 1px solid rgba(255,255,255,0.05);"
+            >
               <div class="flex items-center gap-2">
                 <span class="w-1.5 h-1.5 rounded-full" style="background: #f59e0b;"></span>
-                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">DLP Events</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">
+                  DLP Events
+                </span>
               </div>
-              <.link navigate={~p"/orgs/#{@org_slug}/dlp"} style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.25); letter-spacing: 0.05em;" class="hover:text-white/50 transition-colors">
+              <.link
+                navigate={~p"/orgs/#{@org_slug}/dlp"}
+                style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.25); letter-spacing: 0.05em;"
+                class="hover:text-white/50 transition-colors"
+              >
                 view all →
               </.link>
             </div>
             <table class="w-full text-sm">
               <tbody>
-                <tr :for={block <- @recent_dlp_blocks}
+                <tr
+                  :for={block <- @recent_dlp_blocks}
                   style="border-bottom: 1px solid rgba(255,255,255,0.03);"
                 >
-                  <td class="px-4 py-2.5 w-20" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.3);">{block.time}</td>
+                  <td
+                    class="px-4 py-2.5 w-20"
+                    style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.3);"
+                  >
+                    {block.time}
+                  </td>
                   <td class="px-4 py-2.5 w-16">
                     <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 3px; #{if block.action == "block", do: "background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3);", else: "background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3);"}"}>
                       {String.upcase(block.action)}
                     </span>
                   </td>
-                  <td class="px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: rgba(255,255,255,0.7);">{block.domain}</td>
-                  <td class="px-4 py-2.5" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.35);">{block.agent}</td>
+                  <td
+                    class="px-4 py-2.5"
+                    style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: rgba(255,255,255,0.7);"
+                  >
+                    {block.domain}
+                  </td>
+                  <td
+                    class="px-4 py-2.5"
+                    style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.35);"
+                  >
+                    {block.agent}
+                  </td>
                 </tr>
                 <tr :if={@recent_dlp_blocks == []}>
-                  <td colspan="4" class="px-4 py-6 text-center" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.2);">no dlp events</td>
+                  <td
+                    colspan="4"
+                    class="px-4 py-6 text-center"
+                    style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.2);"
+                  >
+                    no dlp events
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -189,64 +290,120 @@ defmodule MurtaughWeb.DashboardLive do
 
         <%!-- Right col: fleet health + activity --%>
         <div class="w-64 flex-shrink-0 flex flex-col gap-4">
-
           <%!-- Fleet health --%>
-          <div class="rounded-lg p-4" style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);">
+          <div
+            class="rounded-lg p-4"
+            style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);"
+          >
             <div class="flex items-center gap-2 mb-4">
               <span class="w-1.5 h-1.5 rounded-full" style="background: #22c55e;"></span>
-              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">Fleet Health</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">
+                Fleet Health
+              </span>
             </div>
 
             <%!-- Big online count --%>
             <div class="mb-4">
               <div class="flex items-baseline gap-2 mb-1">
-                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 2rem; font-weight: 600; color: #22c55e; line-height: 1;">{@online_pct}%</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 2rem; font-weight: 600; color: #22c55e; line-height: 1;">
+                  {@online_pct}%
+                </span>
                 <span style="font-size: 11px; color: rgba(255,255,255,0.3);">online</span>
               </div>
               <%!-- Progress bar --%>
-              <div class="w-full rounded-full overflow-hidden" style="height: 3px; background: rgba(255,255,255,0.08);">
-                <div class="h-full rounded-full transition-all duration-500" style={"width: #{@online_pct}%; background: linear-gradient(90deg, #16a34a, #4ade80);"}></div>
+              <div
+                class="w-full rounded-full overflow-hidden"
+                style="height: 3px; background: rgba(255,255,255,0.08);"
+              >
+                <div
+                  class="h-full rounded-full transition-all duration-500"
+                  style={"width: #{@online_pct}%; background: linear-gradient(90deg, #16a34a, #4ade80);"}
+                >
+                </div>
               </div>
             </div>
 
             <div class="space-y-2.5">
               <.fleet_row label="Online" count={@agents_online} color="#22c55e" total={@total_agents} />
-              <.fleet_row label="Degraded" count={@agents_degraded} color="#f59e0b" total={@total_agents} />
-              <.fleet_row label="Offline" count={@agents_offline} color="#ef4444" total={@total_agents} />
+              <.fleet_row
+                label="Degraded"
+                count={@agents_degraded}
+                color="#f59e0b"
+                total={@total_agents}
+              />
+              <.fleet_row
+                label="Offline"
+                count={@agents_offline}
+                color="#ef4444"
+                total={@total_agents}
+              />
             </div>
 
-            <.link navigate={~p"/orgs/#{@org_slug}/agents"} class="block mt-4 text-center py-1.5 rounded transition-colors" style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.05em; color: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.07);" >
+            <.link
+              navigate={~p"/orgs/#{@org_slug}/agents"}
+              class="block mt-4 text-center py-1.5 rounded transition-colors"
+              style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.05em; color: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.07);"
+            >
               all agents →
             </.link>
           </div>
 
           <%!-- Severity breakdown --%>
-          <div class="rounded-lg p-4" style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);">
+          <div
+            class="rounded-lg p-4"
+            style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);"
+          >
             <div class="flex items-center gap-2 mb-4">
               <span class="w-1.5 h-1.5 rounded-full" style="background: #ef4444;"></span>
-              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">Threat Breakdown</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">
+                Threat Breakdown
+              </span>
             </div>
             <div class="space-y-3">
-              <.severity_row label="MALICIOUS" value={Enum.count(@recent_threats, & &1.level == :malicious)} color="#ef4444" />
-              <.severity_row label="SUSPICIOUS" value={Enum.count(@recent_threats, & &1.level == :suspicious)} color="#f59e0b" />
+              <.severity_row
+                label="MALICIOUS"
+                value={Enum.count(@recent_threats, &(&1.level == :malicious))}
+                color="#ef4444"
+              />
+              <.severity_row
+                label="SUSPICIOUS"
+                value={Enum.count(@recent_threats, &(&1.level == :suspicious))}
+                color="#f59e0b"
+              />
               <.severity_row label="DLP BLOCKS" value={@dlp_blocks_today} color="#f59e0b" />
               <.severity_row label="DLP ALERTS" value={@dlp_alerts_today} color="#38bdf8" />
             </div>
           </div>
 
           <%!-- Stream indicator --%>
-          <div class="rounded-lg p-4 flex-1" style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);">
+          <div
+            class="rounded-lg p-4 flex-1"
+            style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);"
+          >
             <div class="flex items-center gap-2 mb-3">
               <span class="relative flex h-1.5 w-1.5">
-                <span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style="background: #38bdf8;"></span>
-                <span class="relative inline-flex rounded-full h-1.5 w-1.5" style="background: #38bdf8;"></span>
+                <span
+                  class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                  style="background: #38bdf8;"
+                >
+                </span>
+                <span
+                  class="relative inline-flex rounded-full h-1.5 w-1.5"
+                  style="background: #38bdf8;"
+                >
+                </span>
               </span>
-              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">Telemetry</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5);">
+                Telemetry
+              </span>
             </div>
             <div class="flex items-end gap-0.5" style="height: 36px;">
               {Phoenix.HTML.raw(sparkline_bars())}
             </div>
-            <p class="mt-2" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.25);">
+            <p
+              class="mt-2"
+              style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: rgba(255,255,255,0.25);"
+            >
               {@events_per_sec} <span style="color: rgba(255,255,255,0.15);">eps</span>
             </p>
           </div>
@@ -266,8 +423,11 @@ defmodule MurtaughWeb.DashboardLive do
 
   defp metric(assigns) do
     ~H"""
-    <div class="rounded-lg px-4 py-3.5" style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);">
-      <p style={"font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.12em; color: rgba(255,255,255,0.35); margin-bottom: 8px;"}>
+    <div
+      class="rounded-lg px-4 py-3.5"
+      style="background: #0c0f1a; border: 1px solid rgba(255,255,255,0.06);"
+    >
+      <p style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.12em; color: rgba(255,255,255,0.35); margin-bottom: 8px;">
         {@label}
       </p>
       <p style={"font-family: 'IBM Plex Mono', monospace; font-size: 1.75rem; font-weight: 600; line-height: 1; color: #{@accent}; margin-bottom: 6px;"}>
@@ -285,9 +445,15 @@ defmodule MurtaughWeb.DashboardLive do
   defp threat_chip(assigns) do
     {color, border, label} =
       case assigns.level do
-        :malicious -> {"rgba(239,68,68,0.15)", "rgba(239,68,68,0.4)", "MALICIOUS"}
-        :suspicious -> {"rgba(245,158,11,0.15)", "rgba(245,158,11,0.4)", "SUSPICIOUS"}
-        _ -> {"rgba(255,255,255,0.08)", "rgba(255,255,255,0.15)", String.upcase(to_string(assigns.level))}
+        :malicious ->
+          {"rgba(239,68,68,0.15)", "rgba(239,68,68,0.4)", "MALICIOUS"}
+
+        :suspicious ->
+          {"rgba(245,158,11,0.15)", "rgba(245,158,11,0.4)", "SUSPICIOUS"}
+
+        _ ->
+          {"rgba(255,255,255,0.08)", "rgba(255,255,255,0.15)",
+           String.upcase(to_string(assigns.level))}
       end
 
     text_color =
@@ -318,11 +484,22 @@ defmodule MurtaughWeb.DashboardLive do
     ~H"""
     <div>
       <div class="flex items-center justify-between mb-1">
-        <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #{@color}; opacity: 0.8;"}>{@label}</span>
-        <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #{@color};"}>{@count}</span>
+        <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #{@color}; opacity: 0.8;"}>
+          {@label}
+        </span>
+        <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #{@color};"}>
+          {@count}
+        </span>
       </div>
-      <div class="w-full rounded-full overflow-hidden" style="height: 2px; background: rgba(255,255,255,0.06);">
-        <div class="h-full rounded-full" style={"width: #{@pct}%; background: #{@color}; opacity: 0.7;"}></div>
+      <div
+        class="w-full rounded-full overflow-hidden"
+        style="height: 2px; background: rgba(255,255,255,0.06);"
+      >
+        <div
+          class="h-full rounded-full"
+          style={"width: #{@pct}%; background: #{@color}; opacity: 0.7;"}
+        >
+        </div>
       </div>
     </div>
     """
@@ -335,7 +512,7 @@ defmodule MurtaughWeb.DashboardLive do
   defp severity_row(assigns) do
     ~H"""
     <div class="flex items-center justify-between">
-      <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.08em; color: rgba(255,255,255,0.3);"}>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.08em; color: rgba(255,255,255,0.3);">
         {@label}
       </span>
       <span style={"font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; color: #{@color};"}>
@@ -353,6 +530,7 @@ defmodule MurtaughWeb.DashboardLive do
     Enum.map_join(heights, "", fn h ->
       pct = round(h / max_h * 100)
       opacity = 0.3 + pct / 100 * 0.7
+
       "<div style=\"flex: 1; background: #38bdf8; opacity: #{Float.round(opacity, 2)}; border-radius: 1px; height: #{pct}%; align-self: flex-end;\"></div>"
     end)
   end
@@ -364,7 +542,10 @@ defmodule MurtaughWeb.DashboardLive do
   defp load_dashboard_data(shard) do
     status_counts = Fleet.count_by_status(shard)
     threats_today = Detection.count_threats_today(shard)
-    recent_threats = shard |> Detection.list_threats(limit: 10) |> Enum.map(&Presenters.present_threat/1)
+
+    recent_threats =
+      shard |> Detection.list_threats(limit: 10) |> Enum.map(&Presenters.present_threat/1)
+
     recent_dlp = shard |> Dlp.recent_blocks(limit: 5) |> Enum.map(&Presenters.present_dlp_event/1)
     dlp_blocks = Dlp.count_blocks_today(shard)
 
@@ -384,9 +565,21 @@ defmodule MurtaughWeb.DashboardLive do
 
   defp placeholder_threats do
     [
-      %{id: "t1", time: "2m ago", level: :malicious, process: "powershell.exe", agent: "WS-NYC-042"},
+      %{
+        id: "t1",
+        time: "2m ago",
+        level: :malicious,
+        process: "powershell.exe",
+        agent: "WS-NYC-042"
+      },
       %{id: "t2", time: "8m ago", level: :suspicious, process: "curl", agent: "SRV-SF-003"},
-      %{id: "t3", time: "15m ago", level: :malicious, process: "mimikatz.exe", agent: "WS-NYC-017"},
+      %{
+        id: "t3",
+        time: "15m ago",
+        level: :malicious,
+        process: "mimikatz.exe",
+        agent: "WS-NYC-017"
+      },
       %{id: "t4", time: "22m ago", level: :suspicious, process: "python3", agent: "WS-LON-008"},
       %{id: "t5", time: "31m ago", level: :malicious, process: "rundll32.exe", agent: "WS-SF-022"}
     ]
@@ -396,7 +589,13 @@ defmodule MurtaughWeb.DashboardLive do
     [
       %{id: "d1", time: "5m ago", action: "block", domain: "paste.ee", agent: "WS-NYC-042"},
       %{id: "d2", time: "12m ago", action: "block", domain: "dropbox.com", agent: "WS-SF-019"},
-      %{id: "d3", time: "28m ago", action: "alert", domain: "drive.google.com", agent: "WS-LON-003"},
+      %{
+        id: "d3",
+        time: "28m ago",
+        action: "alert",
+        domain: "drive.google.com",
+        agent: "WS-LON-003"
+      },
       %{id: "d4", time: "44m ago", action: "block", domain: "mega.nz", agent: "SRV-NYC-001"}
     ]
   end

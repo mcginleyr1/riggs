@@ -9,18 +9,22 @@ defmodule MurtaughWeb.ThreatDetailLive do
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Murtaugh.PubSub, Murtaugh.Topics.threats(socket.assigns.current_org.id))
+      Phoenix.PubSub.subscribe(
+        Murtaugh.PubSub,
+        Murtaugh.Topics.threats(socket.assigns.current_org.id)
+      )
     end
 
     shard = socket.assigns[:current_shard]
     {threat, verdicts, timeline} = load_threat_data(shard, id)
 
-    {:ok, assign(socket,
-      page_title: "Threat",
-      threat: threat,
-      verdicts: verdicts,
-      timeline: timeline
-    )}
+    {:ok,
+     assign(socket,
+       page_title: "Threat",
+       threat: threat,
+       verdicts: verdicts,
+       timeline: timeline
+     )}
   end
 
   @impl true
@@ -44,6 +48,7 @@ defmodule MurtaughWeb.ThreatDetailLive do
       case Detection.update_threat_status(shard, threat.id, %{status: status}) do
         {:ok, updated} ->
           {:noreply, assign(socket, :threat, Presenters.present_threat(updated))}
+
         _ ->
           {:noreply, assign(socket, :threat, %{threat | status: status})}
       end
@@ -52,7 +57,8 @@ defmodule MurtaughWeb.ThreatDetailLive do
     end
   end
 
-  defp load_threat_data(nil, id), do: {placeholder_threat(id), placeholder_verdicts(), placeholder_timeline()}
+  defp load_threat_data(nil, id),
+    do: {placeholder_threat(id), placeholder_verdicts(), placeholder_timeline()}
 
   defp load_threat_data(shard, id) do
     threat_record = Detection.get_threat!(shard, id)
@@ -62,8 +68,9 @@ defmodule MurtaughWeb.ThreatDetailLive do
       (get_in(threat_record.verdicts, ["items"]) || [])
       |> Enum.map(&Presenters.present_verdict/1)
 
-    timeline = Detection.list_events(shard, agent_id: threat_record.agent_id, limit: 20)
-               |> Enum.map(&Presenters.present_event/1)
+    timeline =
+      Detection.list_events(shard, agent_id: threat_record.agent_id, limit: 20)
+      |> Enum.map(&Presenters.present_event/1)
 
     {threat, verdicts, timeline}
   rescue
@@ -118,13 +125,22 @@ defmodule MurtaughWeb.ThreatDetailLive do
 
       <%!-- Actions --%>
       <div class="flex gap-3">
-        <button phx-click="acknowledge" class="px-4 py-2 bg-yellow-700 hover:bg-yellow-600 text-white text-sm rounded-lg">
+        <button
+          phx-click="acknowledge"
+          class="px-4 py-2 bg-yellow-700 hover:bg-yellow-600 text-white text-sm rounded-lg"
+        >
           Acknowledge
         </button>
-        <button phx-click="resolve" class="px-4 py-2 bg-green-700 hover:bg-green-600 text-white text-sm rounded-lg">
+        <button
+          phx-click="resolve"
+          class="px-4 py-2 bg-green-700 hover:bg-green-600 text-white text-sm rounded-lg"
+        >
           Resolve
         </button>
-        <button phx-click="mark_false_positive" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded-lg">
+        <button
+          phx-click="mark_false_positive"
+          class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded-lg"
+        >
           False Positive
         </button>
       </div>
@@ -134,7 +150,10 @@ defmodule MurtaughWeb.ThreatDetailLive do
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-5">
           <h2 class="text-lg font-semibold text-white mb-4">Verdict Breakdown</h2>
           <div class="space-y-3">
-            <div :for={verdict <- @verdicts} class="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+            <div
+              :for={verdict <- @verdicts}
+              class="flex items-center justify-between p-3 bg-gray-900 rounded-lg"
+            >
               <div>
                 <p class="text-sm font-medium text-gray-200">{verdict.stage}</p>
                 <p class="text-xs text-gray-400 mt-0.5">{verdict.description}</p>
@@ -184,21 +203,71 @@ defmodule MurtaughWeb.ThreatDetailLive do
 
   defp placeholder_verdicts do
     [
-      %{stage: "Static Analysis", verdict: :suspicious, confidence: 68, description: "Encoded PowerShell command detected"},
-      %{stage: "Behavioral Engine", verdict: :malicious, confidence: 92, description: "Network callback after encoded execution"},
-      %{stage: "IOC Match", verdict: :malicious, confidence: 99, description: "C2 IP 185.220.101.42 matches threat intel"},
-      %{stage: "YARA Rules", verdict: :suspicious, confidence: 75, description: "Matched rule: CobaltStrike_Beacon_Encoded"}
+      %{
+        stage: "Static Analysis",
+        verdict: :suspicious,
+        confidence: 68,
+        description: "Encoded PowerShell command detected"
+      },
+      %{
+        stage: "Behavioral Engine",
+        verdict: :malicious,
+        confidence: 92,
+        description: "Network callback after encoded execution"
+      },
+      %{
+        stage: "IOC Match",
+        verdict: :malicious,
+        confidence: 99,
+        description: "C2 IP 185.220.101.42 matches threat intel"
+      },
+      %{
+        stage: "YARA Rules",
+        verdict: :suspicious,
+        confidence: 75,
+        description: "Matched rule: CobaltStrike_Beacon_Encoded"
+      }
     ]
   end
 
   defp placeholder_timeline do
     [
-      %{event_type: "process_create", severity: :medium, description: "powershell.exe spawned by explorer.exe", time: "09:57:58 UTC"},
-      %{event_type: "file_read", severity: :low, description: "Read C:\\Users\\admin\\payload.ps1", time: "09:57:59 UTC"},
-      %{event_type: "network_connect", severity: :high, description: "Outbound TCP to 185.220.101.42:443", time: "09:58:01 UTC"},
-      %{event_type: "dns_query", severity: :medium, description: "Resolved update-service.xyz -> 185.220.101.42", time: "09:58:00 UTC"},
-      %{event_type: "file_create", severity: :high, description: "Created C:\\Windows\\Temp\\beacon.dll", time: "09:58:03 UTC"},
-      %{event_type: "registry_set", severity: :critical, description: "Set persistence key in HKLM\\...\\Run", time: "09:58:05 UTC"}
+      %{
+        event_type: "process_create",
+        severity: :medium,
+        description: "powershell.exe spawned by explorer.exe",
+        time: "09:57:58 UTC"
+      },
+      %{
+        event_type: "file_read",
+        severity: :low,
+        description: "Read C:\\Users\\admin\\payload.ps1",
+        time: "09:57:59 UTC"
+      },
+      %{
+        event_type: "network_connect",
+        severity: :high,
+        description: "Outbound TCP to 185.220.101.42:443",
+        time: "09:58:01 UTC"
+      },
+      %{
+        event_type: "dns_query",
+        severity: :medium,
+        description: "Resolved update-service.xyz -> 185.220.101.42",
+        time: "09:58:00 UTC"
+      },
+      %{
+        event_type: "file_create",
+        severity: :high,
+        description: "Created C:\\Windows\\Temp\\beacon.dll",
+        time: "09:58:03 UTC"
+      },
+      %{
+        event_type: "registry_set",
+        severity: :critical,
+        description: "Set persistence key in HKLM\\...\\Run",
+        time: "09:58:05 UTC"
+      }
     ]
   end
 end

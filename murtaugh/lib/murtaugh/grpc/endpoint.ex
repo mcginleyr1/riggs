@@ -4,5 +4,5 @@ defmodule Murtaugh.Grpc.Endpoint do
 
   intercept GRPC.Server.Interceptors.Logger
   intercept Murtaugh.Grpc.Interceptors.AgentAuth
-  run Murtaugh.Grpc.AgentServiceImpl
+  run(Murtaugh.Grpc.AgentServiceImpl)
 end

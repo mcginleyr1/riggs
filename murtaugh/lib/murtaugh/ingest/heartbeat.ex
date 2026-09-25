@@ -22,7 +22,12 @@ defmodule Murtaugh.Ingest.Heartbeat do
 
           if count > 0 do
             agent = hd(results)
-            Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.fleet(agent.org_node_id), {:agent_status_change, agent})
+
+            Phoenix.PubSub.broadcast(
+              Murtaugh.PubSub,
+              Murtaugh.Topics.fleet(agent.org_node_id),
+              {:agent_status_change, agent}
+            )
           end
 
           :ok

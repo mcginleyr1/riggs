@@ -164,7 +164,11 @@ defmodule Mix.Tasks.Sim.Agent do
   defp send_threat(channel, agent_id) do
     process = Enum.random(["powershell.exe", "cmd.exe", "python3", "bash", "curl"])
     level = Enum.random(["suspicious", "malicious"])
-    score = if level == "malicious", do: 0.85 + :rand.uniform() * 0.15, else: 0.4 + :rand.uniform() * 0.45
+
+    score =
+      if level == "malicious",
+        do: 0.85 + :rand.uniform() * 0.15,
+        else: 0.4 + :rand.uniform() * 0.45
 
     report = %Riggs.V1.ThreatReport{
       agent_id: agent_id,
@@ -193,7 +197,8 @@ defmodule Mix.Tasks.Sim.Agent do
 
   defp send_dlp(channel, agent_id) do
     domains = ["paste.ee", "dropbox.com", "mega.nz", "drive.google.com", "anonfiles.com"]
-    actions = ["block", "block", "block", "alert"]  # 3:1 ratio
+    # 3:1 ratio
+    actions = ["block", "block", "block", "alert"]
 
     report = %Riggs.V1.DlpEventReport{
       agent_id: agent_id,

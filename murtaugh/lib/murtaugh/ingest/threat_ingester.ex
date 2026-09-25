@@ -39,7 +39,12 @@ defmodule Murtaugh.Ingest.ThreatIngester do
 
           case TenantRepo.insert(Threat.changeset(%Threat{}, attrs)) do
             {:ok, threat} ->
-              Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.threats(org_node_id), {:new_threat, threat})
+              Phoenix.PubSub.broadcast(
+                Murtaugh.PubSub,
+                Murtaugh.Topics.threats(org_node_id),
+                {:new_threat, threat}
+              )
+
               {:ok, threat.id}
 
             {:error, changeset} ->
@@ -54,6 +59,7 @@ defmodule Murtaugh.Ingest.ThreatIngester do
 
   defp coerce_uuid(nil), do: Ecto.UUID.generate()
   defp coerce_uuid(""), do: Ecto.UUID.generate()
+
   defp coerce_uuid(s) do
     case Ecto.UUID.cast(s) do
       {:ok, uuid} -> uuid

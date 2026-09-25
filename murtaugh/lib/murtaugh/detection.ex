@@ -122,7 +122,9 @@ defmodule Murtaugh.Detection do
   defp maybe_filter_severity_str(query, sev), do: where(query, [e], e.severity == ^sev)
 
   defp maybe_filter_since(query, nil), do: query
-  defp maybe_filter_since(query, %DateTime{} = since), do: where(query, [e], e.timestamp >= ^since)
+
+  defp maybe_filter_since(query, %DateTime{} = since),
+    do: where(query, [e], e.timestamp >= ^since)
 
   defp maybe_search_events(query, term) when term in [nil, ""], do: query
 

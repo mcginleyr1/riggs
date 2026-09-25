@@ -26,7 +26,12 @@ defmodule Murtaugh.Archive.Exporter do
           {:ok, map()} | {:error, term()}
   def export_table(shard, table_name, year_month) do
     partition_name = partition_name(table_name, year_month)
-    tmp_path = Path.join(System.tmp_dir!(), "murtaugh_export_#{partition_name}_#{System.unique_integer([:positive])}.csv")
+
+    tmp_path =
+      Path.join(
+        System.tmp_dir!(),
+        "murtaugh_export_#{partition_name}_#{System.unique_integer([:positive])}.csv"
+      )
 
     try do
       with {:ok, row_count} <- export_to_csv(shard, partition_name, tmp_path),
@@ -35,7 +40,8 @@ defmodule Murtaugh.Archive.Exporter do
            :ok <- Storage.put(key, body, content_type: "text/csv"),
            checksum = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower),
            file_size = byte_size(body),
-           {:ok, _manifest} <- record_manifest(shard, table_name, year_month, key, file_size, row_count, checksum) do
+           {:ok, _manifest} <-
+             record_manifest(shard, table_name, year_month, key, file_size, row_count, checksum) do
         Logger.info("Archived #{partition_name}: #{row_count} rows, #{file_size} bytes -> #{key}")
         {:ok, %{key: key, size: file_size, rows: row_count}}
       end
@@ -46,7 +52,11 @@ defmodule Murtaugh.Archive.Exporter do
 
   defp export_to_csv(shard, partition_name, tmp_path) do
     Tenancy.with_tenant(shard, fn ->
-      case Ecto.Adapters.SQL.query(Murtaugh.TenantRepo, "SELECT * FROM #{partition_name} ORDER BY 1", []) do
+      case Ecto.Adapters.SQL.query(
+             Murtaugh.TenantRepo,
+             "SELECT * FROM #{partition_name} ORDER BY 1",
+             []
+           ) do
         {:ok, %{columns: columns, rows: rows, num_rows: num_rows}} ->
           file = File.open!(tmp_path, [:write, :utf8])
 

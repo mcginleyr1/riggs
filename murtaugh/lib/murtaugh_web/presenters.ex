@@ -122,13 +122,26 @@ defmodule MurtaughWeb.Presenters do
 
   defp event_description(%{event_type: type, process_name: name, payload: payload}) do
     case type do
-      "process_create" -> "#{name} spawned (PID #{payload["pid"] || "?"})"
-      "network_connect" -> "Connection to #{payload["dst_ip"] || "?"}:#{payload["dst_port"] || "?"}"
-      "file_create" -> "Created #{payload["path"] || "file"}"
-      "file_read" -> "Read #{payload["path"] || "file"}"
-      "dns_query" -> "DNS: #{payload["domain"] || "?"}"
-      "registry_set" -> "Registry: #{payload["key"] || "?"}"
-      _ -> "#{type}: #{name}"
+      "process_create" ->
+        "#{name} spawned (PID #{payload["pid"] || "?"})"
+
+      "network_connect" ->
+        "Connection to #{payload["dst_ip"] || "?"}:#{payload["dst_port"] || "?"}"
+
+      "file_create" ->
+        "Created #{payload["path"] || "file"}"
+
+      "file_read" ->
+        "Read #{payload["path"] || "file"}"
+
+      "dns_query" ->
+        "DNS: #{payload["domain"] || "?"}"
+
+      "registry_set" ->
+        "Registry: #{payload["key"] || "?"}"
+
+      _ ->
+        "#{type}: #{name}"
     end
   end
 

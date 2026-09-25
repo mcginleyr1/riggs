@@ -45,7 +45,8 @@ defmodule Murtaugh.Archive do
     %Manifest{}
     |> Manifest.changeset(attrs)
     |> Repo.insert(
-      on_conflict: {:replace, [:object_key, :file_size_bytes, :row_count, :checksum, :status, :updated_at]},
+      on_conflict:
+        {:replace, [:object_key, :file_size_bytes, :row_count, :checksum, :status, :updated_at]},
       conflict_target: [:tenant_shard_id, :table_name, :year_month]
     )
   end

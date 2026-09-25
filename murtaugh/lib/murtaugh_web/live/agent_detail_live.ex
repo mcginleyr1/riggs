@@ -15,12 +15,13 @@ defmodule MurtaughWeb.AgentDetailLive do
     shard = socket.assigns[:current_shard]
     {agent, recent_events, active_threats} = load_agent_data(shard, id)
 
-    {:ok, assign(socket,
-      page_title: agent.hostname,
-      agent: agent,
-      recent_events: recent_events,
-      active_threats: active_threats
-    )}
+    {:ok,
+     assign(socket,
+       page_title: agent.hostname,
+       agent: agent,
+       recent_events: recent_events,
+       active_threats: active_threats
+     )}
   end
 
   @impl true
@@ -33,12 +34,22 @@ defmodule MurtaughWeb.AgentDetailLive do
   def handle_info({:command_ack, _ack}, socket), do: {:noreply, socket}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  defp load_agent_data(nil, id), do: {placeholder_agent(id), placeholder_events(), placeholder_threats()}
+  defp load_agent_data(nil, id),
+    do: {placeholder_agent(id), placeholder_events(), placeholder_threats()}
 
   defp load_agent_data(shard, id) do
     agent = shard |> Fleet.get_agent!(id) |> Presenters.present_agent_detail()
-    events = shard |> Detection.list_events(agent_id: id, limit: 10) |> Enum.map(&Presenters.present_event/1)
-    threats = shard |> Detection.list_threats(agent_id: id, status: "open", limit: 10) |> Enum.map(&Presenters.present_threat/1)
+
+    events =
+      shard
+      |> Detection.list_events(agent_id: id, limit: 10)
+      |> Enum.map(&Presenters.present_event/1)
+
+    threats =
+      shard
+      |> Detection.list_threats(agent_id: id, status: "open", limit: 10)
+      |> Enum.map(&Presenters.present_threat/1)
+
     {agent, events, threats}
   rescue
     _ -> {placeholder_agent(id), placeholder_events(), placeholder_threats()}
@@ -47,10 +58,11 @@ defmodule MurtaughWeb.AgentDetailLive do
   defp update_agent_health(agent, health) when is_nil(health), do: agent
 
   defp update_agent_health(agent, health) do
-    %{agent |
-      uptime_secs: health.uptime_secs,
-      pipeline_latency_us: health.pipeline_latency_us,
-      sensor_healthy: health.sensor_healthy
+    %{
+      agent
+      | uptime_secs: health.uptime_secs,
+        pipeline_latency_us: health.pipeline_latency_us,
+        sensor_healthy: health.sensor_healthy
     }
   end
 
@@ -101,7 +113,10 @@ defmodule MurtaughWeb.AgentDetailLive do
             No active threats
           </div>
           <div class="space-y-2">
-            <div :for={threat <- @active_threats} class="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+            <div
+              :for={threat <- @active_threats}
+              class="flex items-center justify-between p-3 bg-gray-900 rounded-lg"
+            >
               <div>
                 <p class="text-sm font-medium text-gray-200">{threat.process}</p>
                 <p class="text-xs text-gray-400">{threat.summary}</p>
@@ -115,7 +130,10 @@ defmodule MurtaughWeb.AgentDetailLive do
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-5">
           <h2 class="text-lg font-semibold text-white mb-4">Recent Events</h2>
           <div class="space-y-2">
-            <div :for={event <- @recent_events} class="flex items-center gap-3 p-3 bg-gray-900 rounded-lg">
+            <div
+              :for={event <- @recent_events}
+              class="flex items-center gap-3 p-3 bg-gray-900 rounded-lg"
+            >
               <.severity_badge severity={event.severity} />
               <div class="flex-1 min-w-0">
                 <p class="text-sm text-gray-200 truncate">{event.description}</p>
@@ -144,7 +162,12 @@ defmodule MurtaughWeb.AgentDetailLive do
 
   defp placeholder_threats do
     [
-      %{id: "t1", level: :malicious, process: "powershell.exe", summary: "Encoded command execution"},
+      %{
+        id: "t1",
+        level: :malicious,
+        process: "powershell.exe",
+        summary: "Encoded command execution"
+      },
       %{id: "t2", level: :suspicious, process: "cmd.exe", summary: "Unusual child process chain"}
     ]
   end
@@ -152,7 +175,11 @@ defmodule MurtaughWeb.AgentDetailLive do
   defp placeholder_events do
     [
       %{severity: :high, description: "Outbound TCP to 185.220.101.42:443", time: "30s ago"},
-      %{severity: :medium, description: "powershell.exe spawned by explorer.exe", time: "32s ago"},
+      %{
+        severity: :medium,
+        description: "powershell.exe spawned by explorer.exe",
+        time: "32s ago"
+      },
       %{severity: :low, description: "File read: C:\\Users\\admin\\payload.ps1", time: "33s ago"},
       %{severity: :info, description: "DNS query: update-service.xyz", time: "34s ago"},
       %{severity: :high, description: "Registry persistence key set", time: "35s ago"}

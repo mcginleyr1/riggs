@@ -29,7 +29,9 @@ defmodule Murtaugh.Grpc.AgentServiceImpl do
         raise GRPC.RPCError, status: :unauthenticated, message: "invalid enrollment token"
 
       {:error, :no_shard} ->
-        raise GRPC.RPCError, status: :failed_precondition, message: "no tenant shard configured for org"
+        raise GRPC.RPCError,
+          status: :failed_precondition,
+          message: "no tenant shard configured for org"
 
       {:error, reason} ->
         Logger.error("Enrollment failed: #{inspect(reason)}")

@@ -17,7 +17,9 @@ defmodule Murtaugh.Ingest.StorylineIngester do
                   {:ok, tree} -> tree
                   _ -> %{}
                 end
-              _ -> %{}
+
+              _ ->
+                %{}
             end
 
           row = %{
@@ -37,7 +39,9 @@ defmodule Murtaugh.Ingest.StorylineIngester do
           }
 
           TenantRepo.insert_all("storylines", [row],
-            on_conflict: {:replace, [:status, :max_severity, :threat_count, :event_count, :last_seen, :process_tree]},
+            on_conflict:
+              {:replace,
+               [:status, :max_severity, :threat_count, :event_count, :last_seen, :process_tree]},
             conflict_target: [:id]
           )
 

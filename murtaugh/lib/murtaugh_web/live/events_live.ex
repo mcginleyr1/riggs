@@ -165,7 +165,12 @@ defmodule MurtaughWeb.EventsLive do
   end
 
   defp time_options do
-    [{"1h", "Last Hour"}, {"24h", "Last 24 Hours"}, {"7d", "Last 7 Days"}, {"30d", "Last 30 Days"}]
+    [
+      {"1h", "Last Hour"},
+      {"24h", "Last 24 Hours"},
+      {"7d", "Last 7 Days"},
+      {"30d", "Last 30 Days"}
+    ]
   end
 
   @impl true
@@ -189,23 +194,45 @@ defmodule MurtaughWeb.EventsLive do
       </form>
 
       <%!-- Filter bar --%>
-      <form phx-change="filter" class="flex flex-wrap items-center gap-3 bg-gray-800 border border-gray-700 rounded-xl p-4">
+      <form
+        phx-change="filter"
+        class="flex flex-wrap items-center gap-3 bg-gray-800 border border-gray-700 rounded-xl p-4"
+      >
         <div>
           <label class="text-xs text-gray-400 block mb-1">Event Type</label>
-          <select name="type" class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
-            <option :for={{val, label} <- type_options()} value={val} selected={@filter_type == val}>{label}</option>
+          <select
+            name="type"
+            class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option :for={{val, label} <- type_options()} value={val} selected={@filter_type == val}>
+              {label}
+            </option>
           </select>
         </div>
         <div>
           <label class="text-xs text-gray-400 block mb-1">Severity</label>
-          <select name="severity" class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
-            <option :for={{val, label} <- severity_options()} value={val} selected={@filter_severity == val}>{label}</option>
+          <select
+            name="severity"
+            class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option
+              :for={{val, label} <- severity_options()}
+              value={val}
+              selected={@filter_severity == val}
+            >
+              {label}
+            </option>
           </select>
         </div>
         <div>
           <label class="text-xs text-gray-400 block mb-1">Time Range</label>
-          <select name="time" class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
-            <option :for={{val, label} <- time_options()} value={val} selected={@filter_time == val}>{label}</option>
+          <select
+            name="time"
+            class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option :for={{val, label} <- time_options()} value={val} selected={@filter_time == val}>
+              {label}
+            </option>
           </select>
         </div>
         <div class="ml-auto text-xs text-gray-400 self-end pb-1">
@@ -230,7 +257,9 @@ defmodule MurtaughWeb.EventsLive do
             </thead>
             <tbody>
               <tr :if={@events == []}>
-                <td colspan="7" class="py-8 text-center text-gray-500">No events match these filters.</td>
+                <td colspan="7" class="py-8 text-center text-gray-500">
+                  No events match these filters.
+                </td>
               </tr>
               <%= for event <- @events do %>
                 <tr
@@ -239,7 +268,11 @@ defmodule MurtaughWeb.EventsLive do
                   phx-value-id={event.id}
                 >
                   <td class="py-3 px-2 text-gray-500 text-center">
-                    <span class={if @expanded_id == event.id, do: "hero-chevron-down size-4", else: "hero-chevron-right size-4"} />
+                    <span class={
+                      if @expanded_id == event.id,
+                        do: "hero-chevron-down size-4",
+                        else: "hero-chevron-right size-4"
+                    } />
                   </td>
                   <td class="py-3 px-4 text-gray-400 whitespace-nowrap">{event.time}</td>
                   <td class="py-3 px-4">
@@ -293,22 +326,95 @@ defmodule MurtaughWeb.EventsLive do
 
   defp placeholder_events do
     [
-      %{id: "e1", time: "09:58:05", event_type: "registry_set", severity: :critical, process: "powershell.exe", description: "Set persistence key in HKLM\\...\\Run", agent: "WS-NYC-042",
-        payload: %{key: "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", value: "beacon.dll", pid: 4832}},
-      %{id: "e2", time: "09:58:03", event_type: "file_create", severity: :high, process: "powershell.exe", description: "Created C:\\Windows\\Temp\\beacon.dll", agent: "WS-NYC-042",
-        payload: %{path: "C:\\Windows\\Temp\\beacon.dll", size: 245760, sha256: "a1b2c3d4..."}},
-      %{id: "e3", time: "09:58:01", event_type: "network_connect", severity: :high, process: "powershell.exe", description: "Outbound TCP to 185.220.101.42:443", agent: "WS-NYC-042",
-        payload: %{dst_ip: "185.220.101.42", dst_port: 443, protocol: "tcp", bytes_sent: 1024}},
-      %{id: "e4", time: "09:58:00", event_type: "dns_query", severity: :medium, process: "powershell.exe", description: "Resolved update-service.xyz", agent: "WS-NYC-042",
-        payload: %{domain: "update-service.xyz", answer: "185.220.101.42", query_type: "A"}},
-      %{id: "e5", time: "09:57:59", event_type: "file_read", severity: :low, process: "powershell.exe", description: "Read C:\\Users\\admin\\payload.ps1", agent: "WS-NYC-042",
-        payload: %{path: "C:\\Users\\admin\\payload.ps1", size: 4096}},
-      %{id: "e6", time: "09:57:58", event_type: "process_create", severity: :medium, process: "powershell.exe", description: "powershell.exe spawned by explorer.exe", agent: "WS-NYC-042",
-        payload: %{pid: 4832, ppid: 1204, cmdline: "powershell.exe -enc aQBlAHgA...", user: "CORP\\admin"}},
-      %{id: "e7", time: "09:55:12", event_type: "network_connect", severity: :info, process: "svchost.exe", description: "NTP sync to time.windows.com", agent: "WS-NYC-042",
-        payload: %{dst_ip: "20.43.94.199", dst_port: 123, protocol: "udp"}},
-      %{id: "e8", time: "09:54:01", event_type: "process_create", severity: :info, process: "notepad.exe", description: "notepad.exe spawned by explorer.exe", agent: "WS-NYC-042",
-        payload: %{pid: 5120, ppid: 1204, cmdline: "notepad.exe", user: "CORP\\admin"}}
+      %{
+        id: "e1",
+        time: "09:58:05",
+        event_type: "registry_set",
+        severity: :critical,
+        process: "powershell.exe",
+        description: "Set persistence key in HKLM\\...\\Run",
+        agent: "WS-NYC-042",
+        payload: %{
+          key: "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+          value: "beacon.dll",
+          pid: 4832
+        }
+      },
+      %{
+        id: "e2",
+        time: "09:58:03",
+        event_type: "file_create",
+        severity: :high,
+        process: "powershell.exe",
+        description: "Created C:\\Windows\\Temp\\beacon.dll",
+        agent: "WS-NYC-042",
+        payload: %{path: "C:\\Windows\\Temp\\beacon.dll", size: 245_760, sha256: "a1b2c3d4..."}
+      },
+      %{
+        id: "e3",
+        time: "09:58:01",
+        event_type: "network_connect",
+        severity: :high,
+        process: "powershell.exe",
+        description: "Outbound TCP to 185.220.101.42:443",
+        agent: "WS-NYC-042",
+        payload: %{dst_ip: "185.220.101.42", dst_port: 443, protocol: "tcp", bytes_sent: 1024}
+      },
+      %{
+        id: "e4",
+        time: "09:58:00",
+        event_type: "dns_query",
+        severity: :medium,
+        process: "powershell.exe",
+        description: "Resolved update-service.xyz",
+        agent: "WS-NYC-042",
+        payload: %{domain: "update-service.xyz", answer: "185.220.101.42", query_type: "A"}
+      },
+      %{
+        id: "e5",
+        time: "09:57:59",
+        event_type: "file_read",
+        severity: :low,
+        process: "powershell.exe",
+        description: "Read C:\\Users\\admin\\payload.ps1",
+        agent: "WS-NYC-042",
+        payload: %{path: "C:\\Users\\admin\\payload.ps1", size: 4096}
+      },
+      %{
+        id: "e6",
+        time: "09:57:58",
+        event_type: "process_create",
+        severity: :medium,
+        process: "powershell.exe",
+        description: "powershell.exe spawned by explorer.exe",
+        agent: "WS-NYC-042",
+        payload: %{
+          pid: 4832,
+          ppid: 1204,
+          cmdline: "powershell.exe -enc aQBlAHgA...",
+          user: "CORP\\admin"
+        }
+      },
+      %{
+        id: "e7",
+        time: "09:55:12",
+        event_type: "network_connect",
+        severity: :info,
+        process: "svchost.exe",
+        description: "NTP sync to time.windows.com",
+        agent: "WS-NYC-042",
+        payload: %{dst_ip: "20.43.94.199", dst_port: 123, protocol: "udp"}
+      },
+      %{
+        id: "e8",
+        time: "09:54:01",
+        event_type: "process_create",
+        severity: :info,
+        process: "notepad.exe",
+        description: "notepad.exe spawned by explorer.exe",
+        agent: "WS-NYC-042",
+        payload: %{pid: 5120, ppid: 1204, cmdline: "notepad.exe", user: "CORP\\admin"}
+      }
     ]
   end
 end

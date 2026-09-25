@@ -17,7 +17,12 @@ defmodule Murtaugh.Ingest.EventIngester do
               conflict_target: [:id]
             )
 
-          Phoenix.PubSub.broadcast(Murtaugh.PubSub, Murtaugh.Topics.throughput(org_node_id), {:events_ingested, count})
+          Phoenix.PubSub.broadcast(
+            Murtaugh.PubSub,
+            Murtaugh.Topics.throughput(org_node_id),
+            {:events_ingested, count}
+          )
+
           {:ok, count}
         end)
 
@@ -31,14 +36,20 @@ defmodule Murtaugh.Ingest.EventIngester do
 
     payload =
       case event[:payload_json] do
-        nil -> %{}
-        "" -> %{}
+        nil ->
+          %{}
+
+        "" ->
+          %{}
+
         bin when is_binary(bin) ->
           case Jason.decode(bin) do
             {:ok, map} -> map
             _ -> %{}
           end
-        map when is_map(map) -> map
+
+        map when is_map(map) ->
+          map
       end
 
     %{

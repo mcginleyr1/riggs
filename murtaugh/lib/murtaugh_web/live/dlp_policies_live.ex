@@ -3,11 +3,12 @@ defmodule MurtaughWeb.DlpPoliciesLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket,
-      page_title: "DLP Policies",
-      policies: placeholder_policies(),
-      selected_policy: nil
-    )}
+    {:ok,
+     assign(socket,
+       page_title: "DLP Policies",
+       policies: placeholder_policies(),
+       selected_policy: nil
+     )}
   end
 
   @impl true
@@ -26,7 +27,10 @@ defmodule MurtaughWeb.DlpPoliciesLive do
     <div class="space-y-6">
       <div class="flex items-center justify-between">
         <div>
-          <.link navigate={~p"/orgs/#{@org_slug}/dlp"} class="text-gray-400 hover:text-gray-200 text-sm">
+          <.link
+            navigate={~p"/orgs/#{@org_slug}/dlp"}
+            class="text-gray-400 hover:text-gray-200 text-sm"
+          >
             <span class="hero-arrow-left size-4" /> Back to DLP
           </.link>
           <h1 class="text-2xl font-bold text-white mt-1">DLP Policies</h1>
@@ -105,21 +109,61 @@ defmodule MurtaughWeb.DlpPoliciesLive do
 
   defp placeholder_policies do
     [
-      %{id: "p1", name: "No Paste Sites", type: "domain_block", version: "3", agent_count: 142, active: true,
+      %{
+        id: "p1",
+        name: "No Paste Sites",
+        type: "domain_block",
+        version: "3",
+        agent_count: 142,
+        active: true,
         description: "Blocks uploads to paste sites and anonymous file sharing services.",
-        content: "[policy]\nname = \"No Paste Sites\"\naction = \"block\"\n\n[[rules]]\ndomains = [\n  \"paste.ee\",\n  \"pastebin.com\",\n  \"anonfiles.com\",\n  \"transfer.sh\"\n]"},
-      %{id: "p2", name: "No Cloud Storage", type: "domain_block", version: "5", agent_count: 142, active: true,
+        content:
+          "[policy]\nname = \"No Paste Sites\"\naction = \"block\"\n\n[[rules]]\ndomains = [\n  \"paste.ee\",\n  \"pastebin.com\",\n  \"anonfiles.com\",\n  \"transfer.sh\"\n]"
+      },
+      %{
+        id: "p2",
+        name: "No Cloud Storage",
+        type: "domain_block",
+        version: "5",
+        agent_count: 142,
+        active: true,
         description: "Blocks file uploads to consumer cloud storage providers.",
-        content: "[policy]\nname = \"No Cloud Storage\"\naction = \"block\"\n\n[[rules]]\ndomains = [\n  \"dropbox.com\",\n  \"mega.nz\",\n  \"box.com\",\n  \"onedrive.live.com\"\n]"},
-      %{id: "p3", name: "Monitor Cloud Storage", type: "domain_alert", version: "2", agent_count: 45, active: true,
+        content:
+          "[policy]\nname = \"No Cloud Storage\"\naction = \"block\"\n\n[[rules]]\ndomains = [\n  \"dropbox.com\",\n  \"mega.nz\",\n  \"box.com\",\n  \"onedrive.live.com\"\n]"
+      },
+      %{
+        id: "p3",
+        name: "Monitor Cloud Storage",
+        type: "domain_alert",
+        version: "2",
+        agent_count: 45,
+        active: true,
         description: "Alerts on file uploads to approved cloud storage without blocking.",
-        content: "[policy]\nname = \"Monitor Cloud Storage\"\naction = \"alert\"\n\n[[rules]]\ndomains = [\n  \"drive.google.com\",\n  \"sharepoint.com\"\n]"},
-      %{id: "p4", name: "Monitor Messaging", type: "domain_alert", version: "1", agent_count: 142, active: true,
+        content:
+          "[policy]\nname = \"Monitor Cloud Storage\"\naction = \"alert\"\n\n[[rules]]\ndomains = [\n  \"drive.google.com\",\n  \"sharepoint.com\"\n]"
+      },
+      %{
+        id: "p4",
+        name: "Monitor Messaging",
+        type: "domain_alert",
+        version: "1",
+        agent_count: 142,
+        active: true,
         description: "Alerts on file uploads via messaging platforms.",
-        content: "[policy]\nname = \"Monitor Messaging\"\naction = \"alert\"\n\n[[rules]]\ndomains = [\"slack.com\", \"teams.microsoft.com\"]"},
-      %{id: "p5", name: "Block PII Upload", type: "content_scan", version: "1", agent_count: 0, active: false,
+        content:
+          "[policy]\nname = \"Monitor Messaging\"\naction = \"alert\"\n\n[[rules]]\ndomains = [\"slack.com\", \"teams.microsoft.com\"]"
+      },
+      %{
+        id: "p5",
+        name: "Block PII Upload",
+        type: "content_scan",
+        version: "1",
+        agent_count: 0,
+        active: false,
         description: "Scans outbound content for PII patterns (SSN, credit card, etc).",
-        content: "[policy]\nname = \"Block PII Upload\"\naction = \"block\"\n\n[[rules.patterns]]\nname = \"SSN\"\nregex = \"\\\\d{3}-\\\\d{2}-\\\\d{4}\""}
+        content:
+          "[policy]\nname = \"Block PII Upload\"\naction = \"block\"\n\n[[rules.patterns]]\nname = \"SSN\"\nregex = \"\\\\d{3}-\\\\d{2}-\\\\d{4}\""
+      }
     ]
   end
 end
