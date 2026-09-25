@@ -71,6 +71,7 @@ pub fn enumerate_packages() -> Vec<InstalledPackage> {
 }
 
 /// Parse Homebrew Cellar directory to find installed packages.
+#[cfg(target_os = "macos")]
 fn enumerate_homebrew() -> Vec<InstalledPackage> {
     let mut packages = Vec::new();
 
@@ -114,6 +115,7 @@ fn enumerate_homebrew() -> Vec<InstalledPackage> {
 }
 
 /// Scan /Applications for macOS app bundles and extract versions from Info.plist.
+#[cfg(target_os = "macos")]
 fn enumerate_macos_apps() -> Vec<InstalledPackage> {
     let mut packages = Vec::new();
     let app_dirs = ["/Applications"];
@@ -164,6 +166,7 @@ fn enumerate_macos_apps() -> Vec<InstalledPackage> {
 }
 
 /// Read CFBundleShortVersionString from an XML plist file.
+#[cfg(target_os = "macos")]
 fn read_plist_version(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
 
@@ -192,7 +195,7 @@ fn enumerate_dpkg() -> Vec<InstalledPackage> {
     let content = match std::fs::read_to_string(status_path) {
         Ok(c) => c,
         Err(e) => {
-            warn!("Failed to read dpkg status: {e}");
+            tracing::warn!("Failed to read dpkg status: {e}");
             return packages;
         }
     };
