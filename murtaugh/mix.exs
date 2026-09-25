@@ -72,8 +72,9 @@ defmodule Murtaugh.MixProject do
       {:sweet_xml, "~> 0.7"},
       {:csv, "~> 3.2"},
       # gRPC server for agent communication
-      {:grpc, "~> 0.9"},
-      {:protobuf, "~> 0.16.1"},
+      {:grpc, "~> 1.0"},
+      {:grpc_server, "~> 1.0"},
+      {:protobuf, "~> 0.17"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end

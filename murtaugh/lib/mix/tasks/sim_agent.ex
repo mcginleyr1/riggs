@@ -38,7 +38,7 @@ defmodule Mix.Tasks.Sim.Agent do
 
     Logger.info("Sim agent connecting to #{host}:#{port}")
 
-    {:ok, channel} = GRPC.Stub.connect("#{host}:#{port}")
+    {:ok, channel} = GRPC.Stub.connect("#{host}:#{port}", adapter: GRPC.Client.Adapters.Mint)
 
     agent_id = enroll(channel, token)
     Logger.info("Enrolled as agent #{agent_id}")
