@@ -29,7 +29,7 @@ defmodule Murtaugh.Ingest.VulnIngester do
             end)
 
           {count, _} =
-            TenantRepo.insert_all("vulnerabilities", rows,
+            TenantRepo.insert_all(Murtaugh.Vuln.Finding, rows,
               on_conflict:
                 {:replace,
                  [:package_version, :cvss_score, :severity, :fixed_version, :scan_timestamp]},

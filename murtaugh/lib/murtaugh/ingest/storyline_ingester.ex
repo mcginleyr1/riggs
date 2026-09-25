@@ -26,7 +26,7 @@ defmodule Murtaugh.Ingest.StorylineIngester do
             process_tree: decode_tree(update[:process_tree_json])
           }
 
-          TenantRepo.insert_all("storylines", [row],
+          TenantRepo.insert_all(Murtaugh.Detection.Storyline, [row],
             on_conflict:
               {:replace,
                [:status, :max_severity, :threat_count, :event_count, :last_seen, :process_tree]},

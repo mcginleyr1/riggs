@@ -27,7 +27,7 @@ defmodule Murtaugh.Ingest.NetworkIngester do
               }
             end)
 
-          TenantRepo.insert_all("network_hosts", rows,
+          TenantRepo.insert_all(Murtaugh.Discovery.Host, rows,
             on_conflict: {:replace, [:hostname, :vendor, :last_seen, :open_ports, :mac_address]},
             conflict_target: [:agent_id, :ip_address]
           )

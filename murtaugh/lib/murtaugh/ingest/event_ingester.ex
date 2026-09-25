@@ -12,9 +12,9 @@ defmodule Murtaugh.Ingest.EventIngester do
           rows = Enum.map(events, &to_row(&1, agent_id, org_node_id, now))
 
           {count, _} =
-            TenantRepo.insert_all("events", rows,
+            TenantRepo.insert_all(Murtaugh.Telemetry.Event, rows,
               on_conflict: :nothing,
-              conflict_target: [:id]
+              conflict_target: [:id, :timestamp]
             )
 
           Phoenix.PubSub.broadcast(

@@ -77,7 +77,7 @@ defmodule Murtaugh.Tenancy do
 
     base_url = String.replace(database_url, "/" <> db_name, "/postgres")
 
-    {:ok, conn} = Postgrex.start_link(url: base_url)
+    {:ok, conn} = Postgrex.start_link(Ecto.Repo.Supervisor.parse_url(base_url))
 
     try do
       case Postgrex.query(conn, "SELECT 1 FROM pg_database WHERE datname = $1", [db_name]) do
@@ -104,7 +104,7 @@ defmodule Murtaugh.Tenancy do
   # needs the policy removed and re-added.
   defp apply_retention_policy(%{database_url: database_url, retention_days: days})
        when is_integer(days) and days > 0 do
-    {:ok, conn} = Postgrex.start_link(url: database_url)
+    {:ok, conn} = Postgrex.start_link(Ecto.Repo.Supervisor.parse_url(database_url))
 
     try do
       Postgrex.query!(
@@ -129,7 +129,7 @@ defmodule Murtaugh.Tenancy do
   # Enable the TimescaleDB extension in a freshly created tenant database.
   # Must run before migrations because create_hypertable requires it.
   defp enable_timescaledb(database_url) do
-    {:ok, conn} = Postgrex.start_link(url: database_url)
+    {:ok, conn} = Postgrex.start_link(Ecto.Repo.Supervisor.parse_url(database_url))
 
     try do
       Postgrex.query!(conn, "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE", [])
