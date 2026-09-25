@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -9,10 +10,10 @@ use riggs_types::errors::RiggsError;
 use riggs_types::events::RiggsEvent;
 use riggs_types::verdict::{DetectionSource, Verdict};
 
-use crate::analyzer::StaticAnalyzer;
+use crate::analyzer::{AnalyzerError, StaticAnalyzer};
 
 pub struct StaticAiStage {
-    analyzer: StaticAnalyzer,
+    analyzer: Arc<StaticAnalyzer>,
     malicious_threshold: f32,
     suspicious_threshold: f32,
 }
@@ -20,7 +21,7 @@ pub struct StaticAiStage {
 impl StaticAiStage {
     pub fn new(model_path: PathBuf) -> Self {
         Self {
-            analyzer: StaticAnalyzer::new(model_path),
+            analyzer: Arc::new(StaticAnalyzer::new(model_path)),
             malicious_threshold: 0.85,
             suspicious_threshold: 0.5,
         }
@@ -28,7 +29,7 @@ impl StaticAiStage {
 
     pub fn new_heuristic_only() -> Self {
         Self {
-            analyzer: StaticAnalyzer::new_without_model(),
+            analyzer: Arc::new(StaticAnalyzer::new_without_model()),
             malicious_threshold: 0.85,
             suspicious_threshold: 0.5,
         }
@@ -36,7 +37,7 @@ impl StaticAiStage {
 
     /// Override the max bytes read per file for analysis (operator-configurable).
     pub fn with_max_scan_bytes(mut self, max_scan_bytes: u64) -> Self {
-        self.analyzer = self.analyzer.with_max_scan_bytes(max_scan_bytes);
+        self.analyzer = Arc::new((*self.analyzer).clone().with_max_scan_bytes(max_scan_bytes));
         self
     }
 
@@ -46,7 +47,7 @@ impl StaticAiStage {
         malicious_threshold: f32,
     ) -> Self {
         Self {
-            analyzer: StaticAnalyzer::new(model_path),
+            analyzer: Arc::new(StaticAnalyzer::new(model_path)),
             malicious_threshold,
             suspicious_threshold,
         }
@@ -73,40 +74,18 @@ impl DetectionStage for StaticAiStage {
             return Ok(StageVerdict::Clean);
         }
 
-        let path = Path::new(&file_event.path);
-        if !path.exists() {
-            debug!(path = %file_event.path, "file does not exist, skipping");
-            return Ok(StageVerdict::Clean);
-        }
+        // File inspection is blocking I/O (up to max_scan_bytes); keep it off
+        // the async workers.
+        let analyzer = Arc::clone(&self.analyzer);
+        let path = PathBuf::from(&file_event.path);
+        let inspected = tokio::task::spawn_blocking(move || inspect(&analyzer, &path))
+            .await
+            .map_err(|e| RiggsError::Engine(format!("static analysis task failed: {e}")))?;
 
-        // Skip non-regular files (sockets, pipes, directories, symlinks)
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return Ok(StageVerdict::Clean),
-        };
-        if !metadata.is_file() || metadata.len() < 64 {
-            return Ok(StageVerdict::Clean);
-        }
-
-        // Skip files that are clearly not executables -- but only when the
-        // content agrees. A binary renamed to invoice.txt still has executable
-        // magic bytes and must be scanned, so the extension is trusted only for
-        // files that do NOT begin with a known executable signature.
-        let skip_extensions = [
-            "txt", "log", "json", "toml", "yaml", "yml", "xml", "csv", "md", "rst", "html", "css",
-            "js", "ts", "py", "rb", "sh", "conf", "cfg", "ini", "lock", "pid", "sock", "tmp",
-        ];
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if skip_extensions.iter().any(|&s| s.eq_ignore_ascii_case(ext))
-                && !has_executable_magic(path)
-            {
-                return Ok(StageVerdict::Clean);
-            }
-        }
-
-        let confidence = match self.analyzer.analyze_file(path) {
-            Ok(c) => c,
-            Err(e) => {
+        let confidence = match inspected {
+            None => return Ok(StageVerdict::Clean),
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
                 warn!(error = %e, path = %file_event.path, "static analysis failed");
                 return Ok(StageVerdict::Error(e.to_string()));
             }
@@ -138,6 +117,34 @@ impl DetectionStage for StaticAiStage {
             Ok(StageVerdict::Clean)
         }
     }
+}
+
+/// Score a file, or `None` when it isn't worth analyzing (gone, not a regular
+/// file, tiny, or a known non-executable extension without executable magic).
+fn inspect(analyzer: &StaticAnalyzer, path: &Path) -> Option<Result<f32, AnalyzerError>> {
+    // Skip non-regular files (sockets, pipes, directories, symlinks)
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() < 64 {
+        return None;
+    }
+
+    // Skip files that are clearly not executables -- but only when the
+    // content agrees. A binary renamed to invoice.txt still has executable
+    // magic bytes and must be scanned, so the extension is trusted only for
+    // files that do NOT begin with a known executable signature.
+    let skip_extensions = [
+        "txt", "log", "json", "toml", "yaml", "yml", "xml", "csv", "md", "rst", "html", "css",
+        "js", "ts", "py", "rb", "sh", "conf", "cfg", "ini", "lock", "pid", "sock", "tmp",
+    ];
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if skip_extensions.iter().any(|&s| s.eq_ignore_ascii_case(ext))
+            && !has_executable_magic(path)
+        {
+            return None;
+        }
+    }
+
+    Some(analyzer.analyze_file(path))
 }
 
 /// True when the file begins with a known executable signature (ELF, Mach-O,
@@ -189,5 +196,26 @@ mod tests {
         let path = write_temp("real.txt", b"just some plain text content here");
         assert!(!has_executable_magic(&path));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn analyze_skips_text_and_scans_binaries_off_runtime() {
+        use riggs_types::events::{FileAction, ProcessContext, StorylineId};
+
+        let stage = StaticAiStage::new_heuristic_only();
+        let ctx = ProcessContext::new(1, 0, "sh", "/bin/sh", "", "u", StorylineId::new());
+        let created = |p: &PathBuf| {
+            RiggsEvent::new_file(FileAction::Create, ctx.clone(), p.to_string_lossy(), None)
+        };
+
+        let text = write_temp("notes.txt", &[b'a'; 128]);
+        let binary = write_temp("dropper.bin", &[0x90; 4096]);
+        let text_verdict = stage.analyze(&created(&text)).await.unwrap();
+        let binary_verdict = stage.analyze(&created(&binary)).await.unwrap();
+        let _ = std::fs::remove_file(&text);
+        let _ = std::fs::remove_file(&binary);
+
+        assert!(matches!(text_verdict, StageVerdict::Clean));
+        assert!(!matches!(binary_verdict, StageVerdict::Error(_)));
     }
 }
