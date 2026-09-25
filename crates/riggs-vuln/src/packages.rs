@@ -205,8 +205,7 @@ fn enumerate_dpkg() -> Vec<InstalledPackage> {
         if line.is_empty() {
             // End of package block
             if is_installed {
-                if let (Some(name), Some(version)) = (current_name.take(), current_version.take())
-                {
+                if let (Some(name), Some(version)) = (current_name.take(), current_version.take()) {
                     packages.push(InstalledPackage {
                         name,
                         version,

@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use riggs_behavioral_ai::BehavioralAiStage;
-use riggs_dlp::{DlpCorrelator, DlpPolicy, DlpStage};
 use riggs_dlp::stage::DlpDetection;
+use riggs_dlp::{DlpCorrelator, DlpPolicy, DlpStage};
 use riggs_engine::DetectionPipeline;
 use riggs_intel::clients::abuseipdb::AbuseIpdbClient;
 use riggs_intel::clients::virustotal::VtClient;
@@ -75,10 +75,7 @@ struct EgressAdapter {
 impl EgressAdapter {
     /// Mutate the egress config, persist it to the policy file, and hot-reload
     /// the live policy so a local `riggs egress` edit takes effect immediately.
-    fn mutate(
-        &self,
-        f: impl FnOnce(&mut riggs_types::config::EgressConfig),
-    ) -> Result<(), String> {
+    fn mutate(&self, f: impl FnOnce(&mut riggs_types::config::EgressConfig)) -> Result<(), String> {
         let mut guard = self
             .config
             .lock()
@@ -167,7 +164,11 @@ impl riggs_comms::EgressQuery for EgressAdapter {
         let enabled = match m.as_str() {
             "off" => false,
             "monitor" | "enforce" => true,
-            _ => return Err(format!("invalid mode '{mode}' (use off | monitor | enforce)")),
+            _ => {
+                return Err(format!(
+                    "invalid mode '{mode}' (use off | monitor | enforce)"
+                ))
+            }
         };
         self.mutate(move |c| {
             c.enabled = enabled;
@@ -189,10 +190,7 @@ fn egress_process_name(path: &str) -> Option<String> {
     )
 }
 
-const CONFIG_PATHS: &[&str] = &[
-    "/etc/riggs/riggs.toml",
-    "config/riggs.toml",
-];
+const CONFIG_PATHS: &[&str] = &["/etc/riggs/riggs.toml", "config/riggs.toml"];
 /// Resolve when the daemon should shut down: SIGINT (Ctrl-C) or SIGTERM.
 async fn shutdown_signal() {
     #[cfg(unix)]
@@ -291,12 +289,10 @@ impl RiggsDaemon {
             ));
         }
 
-        let ioc_handle: Arc<StdRwLock<Option<IocMatcher>>> =
-            Arc::new(StdRwLock::new(None));
+        let ioc_handle: Arc<StdRwLock<Option<IocMatcher>>> = Arc::new(StdRwLock::new(None));
 
         if self.config.engine.rules_enabled {
-            let rules_stage =
-                RulesStage::new_with_shared_ioc(None, Arc::clone(&ioc_handle), None);
+            let rules_stage = RulesStage::new_with_shared_ioc(None, Arc::clone(&ioc_handle), None);
             pipeline.add_stage(Box::new(rules_stage));
         }
 
@@ -309,11 +305,10 @@ impl RiggsDaemon {
         }
 
         // -- Threat intelligence stage --
-        let bloom: Arc<StdRwLock<BloomFilter>> =
-            Arc::new(StdRwLock::new(BloomFilter::new(
-                self.config.intel.bloom_capacity,
-                self.config.intel.bloom_false_positive_rate,
-            )));
+        let bloom: Arc<StdRwLock<BloomFilter>> = Arc::new(StdRwLock::new(BloomFilter::new(
+            self.config.intel.bloom_capacity,
+            self.config.intel.bloom_false_positive_rate,
+        )));
 
         if self.config.intel.enabled {
             let cache_path = PathBuf::from(&self.config.intel.cache_path);
@@ -329,9 +324,7 @@ impl RiggsDaemon {
                         && !self.config.intel.virustotal.api_key.is_empty()
                     {
                         info!("VirusTotal client enabled");
-                        Some(VtClient::new(
-                            self.config.intel.virustotal.api_key.clone(),
-                        ))
+                        Some(VtClient::new(self.config.intel.virustotal.api_key.clone()))
                     } else {
                         None
                     };
@@ -389,8 +382,7 @@ impl RiggsDaemon {
             ));
 
             pipeline.add_stage(Box::new(
-                DlpStage::new(Arc::clone(&dlp_correlator))
-                    .with_detection_channel(dlp_tx.clone()),
+                DlpStage::new(Arc::clone(&dlp_correlator)).with_detection_channel(dlp_tx.clone()),
             ));
 
             // Register DLP query handler for filter extension IPC
@@ -479,13 +471,12 @@ impl RiggsDaemon {
         if self.config.intel.enabled {
             let (feed_tx, feed_rx) = mpsc::channel::<FeedUpdate>(256);
 
-            let feed_manager =
-                Arc::new(FeedManager::new(
-                    self.config.intel.feeds.clone(),
-                    feed_tx,
-                    (self.config.intel.bloom_capacity / 100).max(1),
-                    self.config.intel.bloom_false_positive_rate,
-                ));
+            let feed_manager = Arc::new(FeedManager::new(
+                self.config.intel.feeds.clone(),
+                feed_tx,
+                (self.config.intel.bloom_capacity / 100).max(1),
+                self.config.intel.bloom_false_positive_rate,
+            ));
 
             let fm = Arc::clone(&feed_manager);
             self.supervisor.spawn("feed-manager", move || {
@@ -759,7 +750,10 @@ impl RiggsDaemon {
                                         let ev = Arc::clone(&hb_events);
                                         let th = Arc::clone(&hb_threats);
                                         Box::pin(async move {
-                                            riggs_cloud::run_heartbeat_loop(client, id, hb_secs, ev, th).await;
+                                            riggs_cloud::run_heartbeat_loop(
+                                                client, id, hb_secs, ev, th,
+                                            )
+                                            .await;
                                         })
                                     });
 
@@ -781,7 +775,8 @@ impl RiggsDaemon {
                                         Box::pin(async move {
                                             match slot.lock().await.take() {
                                                 Some(rx) => {
-                                                    riggs_cloud::run_threat_reporter(client, id, rx).await
+                                                    riggs_cloud::run_threat_reporter(client, id, rx)
+                                                        .await
                                                 }
                                                 None => std::future::pending::<()>().await,
                                             }
@@ -800,7 +795,8 @@ impl RiggsDaemon {
                                         Box::pin(async move {
                                             match slot.lock().await.take() {
                                                 Some(rx) => {
-                                                    riggs_cloud::run_dlp_reporter(client, id, rx).await
+                                                    riggs_cloud::run_dlp_reporter(client, id, rx)
+                                                        .await
                                                 }
                                                 None => std::future::pending::<()>().await,
                                             }

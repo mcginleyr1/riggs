@@ -39,7 +39,10 @@ impl VulnScanner {
     /// Scan all installed packages on the system against the CVE database.
     pub async fn scan_system(&self) -> Result<VulnReport, RiggsError> {
         let packages = packages::enumerate_packages();
-        info!("Scanning {} installed packages for vulnerabilities", packages.len());
+        info!(
+            "Scanning {} installed packages for vulnerabilities",
+            packages.len()
+        );
         self.scan_packages(&packages)
     }
 
@@ -72,7 +75,12 @@ impl VulnScanner {
         }
 
         // Sort by severity (critical first)
-        vulnerabilities.sort_by(|a, b| b.cve.cvss_score.partial_cmp(&a.cve.cvss_score).unwrap_or(std::cmp::Ordering::Equal));
+        vulnerabilities.sort_by(|a, b| {
+            b.cve
+                .cvss_score
+                .partial_cmp(&a.cve.cvss_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let report = VulnReport {
             scanned_at: Utc::now(),

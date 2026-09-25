@@ -78,7 +78,9 @@ impl ConsoleClient {
         let tls = &self.config.tls;
 
         let ca_path = tls.ca_cert_path.as_ref().ok_or_else(|| {
-            ConsoleError::Tls("comms.tls.ca_cert_path is required for an https console endpoint".into())
+            ConsoleError::Tls(
+                "comms.tls.ca_cert_path is required for an https console endpoint".into(),
+            )
         })?;
         let ca_pem = std::fs::read(ca_path)
             .map_err(|e| ConsoleError::Tls(format!("reading ca_cert_path {ca_path}: {e}")))?;

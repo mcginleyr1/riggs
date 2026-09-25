@@ -10,10 +10,8 @@ use tracing::{info, warn};
 use crate::engine::EgressEngine;
 use crate::policy::EgressPolicy;
 
-const EGRESS_POLICY_PATHS: &[&str] = &[
-    "/etc/riggs/egress-policy.toml",
-    "config/egress-policy.toml",
-];
+const EGRESS_POLICY_PATHS: &[&str] =
+    &["/etc/riggs/egress-policy.toml", "config/egress-policy.toml"];
 
 pub fn find_policy_file() -> Option<PathBuf> {
     EGRESS_POLICY_PATHS
@@ -28,11 +26,19 @@ pub fn default_policy_path() -> PathBuf {
 }
 
 pub fn load_policy_file(path: &Path) -> Result<EgressConfig, RiggsError> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| RiggsError::Config(format!("failed to read egress policy {}: {e}", path.display())))?;
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        RiggsError::Config(format!(
+            "failed to read egress policy {}: {e}",
+            path.display()
+        ))
+    })?;
     // The file may be a bare [egress] table or the field contents directly.
-    let config: EgressConfig = toml::from_str(&contents)
-        .map_err(|e| RiggsError::Config(format!("failed to parse egress policy {}: {e}", path.display())))?;
+    let config: EgressConfig = toml::from_str(&contents).map_err(|e| {
+        RiggsError::Config(format!(
+            "failed to parse egress policy {}: {e}",
+            path.display()
+        ))
+    })?;
     Ok(config)
 }
 
@@ -54,7 +60,12 @@ pub async fn watch_policy(
     let watch_dir = policy_path.parent().unwrap_or_else(|| Path::new("."));
     watcher
         .watch(watch_dir, RecursiveMode::NonRecursive)
-        .map_err(|e| RiggsError::Io(format!("failed to watch egress policy dir {}: {e}", watch_dir.display())))?;
+        .map_err(|e| {
+            RiggsError::Io(format!(
+                "failed to watch egress policy dir {}: {e}",
+                watch_dir.display()
+            ))
+        })?;
 
     info!(path = %policy_path.display(), "watching egress policy file for changes");
     let _watcher = watcher;

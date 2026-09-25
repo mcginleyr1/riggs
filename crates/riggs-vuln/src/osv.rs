@@ -274,7 +274,10 @@ fn parse_cvss_vector(score_str: &str) -> Option<f32> {
     }
 
     // CVSS v4 and other formats have no calculator here; the caller falls back.
-    warn!(vector = score_str, "unsupported CVSS vector; no base score computed");
+    warn!(
+        vector = score_str,
+        "unsupported CVSS vector; no base score computed"
+    );
     None
 }
 

@@ -69,9 +69,8 @@ impl FeedManager {
         let mb_interval = tokio::time::Duration::from_secs(
             self.config.malwarebazaar_interval_hours as u64 * 3600,
         );
-        let uh_interval = tokio::time::Duration::from_secs(
-            self.config.urlhaus_interval_hours as u64 * 3600,
-        );
+        let uh_interval =
+            tokio::time::Duration::from_secs(self.config.urlhaus_interval_hours as u64 * 3600);
 
         let mut mb_ticker = tokio::time::interval(mb_interval);
         let mut uh_ticker = tokio::time::interval(uh_interval);
@@ -111,7 +110,12 @@ impl FeedManager {
                     bloom
                 };
                 tracing::info!("bloom filter now holds {} cumulative hashes", bloom.len());
-                if self.tx.send(FeedUpdate::BloomFilterReady(bloom)).await.is_err() {
+                if self
+                    .tx
+                    .send(FeedUpdate::BloomFilterReady(bloom))
+                    .await
+                    .is_err()
+                {
                     tracing::warn!("feed update receiver dropped");
                 }
             }

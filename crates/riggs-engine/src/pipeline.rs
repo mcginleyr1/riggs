@@ -86,7 +86,9 @@ impl DetectionPipeline {
             let result = tracked.stage.analyze(&event).await;
             let elapsed_us = start.elapsed().as_micros() as u64;
 
-            tracked.total_duration_us.fetch_add(elapsed_us, Ordering::Relaxed);
+            tracked
+                .total_duration_us
+                .fetch_add(elapsed_us, Ordering::Relaxed);
             tracked.invocations.fetch_add(1, Ordering::Relaxed);
 
             collect_verdict(&*tracked.stage, result, &mut verdicts);
@@ -94,7 +96,11 @@ impl DetectionPipeline {
 
         self.events_processed.fetch_add(1, Ordering::Relaxed);
 
-        let final_threat_level = merge_verdicts_weighted(&verdicts, self.malicious_threshold, self.suspicious_threshold);
+        let final_threat_level = merge_verdicts_weighted(
+            &verdicts,
+            self.malicious_threshold,
+            self.suspicious_threshold,
+        );
 
         if final_threat_level > ThreatLevel::Clean {
             self.verdicts_issued.fetch_add(1, Ordering::Relaxed);
@@ -129,7 +135,9 @@ impl DetectionPipeline {
                 tokio::time::timeout(timeout_per_stage, tracked.stage.analyze(&event)).await;
             let elapsed_us = start.elapsed().as_micros() as u64;
 
-            tracked.total_duration_us.fetch_add(elapsed_us, Ordering::Relaxed);
+            tracked
+                .total_duration_us
+                .fetch_add(elapsed_us, Ordering::Relaxed);
             tracked.invocations.fetch_add(1, Ordering::Relaxed);
 
             match result {
@@ -148,7 +156,11 @@ impl DetectionPipeline {
 
         self.events_processed.fetch_add(1, Ordering::Relaxed);
 
-        let final_threat_level = merge_verdicts_weighted(&verdicts, self.malicious_threshold, self.suspicious_threshold);
+        let final_threat_level = merge_verdicts_weighted(
+            &verdicts,
+            self.malicious_threshold,
+            self.suspicious_threshold,
+        );
 
         if final_threat_level > ThreatLevel::Clean {
             self.verdicts_issued.fetch_add(1, Ordering::Relaxed);
@@ -312,7 +324,10 @@ mod tests {
         // weighted = (1.0 * 0.95 + 0.5 * 0.6) / (0.95 + 0.6)
         //          = (0.95 + 0.3) / 1.55
         //          = 1.25 / 1.55 ~= 0.806
-        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Malicious);
+        assert_eq!(
+            merge_verdicts_weighted(&verdicts, 0.7, 0.3),
+            ThreatLevel::Malicious
+        );
     }
 
     #[test]
@@ -331,7 +346,10 @@ mod tests {
         }];
 
         // weighted = 0.5 * 0.4 / 0.4 = 0.5 -> Suspicious
-        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Suspicious);
+        assert_eq!(
+            merge_verdicts_weighted(&verdicts, 0.7, 0.3),
+            ThreatLevel::Suspicious
+        );
     }
 
     fn verdict(level: ThreatLevel, confidence: f32) -> Verdict {
@@ -359,7 +377,10 @@ mod tests {
             verdict(ThreatLevel::Suspicious, 0.7),
             verdict(ThreatLevel::Suspicious, 0.8),
         ];
-        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Malicious);
+        assert_eq!(
+            merge_verdicts_weighted(&verdicts, 0.7, 0.3),
+            ThreatLevel::Malicious
+        );
     }
 
     #[test]
@@ -369,12 +390,18 @@ mod tests {
             verdict(ThreatLevel::Malicious, f32::NAN),
             verdict(ThreatLevel::Malicious, 0.9),
         ];
-        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Malicious);
+        assert_eq!(
+            merge_verdicts_weighted(&verdicts, 0.7, 0.3),
+            ThreatLevel::Malicious
+        );
     }
 
     #[test]
     fn all_nan_confidence_is_clean() {
         let verdicts = vec![verdict(ThreatLevel::Malicious, f32::NAN)];
-        assert_eq!(merge_verdicts_weighted(&verdicts, 0.7, 0.3), ThreatLevel::Clean);
+        assert_eq!(
+            merge_verdicts_weighted(&verdicts, 0.7, 0.3),
+            ThreatLevel::Clean
+        );
     }
 }

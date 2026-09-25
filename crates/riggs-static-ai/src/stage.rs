@@ -92,9 +92,10 @@ impl DetectionStage for StaticAiStage {
         // content agrees. A binary renamed to invoice.txt still has executable
         // magic bytes and must be scanned, so the extension is trusted only for
         // files that do NOT begin with a known executable signature.
-        let skip_extensions = ["txt", "log", "json", "toml", "yaml", "yml", "xml",
-            "csv", "md", "rst", "html", "css", "js", "ts", "py", "rb", "sh",
-            "conf", "cfg", "ini", "lock", "pid", "sock", "tmp"];
+        let skip_extensions = [
+            "txt", "log", "json", "toml", "yaml", "yml", "xml", "csv", "md", "rst", "html", "css",
+            "js", "ts", "py", "rb", "sh", "conf", "cfg", "ini", "lock", "pid", "sock", "tmp",
+        ];
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if skip_extensions.iter().any(|&s| s.eq_ignore_ascii_case(ext))
                 && !has_executable_magic(path)
@@ -153,7 +154,7 @@ fn has_executable_magic(path: &Path) -> bool {
                     | [0xFE, 0xED, 0xFA, 0xCF]  // Mach-O 64-bit
                     | [0xCE, 0xFA, 0xED, 0xFE]  // Mach-O 32-bit (byte-swapped)
                     | [0xCF, 0xFA, 0xED, 0xFE]  // Mach-O 64-bit (byte-swapped)
-                    | [0xCA, 0xFE, 0xBA, 0xBE]  // Mach-O universal
+                    | [0xCA, 0xFE, 0xBA, 0xBE] // Mach-O universal
             ) || buf[..2] == *b"MZ" // PE / DOS
         }
         Err(_) => false,
@@ -167,7 +168,10 @@ mod tests {
 
     fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("riggs-static-ai-test-{}-{name}", std::process::id()));
+        path.push(format!(
+            "riggs-static-ai-test-{}-{name}",
+            std::process::id()
+        ));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
         path

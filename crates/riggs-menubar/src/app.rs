@@ -2,10 +2,8 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{define_class, msg_send, sel, MainThreadOnly, DefinedClass};
-use objc2_app_kit::{
-    NSApplication, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
 use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 use tracing::info;
 

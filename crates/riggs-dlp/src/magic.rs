@@ -44,8 +44,9 @@ impl SensitiveFileType {
             "doc" => Some(Self::Doc),
             "pdf" => Some(Self::Pdf),
             "csv" => Some(Self::Csv),
-            "rs" | "py" | "go" | "js" | "ts" | "java" | "c" | "cpp" | "h" | "rb" | "ex"
-            | "exs" => Some(Self::SourceCode),
+            "rs" | "py" | "go" | "js" | "ts" | "java" | "c" | "cpp" | "h" | "rb" | "ex" | "exs" => {
+                Some(Self::SourceCode)
+            }
             "pem" | "key" | "p12" | "pfx" => Some(Self::PrivateKey),
             "sql" | "sqlite" | "db" | "sqlite3" => Some(Self::DatabaseDump),
             _ => None,
@@ -146,10 +147,7 @@ mod tests {
             detect_from_magic(&[0xD0, 0xCF, 0x11, 0xE0, 0x00]),
             Some(SensitiveFileType::Doc)
         );
-        assert_eq!(
-            detect_from_magic(b"%PDF-1.7"),
-            Some(SensitiveFileType::Pdf)
-        );
+        assert_eq!(detect_from_magic(b"%PDF-1.7"), Some(SensitiveFileType::Pdf));
         assert_eq!(detect_from_magic(b"\x00\x00"), None);
     }
 

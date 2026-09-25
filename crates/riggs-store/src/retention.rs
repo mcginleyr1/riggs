@@ -29,7 +29,11 @@ impl RetentionPolicy {
         removed += prune_before(db, VERDICTS_TABLE, &cutoff_key)?;
         removed += prune_before(db, RESPONSE_LOG_TABLE, &cutoff_key)?;
 
-        info!(removed, days = self.max_age_days, "retention cleanup complete");
+        info!(
+            removed,
+            days = self.max_age_days,
+            "retention cleanup complete"
+        );
         Ok(removed)
     }
 }

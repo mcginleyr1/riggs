@@ -95,9 +95,7 @@ fn parse_threat_level(s: &str) -> Result<ThreatLevel, RiggsError> {
         "Clean" | "clean" => Ok(ThreatLevel::Clean),
         "Suspicious" | "suspicious" => Ok(ThreatLevel::Suspicious),
         "Malicious" | "malicious" => Ok(ThreatLevel::Malicious),
-        other => Err(RiggsError::Config(format!(
-            "unknown threat level: {other}"
-        ))),
+        other => Err(RiggsError::Config(format!("unknown threat level: {other}"))),
     }
 }
 
@@ -112,19 +110,11 @@ fn parse_action(toml_action: &TomlAction) -> Result<ResponseAction, RiggsError> 
             Ok(ResponseAction::SuspendProcess { pid })
         }
         "QuarantineFile" => {
-            let path = toml_action
-                .path
-                .as_deref()
-                .unwrap_or("")
-                .into();
+            let path = toml_action.path.as_deref().unwrap_or("").into();
             Ok(ResponseAction::QuarantineFile { path })
         }
         "DeleteFile" => {
-            let path = toml_action
-                .path
-                .as_deref()
-                .unwrap_or("")
-                .into();
+            let path = toml_action.path.as_deref().unwrap_or("").into();
             Ok(ResponseAction::DeleteFile { path })
         }
         "NetworkContain" => {
@@ -152,9 +142,7 @@ fn parse_action(toml_action: &TomlAction) -> Result<ResponseAction, RiggsError> 
                 storyline_id: riggs_types::events::StorylineId(uuid),
             })
         }
-        other => Err(RiggsError::Config(format!(
-            "unknown action type: {other}"
-        ))),
+        other => Err(RiggsError::Config(format!("unknown action type: {other}"))),
     }
 }
 
@@ -219,15 +207,13 @@ impl ResponsePolicy {
         for condition in conditions {
             match condition.as_str() {
                 "critical_confidence" => {
-                    let has_high_confidence =
-                        verdict.verdicts.iter().any(|v| v.confidence >= 0.95);
+                    let has_high_confidence = verdict.verdicts.iter().any(|v| v.confidence >= 0.95);
                     if !has_high_confidence {
                         return false;
                     }
                 }
                 "multi_source" => {
-                    let sources: Vec<_> =
-                        verdict.verdicts.iter().map(|v| v.source).collect();
+                    let sources: Vec<_> = verdict.verdicts.iter().map(|v| v.source).collect();
                     let distinct = sources
                         .iter()
                         .enumerate()
@@ -238,17 +224,19 @@ impl ResponsePolicy {
                     }
                 }
                 "behavioral_match" => {
-                    let has_behavioral = verdict.verdicts.iter().any(|v| {
-                        v.source == riggs_types::verdict::DetectionSource::BehavioralAI
-                    });
+                    let has_behavioral = verdict
+                        .verdicts
+                        .iter()
+                        .any(|v| v.source == riggs_types::verdict::DetectionSource::BehavioralAI);
                     if !has_behavioral {
                         return false;
                     }
                 }
                 "static_match" => {
-                    let has_static = verdict.verdicts.iter().any(|v| {
-                        v.source == riggs_types::verdict::DetectionSource::StaticAI
-                    });
+                    let has_static = verdict
+                        .verdicts
+                        .iter()
+                        .any(|v| v.source == riggs_types::verdict::DetectionSource::StaticAI);
                     if !has_static {
                         return false;
                     }

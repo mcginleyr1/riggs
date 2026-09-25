@@ -190,11 +190,9 @@ impl ResponseExecutor {
             }
             ResponseAction::QuarantineFile { path } => {
                 info!(?path, "quarantining file");
-                self.quarantine_vault
-                    .quarantine(path)
-                    .map(|entry| {
-                        info!(entry_id = %entry.id, "quarantine succeeded");
-                    })
+                self.quarantine_vault.quarantine(path).map(|entry| {
+                    info!(entry_id = %entry.id, "quarantine succeeded");
+                })
             }
             ResponseAction::DeleteFile { path } => {
                 info!(?path, "deleting file");

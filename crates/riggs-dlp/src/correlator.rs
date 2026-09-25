@@ -113,7 +113,10 @@ impl DlpCorrelator {
     }
 
     fn policy(&self) -> Arc<DlpPolicy> {
-        self.policy.read().expect("DLP policy lock poisoned").clone()
+        self.policy
+            .read()
+            .expect("DLP policy lock poisoned")
+            .clone()
     }
 
     /// Record that `pid` opened a sensitive file.
@@ -164,10 +167,7 @@ impl DlpCorrelator {
         }
 
         // Fallback: always push to per-pid ring (for no-fd sensors and close→connect races)
-        self.pid_accesses
-            .entry(pid)
-            .or_default()
-            .push_back(access);
+        self.pid_accesses.entry(pid).or_default().push_back(access);
     }
 
     /// Record that `pid` closed `fd`. Removes the precise fd tracking entry.
@@ -201,10 +201,9 @@ impl DlpCorrelator {
 
     fn check_open_fds(&self, pid: u32, hostname: &str, policy: &DlpPolicy) -> Option<FlowVerdict> {
         // Find any open fd for this pid that we care about
-        let entry = self
-            .open_fds
-            .iter()
-            .find(|e| e.key().0 == pid && policy.file_type_action(&e.value().file_type).is_some())?;
+        let entry = self.open_fds.iter().find(|e| {
+            e.key().0 == pid && policy.file_type_action(&e.value().file_type).is_some()
+        })?;
 
         let access = entry.value();
         let action = policy.file_type_action(&access.file_type)?;
@@ -218,12 +217,21 @@ impl DlpCorrelator {
         );
 
         Some(match action {
-            DlpAction::Block => FlowVerdict::block(reason, access.path.clone(), access.file_type.clone()),
-            DlpAction::AlertOnly => FlowVerdict::alert(reason, access.path.clone(), access.file_type.clone()),
+            DlpAction::Block => {
+                FlowVerdict::block(reason, access.path.clone(), access.file_type.clone())
+            }
+            DlpAction::AlertOnly => {
+                FlowVerdict::alert(reason, access.path.clone(), access.file_type.clone())
+            }
         })
     }
 
-    fn check_pid_accesses(&self, pid: u32, hostname: &str, policy: &DlpPolicy) -> Option<FlowVerdict> {
+    fn check_pid_accesses(
+        &self,
+        pid: u32,
+        hostname: &str,
+        policy: &DlpPolicy,
+    ) -> Option<FlowVerdict> {
         let cutoff = Utc::now() - self.fallback_window;
         let accesses = self.pid_accesses.get(&pid)?;
 
@@ -243,8 +251,12 @@ impl DlpCorrelator {
         );
 
         Some(match action {
-            DlpAction::Block => FlowVerdict::block(reason, recent.path.clone(), recent.file_type.clone()),
-            DlpAction::AlertOnly => FlowVerdict::alert(reason, recent.path.clone(), recent.file_type.clone()),
+            DlpAction::Block => {
+                FlowVerdict::block(reason, recent.path.clone(), recent.file_type.clone())
+            }
+            DlpAction::AlertOnly => {
+                FlowVerdict::alert(reason, recent.path.clone(), recent.file_type.clone())
+            }
         })
     }
 
@@ -280,7 +292,11 @@ impl DlpCorrelator {
         self.open_fds.retain(|key, access| {
             let keep = access.timestamp >= fd_cutoff;
             if !keep {
-                trace!(pid = key.0, fd = key.1, "evicting stale open_fd entry (missed close)");
+                trace!(
+                    pid = key.0,
+                    fd = key.1,
+                    "evicting stale open_fd entry (missed close)"
+                );
             }
             keep
         });
@@ -356,7 +372,10 @@ mod tests {
 
         // open_fds cleared; fallback window is 0s so pid_accesses also expired
         let v = c.check_flow(1234, "claude.ai");
-        assert!(v.allow, "should allow after close with zero fallback window");
+        assert!(
+            v.allow,
+            "should allow after close with zero fallback window"
+        );
     }
 
     #[test]
@@ -368,7 +387,11 @@ mod tests {
         // fd is gone but fallback window still active
         let v = c.check_flow(1234, "claude.ai");
         assert!(!v.allow, "fallback should catch close→connect race");
-        assert!(v.reason.as_deref().unwrap_or("").contains("recently closed"));
+        assert!(v
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("recently closed"));
     }
 
     #[test]
@@ -399,7 +422,14 @@ mod tests {
     #[test]
     fn excludes_system_processes() {
         let c = DlpCorrelator::new(test_policy(), 10);
-        c.record_file_access(999, Some(3), Path::new("/tmp/update.pptx"), "softwareupdated", Utc::now(), None);
+        c.record_file_access(
+            999,
+            Some(3),
+            Path::new("/tmp/update.pptx"),
+            "softwareupdated",
+            Utc::now(),
+            None,
+        );
         let v = c.check_flow(999, "claude.ai");
         assert!(v.allow);
     }
@@ -436,12 +466,15 @@ mod tests {
 
         // Inject an old access directly
         let old_time = Utc::now() - Duration::seconds(60);
-        c.pid_accesses.entry(1234).or_default().push_back(SensitiveAccess {
-            path: PathBuf::from("/old/file.pptx"),
-            file_type: SensitiveFileType::Pptx,
-            timestamp: old_time,
-            process_name: "Chrome".into(),
-        });
+        c.pid_accesses
+            .entry(1234)
+            .or_default()
+            .push_back(SensitiveAccess {
+                path: PathBuf::from("/old/file.pptx"),
+                file_type: SensitiveFileType::Pptx,
+                timestamp: old_time,
+                process_name: "Chrome".into(),
+            });
 
         c.evict_stale();
         assert_eq!(c.active_pid_count(), 0);

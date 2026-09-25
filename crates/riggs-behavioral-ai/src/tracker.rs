@@ -133,7 +133,9 @@ impl BehaviorTracker {
         let file_modify_timestamps: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                RiggsEvent::File(fe) if fe.action == FileAction::Modify => Some((fe.timestamp, fe.path.as_str())),
+                RiggsEvent::File(fe) if fe.action == FileAction::Modify => {
+                    Some((fe.timestamp, fe.path.as_str()))
+                }
                 _ => None,
             })
             .collect();
@@ -235,8 +237,8 @@ impl BehaviorTracker {
         for event in events {
             if let RiggsEvent::Process(pe) = event {
                 if pe.action == ProcessAction::Exec {
-                    let is_root = pe.process_context.user == "root"
-                        || pe.process_context.user == "0";
+                    let is_root =
+                        pe.process_context.user == "root" || pe.process_context.user == "0";
                     if let Some(parent) = &pe.parent_context {
                         let parent_is_root = parent.user == "root" || parent.user == "0";
                         if is_root && !parent_is_root {
@@ -400,9 +402,11 @@ impl BehaviorTracker {
         // (threshold is operator-configurable via [detection].exfil_outbound_threshold)
         let outbound_count = events
             .iter()
-            .filter(|e| matches!(e, RiggsEvent::Network(ne)
+            .filter(|e| {
+                matches!(e, RiggsEvent::Network(ne)
                 if ne.direction == NetworkDirection::Outbound
-                    && !Self::is_internal_ip(&ne.dst_addr)))
+                    && !Self::is_internal_ip(&ne.dst_addr))
+            })
             .count();
 
         if outbound_count >= self.exfil_threshold {
@@ -519,15 +523,35 @@ impl BehaviorTracker {
 
     fn check_suspicious_child_process(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
         const SUSPICIOUS_PARENTS: &[&str] = &[
-            "office", "word", "excel", "powerpoint", "outlook",
-            "pdf", "acrobat", "preview", "evince",
-            "libreoffice", "pages", "numbers", "keynote",
+            "office",
+            "word",
+            "excel",
+            "powerpoint",
+            "outlook",
+            "pdf",
+            "acrobat",
+            "preview",
+            "evince",
+            "libreoffice",
+            "pages",
+            "numbers",
+            "keynote",
         ];
         const SHELL_BINARIES: &[&str] = &[
-            "/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/sh",
-            "/usr/bin/bash", "/usr/bin/zsh", "/bin/dash",
-            "python", "python3", "perl", "ruby",
-            "powershell", "pwsh", "cmd.exe",
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/usr/bin/sh",
+            "/usr/bin/bash",
+            "/usr/bin/zsh",
+            "/bin/dash",
+            "python",
+            "python3",
+            "perl",
+            "ruby",
+            "powershell",
+            "pwsh",
+            "cmd.exe",
         ];
 
         for event in events {
@@ -547,9 +571,9 @@ impl BehaviorTracker {
 
                     let child_path_lower = pe.process_context.path.to_lowercase();
                     let child_name_lower = pe.process_context.name.to_lowercase();
-                    let is_shell_child = SHELL_BINARIES.iter().any(|s| {
-                        child_path_lower.contains(s) || child_name_lower.contains(s)
-                    });
+                    let is_shell_child = SHELL_BINARIES
+                        .iter()
+                        .any(|s| child_path_lower.contains(s) || child_name_lower.contains(s));
 
                     if is_shell_child {
                         return Some(BehaviorPattern::SuspiciousChildProcess);
@@ -573,8 +597,7 @@ impl BehaviorTracker {
         // 443 is deliberately excluded: it is HTTPS and far too common to treat
         // as a mining signal on its own.
         const MINING_PORTS: &[u16] = &[
-            3333, 4433, 4444, 5555, 6666, 7777, 8333,
-            8888, 9999, 14444, 14445, 45700, 55555,
+            3333, 4433, 4444, 5555, 6666, 7777, 8333, 8888, 9999, 14444, 14445, 45700, 55555,
         ];
 
         let mining_port_connections: Vec<_> = events
@@ -629,10 +652,9 @@ impl BehaviorTracker {
                 RiggsEvent::Dns(de) => {
                     let query_lower = de.query.to_lowercase();
                     let response_lower = de.response.to_lowercase();
-                    if MINING_DOMAINS
-                        .iter()
-                        .any(|domain| query_lower.contains(domain) || response_lower.contains(domain))
-                    {
+                    if MINING_DOMAINS.iter().any(|domain| {
+                        query_lower.contains(domain) || response_lower.contains(domain)
+                    }) {
                         Some((de.timestamp, &de.query))
                     } else {
                         None
@@ -650,9 +672,19 @@ impl BehaviorTracker {
         // === Signal 3: Known miner binary/process name ===
         // Detect execution of known mining software by name or path
         const MINER_NAMES: &[&str] = &[
-            "xmrig", "cpuminer", "minerd", "ethminer", "ethdcrminer",
-            "ccminer", "bfgminer", "cgminer", "lolminers", "t-rex",
-            "minergate", "cryptonight", "randomx",
+            "xmrig",
+            "cpuminer",
+            "minerd",
+            "ethminer",
+            "ethdcrminer",
+            "ccminer",
+            "bfgminer",
+            "cgminer",
+            "lolminers",
+            "t-rex",
+            "minergate",
+            "cryptonight",
+            "randomx",
         ];
 
         let miner_process_detected = events.iter().any(|e| {
@@ -685,9 +717,7 @@ impl BehaviorTracker {
         let exec_timestamps: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                RiggsEvent::Process(pe) if pe.action == ProcessAction::Exec => {
-                    Some(pe.timestamp)
-                }
+                RiggsEvent::Process(pe) if pe.action == ProcessAction::Exec => Some(pe.timestamp),
                 _ => None,
             })
             .collect();
@@ -754,7 +784,11 @@ mod tests {
 
     fn make_ctx(pid: u32, name: &str) -> ProcessContext {
         ProcessContext::new(
-            pid, 0, name, format!("/usr/bin/{}", name), "",
+            pid,
+            0,
+            name,
+            format!("/usr/bin/{}", name),
+            "",
             "user",
             StorylineId::new(),
         )
@@ -783,11 +817,7 @@ mod tests {
     #[test]
     fn test_no_memory_exec_returns_none() {
         let ctx = make_ctx(1234, "bash");
-        let process_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx.clone(),
-            None,
-        );
+        let process_event = RiggsEvent::new_process(ProcessAction::Exec, ctx.clone(), None);
         let events = vec![process_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -802,16 +832,9 @@ mod tests {
     #[test]
     fn test_memory_exec_mixed_with_other_events() {
         let ctx = make_ctx(5678, "python3");
-        let normal_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx.clone(),
-            None,
-        );
-        let kernel_event = RiggsEvent::new_kernel(
-            KernelAction::MemoryExec,
-            ctx,
-            "mmap+exec memory region",
-        );
+        let normal_event = RiggsEvent::new_process(ProcessAction::Exec, ctx.clone(), None);
+        let kernel_event =
+            RiggsEvent::new_kernel(KernelAction::MemoryExec, ctx, "mmap+exec memory region");
         let events = vec![normal_event, kernel_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -846,14 +869,13 @@ mod tests {
 
     // --- Privilege Escalation Tests ---
 
-    fn make_auth_event(
-        action: AuthAction,
-        pid: u32,
-        user: &str,
-        method: &str,
-    ) -> RiggsEvent {
+    fn make_auth_event(action: AuthAction, pid: u32, user: &str, method: &str) -> RiggsEvent {
         let ctx = ProcessContext::new(
-            pid, 0, "auth_service", "/usr/sbin/authserv", "",
+            pid,
+            0,
+            "auth_service",
+            "/usr/sbin/authserv",
+            "",
             user,
             StorylineId::new(),
         );
@@ -862,12 +884,7 @@ mod tests {
 
     #[test]
     fn test_auth_escalation_detected() {
-        let auth_event = make_auth_event(
-            AuthAction::Escalation,
-            1001,
-            "user",
-            "sudo",
-        );
+        let auth_event = make_auth_event(AuthAction::Escalation, 1001, "user", "sudo");
         let events = vec![auth_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -885,7 +902,11 @@ mod tests {
         // Failed then successful auth for the same user must share a storyline
         // to correlate, so both events are built from one context.
         let ctx = ProcessContext::new(
-            2001, 0, "auth_service", "/usr/sbin/authserv", "",
+            2001,
+            0,
+            "auth_service",
+            "/usr/sbin/authserv",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -905,18 +926,8 @@ mod tests {
 
     #[test]
     fn test_brute_force_different_users_not_flagged() {
-        let failed = make_auth_event(
-            AuthAction::Failed,
-            3001,
-            "user",
-            "password",
-        );
-        let success = make_auth_event(
-            AuthAction::Login,
-            3001,
-            "admin",
-            "password",
-        );
+        let failed = make_auth_event(AuthAction::Failed, 3001, "user", "password");
+        let success = make_auth_event(AuthAction::Login, 3001, "admin", "password");
         let events = vec![failed, success];
 
         let mut tracker = BehaviorTracker::new();
@@ -932,16 +943,15 @@ mod tests {
     #[test]
     fn test_sudo_in_cmdline_detected() {
         let ctx = ProcessContext::new(
-            4001, 0, "bash", "/bin/bash",
+            4001,
+            0,
+            "bash",
+            "/bin/bash",
             "sudo apt update",
             "user",
             StorylineId::new(),
         );
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx,
-            None,
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -957,16 +967,15 @@ mod tests {
     #[test]
     fn test_pkexec_in_cmdline_detected() {
         let ctx = ProcessContext::new(
-            5001, 0, "pkexec", "/usr/bin/pkexec",
+            5001,
+            0,
+            "pkexec",
+            "/usr/bin/pkexec",
             "pkexec /usr/bin/systemctl restart nginx",
             "user",
             StorylineId::new(),
         );
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx,
-            None,
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -982,22 +991,24 @@ mod tests {
     #[test]
     fn test_root_process_from_nonroot_parent_detected() {
         let parent_ctx = ProcessContext::new(
-            6001, 0, "firefox", "/usr/bin/firefox",
+            6001,
+            0,
+            "firefox",
+            "/usr/bin/firefox",
             "",
             "user",
             StorylineId::new(),
         );
         let child_ctx = ProcessContext::new(
-            6002, 6001, "suid_exploit", "/tmp/exploit",
+            6002,
+            6001,
+            "suid_exploit",
+            "/tmp/exploit",
             "",
             "root",
             StorylineId::new(),
         );
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            child_ctx,
-            Some(parent_ctx),
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, child_ctx, Some(parent_ctx));
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1013,22 +1024,24 @@ mod tests {
     #[test]
     fn test_root_from_root_parent_not_flagged() {
         let parent_ctx = ProcessContext::new(
-            7001, 0, "sshd", "/usr/sbin/sshd",
+            7001,
+            0,
+            "sshd",
+            "/usr/sbin/sshd",
             "",
             "root",
             StorylineId::new(),
         );
         let child_ctx = ProcessContext::new(
-            7002, 7001, "bash", "/bin/bash",
+            7002,
+            7001,
+            "bash",
+            "/bin/bash",
             "",
             "root",
             StorylineId::new(),
         );
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            child_ctx,
-            Some(parent_ctx),
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, child_ctx, Some(parent_ctx));
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1044,11 +1057,7 @@ mod tests {
     #[test]
     fn test_no_privilege_escalation_in_normal_events() {
         let ctx = make_ctx(8001, "normal_app");
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx,
-            None,
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1069,7 +1078,11 @@ mod tests {
         dst_port: u16,
     ) -> RiggsEvent {
         let ctx = ProcessContext::new(
-            pid, 0, "ssh", "/usr/bin/ssh", "",
+            pid,
+            0,
+            "ssh",
+            "/usr/bin/ssh",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1086,7 +1099,11 @@ mod tests {
 
     fn make_dns_event(pid: u32, query: &str, response: &str) -> RiggsEvent {
         let ctx = ProcessContext::new(
-            pid, 0, "curl", "/usr/bin/curl", "",
+            pid,
+            0,
+            "curl",
+            "/usr/bin/curl",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1175,12 +1192,7 @@ mod tests {
 
     #[test]
     fn test_outbound_to_public_ip_not_flagged() {
-        let event = make_network_event(
-            NetworkDirection::Outbound,
-            9005,
-            "8.8.8.8",
-            443,
-        );
+        let event = make_network_event(NetworkDirection::Outbound, 9005, "8.8.8.8", 443);
         let events = vec![event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1194,12 +1206,7 @@ mod tests {
 
     #[test]
     fn test_inbound_to_internal_ip_not_flagged() {
-        let event = make_network_event(
-            NetworkDirection::Inbound,
-            9006,
-            "192.168.1.50",
-            22,
-        );
+        let event = make_network_event(NetworkDirection::Inbound, 9006, "192.168.1.50", 22);
         let events = vec![event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1235,12 +1242,7 @@ mod tests {
     fn test_dns_recon_to_connection_detected() {
         // DNS query for internal host, then network connection to that host
         let dns_event = make_dns_event(10001, "192.168.1.50", "192.168.1.50");
-        let net_event = make_network_event(
-            NetworkDirection::Outbound,
-            10001,
-            "192.168.1.50",
-            22,
-        );
+        let net_event = make_network_event(NetworkDirection::Outbound, 10001, "192.168.1.50", 22);
         let events = vec![dns_event, net_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1255,18 +1257,8 @@ mod tests {
 
     #[test]
     fn test_auth_failed_with_internal_network_detected() {
-        let auth_event = make_auth_event(
-            AuthAction::Failed,
-            11001,
-            "admin",
-            "password",
-        );
-        let net_event = make_network_event(
-            NetworkDirection::Outbound,
-            11001,
-            "10.0.0.100",
-            445,
-        );
+        let auth_event = make_auth_event(AuthAction::Failed, 11001, "admin", "password");
+        let net_event = make_network_event(NetworkDirection::Outbound, 11001, "10.0.0.100", 445);
         let events = vec![auth_event, net_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1281,18 +1273,8 @@ mod tests {
 
     #[test]
     fn test_auth_login_with_internal_network_detected() {
-        let auth_event = make_auth_event(
-            AuthAction::Login,
-            12001,
-            "admin",
-            "ssh",
-        );
-        let net_event = make_network_event(
-            NetworkDirection::Outbound,
-            12001,
-            "172.16.0.5",
-            3389,
-        );
+        let auth_event = make_auth_event(AuthAction::Login, 12001, "admin", "ssh");
+        let net_event = make_network_event(NetworkDirection::Outbound, 12001, "172.16.0.5", 3389);
         let events = vec![auth_event, net_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1307,12 +1289,7 @@ mod tests {
 
     #[test]
     fn test_auth_with_different_pid_not_flagged() {
-        let auth_event = make_auth_event(
-            AuthAction::Failed,
-            13001,
-            "admin",
-            "password",
-        );
+        let auth_event = make_auth_event(AuthAction::Failed, 13001, "admin", "password");
         let net_event = make_network_event(
             NetworkDirection::Outbound,
             13002,        // Different PID
@@ -1361,11 +1338,7 @@ mod tests {
     #[test]
     fn test_no_lateral_movement_in_normal_events() {
         let ctx = make_ctx(14001, "web_browser");
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx,
-            None,
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1381,7 +1354,11 @@ mod tests {
 
     fn make_mining_network_event(pid: u32, dst_addr: &str, dst_port: u16) -> RiggsEvent {
         let ctx = ProcessContext::new(
-            pid, 0, "miner", "/tmp/xmrig", "",
+            pid,
+            0,
+            "miner",
+            "/tmp/xmrig",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1398,7 +1375,11 @@ mod tests {
 
     fn make_mining_dns_event(pid: u32, query: &str, response: &str) -> RiggsEvent {
         let ctx = ProcessContext::new(
-            pid, 0, "miner", "/tmp/xmrig", "",
+            pid,
+            0,
+            "miner",
+            "/tmp/xmrig",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1406,11 +1387,7 @@ mod tests {
     }
 
     fn make_mining_process_event(pid: u32, name: &str, path: &str, cmdline: &str) -> RiggsEvent {
-        let ctx = ProcessContext::new(
-            pid, 0, name, path, cmdline,
-            "user",
-            StorylineId::new(),
-        );
+        let ctx = ProcessContext::new(pid, 0, name, path, cmdline, "user", StorylineId::new());
         RiggsEvent::new_process(ProcessAction::Exec, ctx, None)
     }
 
@@ -1510,7 +1487,11 @@ mod tests {
     fn test_inbound_to_mining_port_not_flagged() {
         // This helper uses Outbound direction, so we build the inbound flow manually.
         let ctx = ProcessContext::new(
-            20007, 0, "server", "/usr/bin/server", "",
+            20007,
+            0,
+            "server",
+            "/usr/bin/server",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1597,7 +1578,8 @@ mod tests {
 
     #[test]
     fn test_mining_binary_name_detected() {
-        let event = make_mining_process_event(22001, "xmrig", "/tmp/xmrig", "./xmrig -o pool.example.com");
+        let event =
+            make_mining_process_event(22001, "xmrig", "/tmp/xmrig", "./xmrig -o pool.example.com");
         let events = vec![event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1612,7 +1594,12 @@ mod tests {
 
     #[test]
     fn test_cpuminer_binary_detected() {
-        let event = make_mining_process_event(22002, "cpuminer", "/usr/local/bin/cpuminer", "./cpuminer -a sha256d");
+        let event = make_mining_process_event(
+            22002,
+            "cpuminer",
+            "/usr/local/bin/cpuminer",
+            "./cpuminer -a sha256d",
+        );
         let events = vec![event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1627,7 +1614,8 @@ mod tests {
 
     #[test]
     fn test_ethminer_binary_detected() {
-        let event = make_mining_process_event(22003, "ethminer", "/usr/bin/ethminer", "ethminer -G");
+        let event =
+            make_mining_process_event(22003, "ethminer", "/usr/bin/ethminer", "ethminer -G");
         let events = vec![event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1643,7 +1631,8 @@ mod tests {
     #[test]
     fn test_mining_name_in_cmdline_detected() {
         // Miner name only in the cmdline (not the process name/path).
-        let event = make_mining_process_event(22004, "bash", "/bin/bash", "./xmrig -o pool.example.com");
+        let event =
+            make_mining_process_event(22004, "bash", "/bin/bash", "./xmrig -o pool.example.com");
         let events = vec![event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1724,11 +1713,7 @@ mod tests {
     #[test]
     fn test_no_crypto_mining_in_normal_events() {
         let ctx = make_ctx(24001, "web_browser");
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx,
-            None,
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
         let events = vec![exec_event];
 
         let mut tracker = BehaviorTracker::new();
@@ -1743,11 +1728,7 @@ mod tests {
     #[test]
     fn test_all_events_normal_no_mining() {
         let ctx = make_ctx(24002, "chrome");
-        let exec_event = RiggsEvent::new_process(
-            ProcessAction::Exec,
-            ctx.clone(),
-            None,
-        );
+        let exec_event = RiggsEvent::new_process(ProcessAction::Exec, ctx.clone(), None);
         let dns_event = make_mining_dns_event(24002, "www.google.com", "142.250.80.46");
         let net_event = make_mining_network_event(24002, "142.250.80.46", 443);
         let events = vec![exec_event, dns_event, net_event];
@@ -1768,7 +1749,11 @@ mod tests {
     fn test_high_outbound_volume_detected() {
         // 50 outbound connections to external IPs should trigger detection
         let ctx = ProcessContext::new(
-            31001, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            31001,
+            0,
+            "exfiltrator",
+            "/tmp/exfil",
+            "./exfil",
             "user",
             StorylineId::new(),
         );
@@ -1803,7 +1788,11 @@ mod tests {
         // 19 external connections — below both the volume (50) and the external
         // concentration (20) thresholds, so nothing should fire.
         let ctx = ProcessContext::new(
-            31002, 0, "browser", "/usr/bin/chrome", "",
+            31002,
+            0,
+            "browser",
+            "/usr/bin/chrome",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1836,7 +1825,11 @@ mod tests {
     fn test_external_destination_concentration_detected() {
         // 20+ outbound connections to external IPs triggers this signal
         let ctx = ProcessContext::new(
-            31003, 0, "scanner", "/usr/bin/nmap", "",
+            31003,
+            0,
+            "scanner",
+            "/usr/bin/nmap",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1870,7 +1863,11 @@ mod tests {
     fn test_internal_connections_not_flagged() {
         // Outbound connections to internal IPs should not trigger
         let ctx = ProcessContext::new(
-            31004, 0, "sync", "/usr/bin/rsync", "",
+            31004,
+            0,
+            "sync",
+            "/usr/bin/rsync",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1904,7 +1901,11 @@ mod tests {
     fn test_unusual_port_connections_detected() {
         // 5+ connections to unusual ports on external IPs
         let ctx = ProcessContext::new(
-            31005, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            31005,
+            0,
+            "exfiltrator",
+            "/tmp/exfil",
+            "./exfil",
             "user",
             StorylineId::new(),
         );
@@ -1938,7 +1939,11 @@ mod tests {
     fn test_standard_ports_not_flagged() {
         // Connections to standard ports (80, 443, 53, 25) should not trigger
         let ctx = ProcessContext::new(
-            31006, 0, "browser", "/usr/bin/chrome", "",
+            31006,
+            0,
+            "browser",
+            "/usr/bin/chrome",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -1971,7 +1976,11 @@ mod tests {
     fn test_data_staging_then_exfiltration_detected() {
         // File operations followed by outbound network transfers
         let ctx = ProcessContext::new(
-            31007, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            31007,
+            0,
+            "exfiltrator",
+            "/tmp/exfil",
+            "./exfil",
             "user",
             StorylineId::new(),
         );
@@ -2019,7 +2028,11 @@ mod tests {
     fn test_no_staging_pattern_without_file_ops() {
         // Outbound connections without prior file operations
         let ctx = ProcessContext::new(
-            31008, 0, "browser", "/usr/bin/chrome", "",
+            31008,
+            0,
+            "browser",
+            "/usr/bin/chrome",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -2053,7 +2066,11 @@ mod tests {
     fn test_normal_outbound_traffic_not_flagged() {
         // Normal web browsing traffic
         let ctx = ProcessContext::new(
-            31009, 0, "chrome", "/usr/bin/chrome", "",
+            31009,
+            0,
+            "chrome",
+            "/usr/bin/chrome",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -2086,7 +2103,11 @@ mod tests {
     fn test_data_exfiltration_with_mixed_events() {
         // Exfiltration pattern mixed with other event types
         let ctx = ProcessContext::new(
-            31010, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            31010,
+            0,
+            "exfiltrator",
+            "/tmp/exfil",
+            "./exfil",
             "user",
             StorylineId::new(),
         );
@@ -2144,7 +2165,11 @@ mod tests {
     fn test_data_exfiltration_boundary_20_external() {
         // Exactly 20 external connections — at threshold
         let ctx = ProcessContext::new(
-            31011, 0, "scanner", "/usr/bin/nmap", "",
+            31011,
+            0,
+            "scanner",
+            "/usr/bin/nmap",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -2178,7 +2203,11 @@ mod tests {
     fn test_data_exfiltration_below_external_threshold() {
         // 19 external connections — below threshold
         let ctx = ProcessContext::new(
-            31012, 0, "browser", "/usr/bin/chrome", "",
+            31012,
+            0,
+            "browser",
+            "/usr/bin/chrome",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -2211,7 +2240,11 @@ mod tests {
     fn test_data_exfiltration_unusual_port_boundary_4() {
         // 4 unusual port connections — below threshold
         let ctx = ProcessContext::new(
-            31013, 0, "browser", "/usr/bin/chrome", "",
+            31013,
+            0,
+            "browser",
+            "/usr/bin/chrome",
+            "",
             "user",
             StorylineId::new(),
         );
@@ -2244,7 +2277,11 @@ mod tests {
     fn test_data_exfiltration_unusual_port_boundary_5() {
         // 5 unusual port connections — at threshold
         let ctx = ProcessContext::new(
-            31014, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            31014,
+            0,
+            "exfiltrator",
+            "/tmp/exfil",
+            "./exfil",
             "user",
             StorylineId::new(),
         );
@@ -2279,7 +2316,11 @@ mod tests {
         // Ensure data exfiltration detection is independent of
         // other signals (no mining, no injection, no privilege escalation)
         let ctx = ProcessContext::new(
-            31015, 0, "exfiltrator", "/tmp/exfil", "./exfil",
+            31015,
+            0,
+            "exfiltrator",
+            "/tmp/exfil",
+            "./exfil",
             "user",
             StorylineId::new(),
         );
@@ -2326,7 +2367,10 @@ mod tests {
         for _ in 0..(DEFAULT_MAX_EVENTS_PER_STORYLINE + 50) {
             tracker.track(cap_event_for(&sid));
         }
-        assert_eq!(tracker.storyline_event_count(&sid), DEFAULT_MAX_EVENTS_PER_STORYLINE);
+        assert_eq!(
+            tracker.storyline_event_count(&sid),
+            DEFAULT_MAX_EVENTS_PER_STORYLINE
+        );
     }
 
     #[test]

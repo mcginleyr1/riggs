@@ -138,8 +138,12 @@ impl PlatformSensor for MacOsSensor {
                             "unknown",
                             StorylineId::new(),
                         );
-                        let riggs_event =
-                            RiggsEvent::new_file(action, ctx, path.to_string_lossy().to_string(), None);
+                        let riggs_event = RiggsEvent::new_file(
+                            action,
+                            ctx,
+                            path.to_string_lossy().to_string(),
+                            None,
+                        );
                         if file_tx.send(riggs_event).await.is_err() {
                             return;
                         }
@@ -274,9 +278,7 @@ impl NetworkContainment for MacOsSensor {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RiggsError::Platform(format!(
-                "pfctl load failed: {stderr}"
-            )));
+            return Err(RiggsError::Platform(format!("pfctl load failed: {stderr}")));
         }
 
         // Ensure pf is enabled (idempotent; ignore errors if already on)

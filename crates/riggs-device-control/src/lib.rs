@@ -1,5 +1,5 @@
-mod policy;
 mod monitor;
+mod policy;
 
-pub use policy::{DevicePolicy, DeviceClass, DeviceAction};
 pub use monitor::DeviceMonitor;
+pub use policy::{DeviceAction, DeviceClass, DevicePolicy};

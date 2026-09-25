@@ -11,10 +11,7 @@ use riggs_types::errors::RiggsError;
 use crate::correlator::DlpCorrelator;
 use crate::policy::DlpPolicy;
 
-const DLP_POLICY_PATHS: &[&str] = &[
-    "/etc/riggs/dlp-policy.toml",
-    "config/dlp-policy.toml",
-];
+const DLP_POLICY_PATHS: &[&str] = &["/etc/riggs/dlp-policy.toml", "config/dlp-policy.toml"];
 
 pub fn find_policy_file() -> Option<PathBuf> {
     DLP_POLICY_PATHS
@@ -56,9 +53,7 @@ pub async fn watch_policy(
     .map_err(|e| RiggsError::Io(format!("failed to create DLP policy watcher: {e}")))?;
 
     // Watch the parent directory (in case the file is replaced atomically)
-    let watch_dir = policy_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let watch_dir = policy_path.parent().unwrap_or_else(|| Path::new("."));
     watcher
         .watch(watch_dir, RecursiveMode::NonRecursive)
         .map_err(|e| {

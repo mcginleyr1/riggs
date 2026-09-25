@@ -292,8 +292,11 @@ mod tests {
         // Step 1 in one process tree, step 2 in an unrelated one: must NOT match.
         let matched = engine.evaluate(&file_event("cat", "/etc/passwd", &StorylineId::new()));
         assert!(matched.is_empty());
-        let matched =
-            engine.evaluate(&network_event("curl", "evil.example.com", &StorylineId::new()));
+        let matched = engine.evaluate(&network_event(
+            "curl",
+            "evil.example.com",
+            &StorylineId::new(),
+        ));
         assert!(matched.is_empty());
     }
 

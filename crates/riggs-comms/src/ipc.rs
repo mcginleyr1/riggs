@@ -248,7 +248,8 @@ impl IpcServer {
                     let state = Arc::clone(&self.state);
                     tokio::spawn(async move {
                         let _permit = permit; // released when the handler finishes
-                        if let Err(e) = Self::handle_client(stream, &state, max_message_bytes).await {
+                        if let Err(e) = Self::handle_client(stream, &state, max_message_bytes).await
+                        {
                             error!("Client handler error: {}", e);
                         }
                     });
@@ -397,7 +398,13 @@ impl IpcServer {
                     .ok()
                     .and_then(|guard| {
                         guard.as_ref().map(|eg| {
-                            eg.check(pid, &process_path, &remote_hostname, &remote_ip, remote_port)
+                            eg.check(
+                                pid,
+                                &process_path,
+                                &remote_hostname,
+                                &remote_ip,
+                                remote_port,
+                            )
                         })
                     })
                     // No policy loaded -> allow (fail-open until egress is enabled).
@@ -433,8 +440,12 @@ impl IpcServer {
                     },
                 }
             }
-            ClientMessage::EgressAllow { domain } => egress_mutate(state, |eg| eg.allow_domain(&domain)),
-            ClientMessage::EgressDeny { domain } => egress_mutate(state, |eg| eg.deny_domain(&domain)),
+            ClientMessage::EgressAllow { domain } => {
+                egress_mutate(state, |eg| eg.allow_domain(&domain))
+            }
+            ClientMessage::EgressDeny { domain } => {
+                egress_mutate(state, |eg| eg.deny_domain(&domain))
+            }
             ClientMessage::EgressSetMode { mode } => egress_mutate(state, |eg| eg.set_mode(&mode)),
         };
 

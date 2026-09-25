@@ -37,11 +37,7 @@ impl RulesStage {
         ioc: Arc<RwLock<Option<IocMatcher>>>,
         custom: Option<CustomRuleEngine>,
     ) -> Self {
-        Self {
-            yara,
-            ioc,
-            custom,
-        }
+        Self { yara, ioc, custom }
     }
 
     pub fn ioc_handle(&self) -> Arc<RwLock<Option<IocMatcher>>> {
@@ -167,7 +163,10 @@ impl DetectionStage for RulesStage {
                                 threat_level: ThreatLevel::Malicious,
                                 confidence: 0.9,
                                 source: DetectionSource::YaraRule,
-                                description: format!("YARA rules matched: {}", rule_names.join(", ")),
+                                description: format!(
+                                    "YARA rules matched: {}",
+                                    rule_names.join(", ")
+                                ),
                                 timestamp: Utc::now(),
                             });
                         }
@@ -180,7 +179,9 @@ impl DetectionStage for RulesStage {
             }
         }
 
-        Ok(strongest(candidates).map(stage_verdict).unwrap_or(StageVerdict::Clean))
+        Ok(strongest(candidates)
+            .map(stage_verdict)
+            .unwrap_or(StageVerdict::Clean))
     }
 }
 

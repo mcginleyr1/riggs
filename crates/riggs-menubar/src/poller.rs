@@ -101,16 +101,14 @@ pub fn trigger_scan_background(path: String) {
 
         rt.block_on(async move {
             let sock = socket_path();
-    let socket_path = Path::new(&sock);
+            let socket_path = Path::new(&sock);
             match IpcClient::connect(socket_path).await {
-                Ok(mut client) => {
-                    match client.send(&ClientMessage::TriggerScan { path }).await {
-                        Ok(DaemonMessage::Ok) => info!("scan triggered successfully"),
-                        Ok(DaemonMessage::Error(e)) => warn!("scan error: {e}"),
-                        Ok(_) => warn!("unexpected scan response"),
-                        Err(e) => warn!("failed to send scan request: {e}"),
-                    }
-                }
+                Ok(mut client) => match client.send(&ClientMessage::TriggerScan { path }).await {
+                    Ok(DaemonMessage::Ok) => info!("scan triggered successfully"),
+                    Ok(DaemonMessage::Error(e)) => warn!("scan error: {e}"),
+                    Ok(_) => warn!("unexpected scan response"),
+                    Err(e) => warn!("failed to send scan request: {e}"),
+                },
                 Err(e) => warn!("failed to connect for scan: {e}"),
             }
         });

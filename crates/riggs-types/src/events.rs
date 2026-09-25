@@ -334,12 +334,7 @@ impl fmt::Display for RiggsEvent {
                 write!(
                     f,
                     "[NETWORK] pid={} {} {}:{} -> {}:{}",
-                    e.process_context.pid,
-                    dir,
-                    e.src_addr,
-                    e.src_port,
-                    e.dst_addr,
-                    e.dst_port
+                    e.process_context.pid, dir, e.src_addr, e.src_port, e.dst_addr, e.dst_port
                 )
             }
             RiggsEvent::Dns(e) => {

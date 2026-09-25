@@ -19,9 +19,8 @@ fn main() {
             )
             .init();
 
-        let shared_status = std::sync::Arc::new(std::sync::Mutex::new(
-            status::DaemonStatus::default(),
-        ));
+        let shared_status =
+            std::sync::Arc::new(std::sync::Mutex::new(status::DaemonStatus::default()));
 
         poller::spawn_poller(shared_status.clone());
 

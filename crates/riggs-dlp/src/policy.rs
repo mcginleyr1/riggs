@@ -151,6 +151,9 @@ mod tests {
             policy.file_type_action(&SensitiveFileType::Csv),
             Some(DlpAction::AlertOnly)
         );
-        assert_eq!(policy.file_type_action(&SensitiveFileType::SourceCode), None);
+        assert_eq!(
+            policy.file_type_action(&SensitiveFileType::SourceCode),
+            None
+        );
     }
 }

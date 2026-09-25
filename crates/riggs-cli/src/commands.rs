@@ -12,12 +12,12 @@ const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
 async fn connect(socket_path: &Path) -> Result<IpcClient, RiggsError> {
-    IpcClient::connect(socket_path)
-        .await
-        .map_err(|_| RiggsError::Comms(format!(
+    IpcClient::connect(socket_path).await.map_err(|_| {
+        RiggsError::Comms(format!(
             "Could not connect to daemon at {}\nIs the riggs daemon running?",
             socket_path.display()
-        )))
+        ))
+    })
 }
 
 async fn send(client: &mut IpcClient, msg: &ClientMessage) -> Result<DaemonMessage, RiggsError> {
@@ -35,7 +35,11 @@ pub async fn status(socket_path: &Path) -> Result<(), RiggsError> {
     println!("{DIM}────────────────────────────────────{RESET}");
 
     match response {
-        DaemonMessage::Status { running, events_processed, active_threats } => {
+        DaemonMessage::Status {
+            running,
+            events_processed,
+            active_threats,
+        } => {
             let status_color = if running { GREEN } else { RED };
             let status_text = if running { "active" } else { "stopped" };
             let threat_color = if active_threats > 0 { RED } else { GREEN };
@@ -93,10 +97,7 @@ pub async fn threats(socket_path: &Path) -> Result<(), RiggsError> {
 
                 println!(
                     "  {:<38} {level_color}{:<12}{RESET} {:<10} {DIM}{:<14}{RESET}",
-                    threat.event_id,
-                    threat.final_threat_level,
-                    sources_str,
-                    threat.storyline_id,
+                    threat.event_id, threat.final_threat_level, sources_str, threat.storyline_id,
                 );
             }
 
@@ -139,7 +140,10 @@ pub async fn events(socket_path: &Path, args: &[String]) -> Result<(), RiggsErro
     }
 
     let mut client = connect(socket_path).await?;
-    let msg = ClientMessage::QueryEvents { storyline_id, limit };
+    let msg = ClientMessage::QueryEvents {
+        storyline_id,
+        limit,
+    };
     let response = send(&mut client, &msg).await?;
 
     match response {
@@ -219,7 +223,13 @@ fn event_summary(event: &riggs_types::events::RiggsEvent) -> (&'static str, Stri
                 riggs_types::events::NetworkDirection::Inbound => "in",
                 riggs_types::events::NetworkDirection::Outbound => "out",
             };
-            ("NETWORK", format!("{} {}:{} -> {}:{}", dir, e.src_addr, e.src_port, e.dst_addr, e.dst_port))
+            (
+                "NETWORK",
+                format!(
+                    "{} {}:{} -> {}:{}",
+                    dir, e.src_addr, e.src_port, e.dst_addr, e.dst_port
+                ),
+            )
         }
         RiggsEvent::Dns(e) => ("DNS", format!("{} -> {}", e.query, e.response)),
         RiggsEvent::Auth(e) => {
@@ -334,7 +344,11 @@ pub async fn intel(socket_path: &Path, args: &[String]) -> Result<(), RiggsError
         "status" => {
             let response = send(&mut client, &ClientMessage::IntelStatus).await?;
             match response {
-                DaemonMessage::IntelStatus { bloom_size, cache_entries, feeds_last_updated } => {
+                DaemonMessage::IntelStatus {
+                    bloom_size,
+                    cache_entries,
+                    feeds_last_updated,
+                } => {
                     println!("{BOLD}Threat Intelligence{RESET}");
                     println!("{DIM}────────────────────────────────────{RESET}");
                     println!("  {BOLD}Bloom filter:{RESET}   {bloom_size} hashes");
@@ -388,20 +402,15 @@ pub async fn dlp(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> 
         }
         "policy" => {
             // Read and display the DLP policy file directly
-            let policy_paths = [
-                "/etc/riggs/dlp-policy.toml",
-                "config/dlp-policy.toml",
-            ];
+            let policy_paths = ["/etc/riggs/dlp-policy.toml", "config/dlp-policy.toml"];
             let policy_path = policy_paths.iter().find(|p| Path::new(p).exists());
 
             match policy_path {
                 Some(path) => {
-                    let contents = std::fs::read_to_string(path).map_err(|e| {
-                        RiggsError::Io(format!("failed to read {path}: {e}"))
-                    })?;
-                    let config: serde_json::Value = toml::from_str(&contents).map_err(|e| {
-                        RiggsError::Config(format!("failed to parse {path}: {e}"))
-                    })?;
+                    let contents = std::fs::read_to_string(path)
+                        .map_err(|e| RiggsError::Io(format!("failed to read {path}: {e}")))?;
+                    let config: serde_json::Value = toml::from_str(&contents)
+                        .map_err(|e| RiggsError::Config(format!("failed to parse {path}: {e}")))?;
 
                     println!("{BOLD}DLP Policy{RESET} {DIM}({path}){RESET}");
                     println!("{DIM}────────────────────────────────────{RESET}");
@@ -410,13 +419,17 @@ pub async fn dlp(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> 
                         let action_color = if action == "block" { RED } else { YELLOW };
                         println!("  {BOLD}Action:{RESET}           {action_color}{action}{RESET}");
                     }
-                    if let Some(window) = config.get("correlation_window_secs").and_then(|v| v.as_i64()) {
+                    if let Some(window) = config
+                        .get("correlation_window_secs")
+                        .and_then(|v| v.as_i64())
+                    {
                         println!("  {BOLD}Window:{RESET}           {window}s");
                     }
 
                     println!();
                     println!("  {BOLD}Watched Domains:{RESET}");
-                    if let Some(domains) = config.get("watched_domains").and_then(|v| v.as_array()) {
+                    if let Some(domains) = config.get("watched_domains").and_then(|v| v.as_array())
+                    {
                         for d in domains {
                             let pattern = d.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
                             let category = d.get("category").and_then(|v| v.as_str()).unwrap_or("");
@@ -427,20 +440,32 @@ pub async fn dlp(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> 
                     println!();
                     if let Some(ft) = config.get("file_types") {
                         if let Some(block) = ft.get("block").and_then(|v| v.as_array()) {
-                            let types: Vec<&str> = block.iter().filter_map(|v| v.as_str()).collect();
-                            println!("  {BOLD}Blocked types:{RESET}    {RED}{}{RESET}", types.join(", "));
+                            let types: Vec<&str> =
+                                block.iter().filter_map(|v| v.as_str()).collect();
+                            println!(
+                                "  {BOLD}Blocked types:{RESET}    {RED}{}{RESET}",
+                                types.join(", ")
+                            );
                         }
                         if let Some(alert) = ft.get("alert").and_then(|v| v.as_array()) {
-                            let types: Vec<&str> = alert.iter().filter_map(|v| v.as_str()).collect();
-                            println!("  {BOLD}Alert types:{RESET}      {YELLOW}{}{RESET}", types.join(", "));
+                            let types: Vec<&str> =
+                                alert.iter().filter_map(|v| v.as_str()).collect();
+                            println!(
+                                "  {BOLD}Alert types:{RESET}      {YELLOW}{}{RESET}",
+                                types.join(", ")
+                            );
                         }
                     }
 
                     println!();
                     if let Some(excluded) = config.get("excluded_processes") {
                         if let Some(names) = excluded.get("names").and_then(|v| v.as_array()) {
-                            let procs: Vec<&str> = names.iter().filter_map(|v| v.as_str()).collect();
-                            println!("  {BOLD}Excluded:{RESET}         {DIM}{}{RESET}", procs.join(", "));
+                            let procs: Vec<&str> =
+                                names.iter().filter_map(|v| v.as_str()).collect();
+                            println!(
+                                "  {BOLD}Excluded:{RESET}         {DIM}{}{RESET}",
+                                procs.join(", ")
+                            );
                         }
                     }
                 }
@@ -529,7 +554,9 @@ pub async fn vuln(socket_path: &Path, args: &[String]) -> Result<(), RiggsError>
             println!("{BOLD}Refreshing vulnerability database from OSV.dev...{RESET}");
             let response = send(&mut client, &ClientMessage::VulnUpdate).await?;
             match response {
-                DaemonMessage::Ok => println!("{GREEN}Vulnerability database update initiated.{RESET}"),
+                DaemonMessage::Ok => {
+                    println!("{GREEN}Vulnerability database update initiated.{RESET}")
+                }
                 DaemonMessage::Error(e) => eprintln!("{RED}Error:{RESET} {e}"),
                 _ => eprintln!("{RED}Unexpected response from daemon{RESET}"),
             }

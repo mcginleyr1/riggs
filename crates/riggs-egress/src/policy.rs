@@ -180,7 +180,10 @@ impl EgressPolicy {
                 .find(|r| proc_lower.contains(&r.process))
             {
                 if dest_matches(&rule.domains, &rule.cidrs, hostname, ip) {
-                    return (true, format!("process rule '{}' allows {dest}", rule.process));
+                    return (
+                        true,
+                        format!("process rule '{}' allows {dest}", rule.process),
+                    );
                 }
                 return (
                     false,
@@ -301,7 +304,10 @@ mod tests {
         let p = policy();
         assert!(!p.evaluate(None, Some("evil.example.com"), None, 443).allow);
         assert!(p.evaluate(None, Some("github.com"), None, 443).allow);
-        assert!(p.evaluate(None, Some("raw.githubusercontent.com"), None, 443).allow);
+        assert!(
+            p.evaluate(None, Some("raw.githubusercontent.com"), None, 443)
+                .allow
+        );
     }
 
     #[test]
@@ -318,7 +324,10 @@ mod tests {
     fn process_rule_locks_npm_to_registry() {
         let p = policy();
         // npm may reach the registry...
-        assert!(p.evaluate(Some("npm"), Some("registry.npmjs.org"), None, 443).allow);
+        assert!(
+            p.evaluate(Some("npm"), Some("registry.npmjs.org"), None, 443)
+                .allow
+        );
         // ...but a poisoned install script's beacon is denied, even though the
         // domain would be fine for other processes' global policy.
         let d = p.evaluate(Some("npm"), Some("github.com"), None, 443);
@@ -330,24 +339,40 @@ mod tests {
     fn process_without_rule_uses_global_allowlist() {
         let p = policy();
         // A browser (no process rule) may reach the global allowlist.
-        assert!(p.evaluate(Some("Google Chrome"), Some("github.com"), None, 443).allow);
-        assert!(!p.evaluate(Some("Google Chrome"), Some("evil.example.com"), None, 443).allow);
+        assert!(
+            p.evaluate(Some("Google Chrome"), Some("github.com"), None, 443)
+                .allow
+        );
+        assert!(
+            !p.evaluate(Some("Google Chrome"), Some("evil.example.com"), None, 443)
+                .allow
+        );
     }
 
     #[test]
     fn baseline_allows_dns_and_loopback() {
         let p = policy();
-        assert!(p.evaluate(Some("anything"), Some("evil.example.com"), None, 53).allow);
-        assert!(p
-            .evaluate(None, None, Some("127.0.0.1".parse().unwrap()), 8080)
-            .allow);
+        assert!(
+            p.evaluate(Some("anything"), Some("evil.example.com"), None, 53)
+                .allow
+        );
+        assert!(
+            p.evaluate(None, None, Some("127.0.0.1".parse().unwrap()), 8080)
+                .allow
+        );
     }
 
     #[test]
     fn cidr_allowlist_matches_ip_literals() {
         let p = policy();
-        assert!(p.evaluate(None, None, Some("10.1.2.3".parse().unwrap()), 443).allow);
-        assert!(!p.evaluate(None, None, Some("8.8.8.8".parse().unwrap()), 443).allow);
+        assert!(
+            p.evaluate(None, None, Some("10.1.2.3".parse().unwrap()), 443)
+                .allow
+        );
+        assert!(
+            !p.evaluate(None, None, Some("8.8.8.8".parse().unwrap()), 443)
+                .allow
+        );
     }
 
     #[test]

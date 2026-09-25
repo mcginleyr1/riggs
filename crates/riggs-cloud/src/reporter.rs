@@ -54,7 +54,11 @@ pub async fn run_threat_reporter(
             verdicts,
             process_name: String::new(),
             process_path: String::new(),
-            summary: format!("{} detected by {} engines", threat_level, verdict.verdicts.len()),
+            summary: format!(
+                "{} detected by {} engines",
+                threat_level,
+                verdict.verdicts.len()
+            ),
         };
 
         match grpc.report_threat(report).await {

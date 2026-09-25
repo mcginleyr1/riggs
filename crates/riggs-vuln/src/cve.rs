@@ -146,23 +146,16 @@ impl VulnReport {
             crate::packages::PackageSource::Homebrew => {
                 Some(format!("brew upgrade {}", package.name))
             }
-            crate::packages::PackageSource::Pip => {
-                cve.fixed_version.as_ref().map(|v| {
-                    format!("pip install --upgrade {}=={}", package.name, v)
-                })
-            }
-            crate::packages::PackageSource::Npm => {
-                Some(format!("npm update -g {}", package.name))
-            }
-            crate::packages::PackageSource::Gem => {
-                Some(format!("gem update {}", package.name))
-            }
+            crate::packages::PackageSource::Pip => cve
+                .fixed_version
+                .as_ref()
+                .map(|v| format!("pip install --upgrade {}=={}", package.name, v)),
+            crate::packages::PackageSource::Npm => Some(format!("npm update -g {}", package.name)),
+            crate::packages::PackageSource::Gem => Some(format!("gem update {}", package.name)),
             crate::packages::PackageSource::Dpkg => {
                 Some(format!("apt-get install --only-upgrade {}", package.name))
             }
-            crate::packages::PackageSource::Rpm => {
-                Some(format!("yum update {}", package.name))
-            }
+            crate::packages::PackageSource::Rpm => Some(format!("yum update {}", package.name)),
             _ => None,
         };
 

@@ -74,9 +74,10 @@ impl YaraEngine {
     }
 
     pub fn scan_file(&self, path: &Path) -> Result<Vec<YaraMatch>, RiggsError> {
-        let rules = self.compiled_rules.as_ref().ok_or_else(|| {
-            RiggsError::Engine("YARA rules not compiled yet".to_string())
-        })?;
+        let rules = self
+            .compiled_rules
+            .as_ref()
+            .ok_or_else(|| RiggsError::Engine("YARA rules not compiled yet".to_string()))?;
 
         let data = std::fs::read(path)
             .map_err(|e| RiggsError::Io(format!("failed to read {}: {e}", path.display())))?;
@@ -93,9 +94,8 @@ impl YaraEngine {
                     .patterns()
                     .flat_map(|p| {
                         let ident = p.identifier().to_string();
-                        p.matches().map(move |m| {
-                            format!("0x{:x}:{}", m.range().start, ident)
-                        })
+                        p.matches()
+                            .map(move |m| format!("0x{:x}:{}", m.range().start, ident))
                     })
                     .collect();
 

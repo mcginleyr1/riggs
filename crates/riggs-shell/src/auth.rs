@@ -1,4 +1,4 @@
-use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 pub struct ShellAuth {
     authorized_keys: Vec<VerifyingKey>,
@@ -6,14 +6,21 @@ pub struct ShellAuth {
 
 impl ShellAuth {
     pub fn new() -> Self {
-        Self { authorized_keys: Vec::new() }
+        Self {
+            authorized_keys: Vec::new(),
+        }
     }
 
     pub fn add_authorized_key(&mut self, key: VerifyingKey) {
         self.authorized_keys.push(key);
     }
 
-    pub fn verify_challenge(&self, public_key: &VerifyingKey, challenge: &[u8], signature: &Signature) -> bool {
+    pub fn verify_challenge(
+        &self,
+        public_key: &VerifyingKey,
+        challenge: &[u8],
+        signature: &Signature,
+    ) -> bool {
         if !self.authorized_keys.iter().any(|k| k == public_key) {
             return false;
         }
