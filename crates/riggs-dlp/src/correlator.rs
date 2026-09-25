@@ -308,6 +308,13 @@ impl DlpCorrelator {
         );
     }
 
+    /// Drop all state for an exited process so a later process reusing the pid
+    /// doesn't inherit its sensitive-file accesses.
+    pub fn record_process_exit(&self, pid: u32) {
+        self.open_fds.retain(|(p, _), _| *p != pid);
+        self.pid_accesses.remove(&pid);
+    }
+
     pub fn active_pid_count(&self) -> usize {
         self.pid_accesses.len()
     }
@@ -402,6 +409,17 @@ mod tests {
         let v = c.check_flow(1234, "claude.ai");
         assert!(!v.allow);
         assert_eq!(v.action, FlowAction::Block);
+    }
+
+    #[test]
+    fn process_exit_clears_state_for_reused_pid() {
+        let c = DlpCorrelator::new(test_policy(), 10);
+        record(&c, 1234, Some(5), "/docs/earnings.pptx");
+        c.record_process_exit(1234);
+
+        let v = c.check_flow(1234, "claude.ai");
+        assert!(v.allow, "a new process reusing the pid must not be blocked");
+        assert_eq!(c.open_fd_count(), 0);
     }
 
     #[test]

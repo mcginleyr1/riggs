@@ -8,7 +8,7 @@ use tracing::debug;
 
 use riggs_engine::{DetectionStage, StageVerdict};
 use riggs_types::errors::RiggsError;
-use riggs_types::events::{FileAction, NetworkDirection, RiggsEvent};
+use riggs_types::events::{FileAction, NetworkDirection, ProcessAction, RiggsEvent};
 use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
 
 use crate::correlator::{DlpCorrelator, FlowAction};
@@ -78,6 +78,11 @@ impl DetectionStage for DlpStage {
                     self.correlator
                         .record_file_close(fe.process_context.pid, fd);
                 }
+                Ok(StageVerdict::Clean)
+            }
+
+            RiggsEvent::Process(pe) if pe.action == ProcessAction::Exit => {
+                self.correlator.record_process_exit(pe.process_context.pid);
                 Ok(StageVerdict::Clean)
             }
 
