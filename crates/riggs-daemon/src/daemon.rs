@@ -38,7 +38,6 @@ impl riggs_comms::StoreQuery for StoreAdapter {
 
 struct DlpAdapter {
     correlator: Arc<DlpCorrelator>,
-    policy: Arc<DlpPolicy>,
 }
 
 impl riggs_comms::DlpQuery for DlpAdapter {
@@ -61,7 +60,7 @@ impl riggs_comms::DlpQuery for DlpAdapter {
             enabled: true,
             tracked_pids: self.correlator.active_pid_count(),
             tracked_accesses: self.correlator.total_tracked_accesses(),
-            watched_domains: self.policy.watched_domains.len(),
+            watched_domains: self.correlator.policy().watched_domains.len(),
         }
     }
 }
@@ -399,24 +398,20 @@ impl RiggsDaemon {
 
         // -- DLP stage --
         if self.config.dlp.enabled {
-            // Load DLP policy: standalone file takes priority, fall back to riggs.toml
+            // Load DLP policy: standalone file takes priority, fall back to
+            // riggs.toml. A file that doesn't parse stops startup rather than
+            // being silently replaced by a different policy.
             let (dlp_config, policy_file) = match riggs_dlp::find_policy_file() {
-                Some(path) => match riggs_dlp::load_policy_file(&path) {
-                    Ok(cfg) => {
-                        info!(path = %path.display(), "loaded DLP policy from standalone file");
-                        (cfg, Some(path))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to load DLP policy file, using config");
-                        (self.config.dlp.clone(), None)
-                    }
-                },
+                Some(path) => {
+                    let cfg = riggs_dlp::load_policy_file(&path)?;
+                    info!(path = %path.display(), "loaded DLP policy from standalone file");
+                    (cfg, Some(path))
+                }
                 None => (self.config.dlp.clone(), None),
             };
 
-            let dlp_policy = Arc::new(DlpPolicy::from_config(&dlp_config));
             let dlp_correlator = Arc::new(DlpCorrelator::new(
-                Arc::clone(&dlp_policy),
+                Arc::new(DlpPolicy::from_config(&dlp_config)),
                 dlp_config.correlation_window_secs as i64,
             ));
 
@@ -428,7 +423,6 @@ impl RiggsDaemon {
             if let Ok(mut guard) = daemon_state.dlp.write() {
                 *guard = Some(Arc::new(DlpAdapter {
                     correlator: Arc::clone(&dlp_correlator),
-                    policy: Arc::clone(&dlp_policy),
                 }));
             }
 
@@ -442,8 +436,10 @@ impl RiggsDaemon {
                 })
             });
 
-            // Hot-reload: watch the policy file for changes
-            if let Some(policy_path) = policy_file {
+            // Hot-reload the policy file, including one created after boot (the
+            // watcher watches its directory), unless that directory is missing.
+            let policy_path = policy_file.unwrap_or_else(riggs_dlp::default_policy_path);
+            if policy_path.parent().is_some_and(std::path::Path::exists) {
                 let watch_correlator = Arc::clone(&dlp_correlator);
                 self.supervisor.spawn("dlp-policy-watcher", move || {
                     let correlator = Arc::clone(&watch_correlator);

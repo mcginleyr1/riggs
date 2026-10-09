@@ -7,7 +7,7 @@ pub mod stage;
 pub use correlator::{DlpCorrelator, FlowAction, FlowVerdict};
 pub use magic::SensitiveFileType;
 pub use policy::{DlpAction, DlpPolicy};
-pub use reload::{find_policy_file, load_policy_file, watch_policy};
+pub use reload::{default_policy_path, find_policy_file, load_policy_file, watch_policy};
 pub use stage::{DlpDetection, DlpStage};
 
 /// Action taken on the flow.

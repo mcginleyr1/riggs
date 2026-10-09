@@ -130,7 +130,12 @@ development). See `config/riggs.toml` for all options.
 
 ### DLP Policy
 
-DLP is configured via a standalone policy file that hot-reloads on change:
+DLP is switched on by `[dlp] enabled = true` in riggs.toml (the shipped default)
+and configured via a standalone policy file. The file is loaded at startup (the
+daemon refuses to start if it doesn't parse) and hot-reloaded on change,
+including when it is first created. A change that doesn't parse keeps the
+current policy and logs an error, and the daemon won't start again until it is
+fixed:
 
 ```
 /etc/riggs/dlp-policy.toml      # production

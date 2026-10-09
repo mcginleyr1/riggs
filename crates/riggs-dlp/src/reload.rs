@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use riggs_types::config::DlpConfig;
 use riggs_types::errors::RiggsError;
@@ -18,6 +18,11 @@ pub fn find_policy_file() -> Option<PathBuf> {
         .iter()
         .map(PathBuf::from)
         .find(|p| p.exists())
+}
+
+/// Where to watch for a policy file when none exists yet at startup.
+pub fn default_policy_path() -> PathBuf {
+    PathBuf::from(DLP_POLICY_PATHS[0])
 }
 
 pub fn load_policy_file(path: &Path) -> Result<DlpConfig, RiggsError> {
@@ -96,7 +101,10 @@ pub async fn watch_policy(
                                 );
                             }
                             Err(e) => {
-                                warn!(error = %e, "failed to reload DLP policy, keeping current policy");
+                                error!(
+                                    error = %e,
+                                    "DLP policy no longer parses; keeping the current policy, but the daemon will refuse to start until the file is fixed"
+                                );
                             }
                         }
                     }
@@ -110,4 +118,26 @@ pub async fn watch_policy(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_policies_load() {
+        let config_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(config_dir.join("policies"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        assert!(!files.is_empty());
+        files.push(config_dir.join("dlp-policy.toml"));
+
+        for file in &files {
+            let config = load_policy_file(file).unwrap();
+            assert!(!config.watched_domains.is_empty(), "{}", file.display());
+        }
+    }
 }

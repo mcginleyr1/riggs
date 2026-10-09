@@ -112,7 +112,7 @@ impl DlpCorrelator {
         }
     }
 
-    fn policy(&self) -> Arc<DlpPolicy> {
+    pub fn policy(&self) -> Arc<DlpPolicy> {
         self.policy
             .read()
             .expect("DLP policy lock poisoned")

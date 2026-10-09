@@ -544,6 +544,9 @@ impl Default for FeedsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlpConfig {
+    /// Feature master switch, read from riggs.toml's [dlp]. Standalone policy
+    /// files (dlp-policy.toml, config/policies/*) leave it out.
+    #[serde(default)]
     pub enabled: bool,
     pub action: String,
     pub correlation_window_secs: u64,
