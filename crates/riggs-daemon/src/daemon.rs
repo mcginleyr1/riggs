@@ -80,6 +80,13 @@ impl EgressAdapter {
             .config
             .lock()
             .map_err(|_| "egress config lock poisoned".to_string())?;
+        // Edit what is on disk, not a startup snapshot: the watcher may have
+        // loaded hand edits since boot. A file that no longer parses is left
+        // alone rather than overwritten.
+        if self.policy_path.exists() {
+            *guard = riggs_egress::reload::load_policy_file(&self.policy_path)
+                .map_err(|e| e.to_string())?;
+        }
         f(&mut guard);
 
         let toml_str =
@@ -87,7 +94,11 @@ impl EgressAdapter {
         if let Some(parent) = self.policy_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&self.policy_path, toml_str)
+        // Write-then-rename so a crash mid-write can't leave a torn policy
+        // that the next boot refuses (or the watcher half-reads).
+        let tmp = self.policy_path.with_extension("toml.tmp");
+        std::fs::write(&tmp, toml_str)
+            .and_then(|_| std::fs::rename(&tmp, &self.policy_path))
             .map_err(|e| format!("write {}: {e}", self.policy_path.display()))?;
 
         self.engine
@@ -456,20 +467,30 @@ impl RiggsDaemon {
 
         // -- Egress allowlist (default-deny, opt-in; local-first) --
         {
-            let egress_config = self.config.egress.clone();
+            // The policy file is the source of truth, with riggs.toml's [egress]
+            // as the fallback. Load it now (the watcher only sees later changes)
+            // and refuse to start on a bad one rather than run a policy the
+            // operator didn't write.
+            let policy_file = riggs_egress::reload::find_policy_file();
+            let egress_config = match &policy_file {
+                Some(path) => riggs_egress::reload::load_policy_file(path)?,
+                None => self.config.egress.clone(),
+            };
             let engine = Arc::new(riggs_egress::EgressEngine::new(
                 riggs_egress::EgressPolicy::from_config(&egress_config),
             ));
-            let egress_policy_path = riggs_egress::reload::find_policy_file()
+            let egress_policy_path = policy_file
+                .clone()
                 .unwrap_or_else(riggs_egress::reload::default_policy_path);
             if let Ok(mut guard) = daemon_state.egress.write() {
                 *guard = Some(Arc::new(EgressAdapter {
                     engine: Arc::clone(&engine),
-                    policy_path: egress_policy_path,
+                    policy_path: egress_policy_path.clone(),
                     config: std::sync::Mutex::new(egress_config.clone()),
                 }));
             }
             info!(
+                policy_file = ?policy_file,
                 enabled = egress_config.enabled,
                 mode = %egress_config.mode,
                 domains = egress_config.allow_domains.len(),
@@ -477,8 +498,13 @@ impl RiggsDaemon {
                 "egress allowlist initialized"
             );
 
-            // Hot-reload the egress policy file if present.
-            if let Some(path) = riggs_egress::reload::find_policy_file() {
+            // Hot-reload the policy file, including one created after boot (the
+            // watcher watches its directory), unless that directory is missing.
+            if egress_policy_path
+                .parent()
+                .is_some_and(std::path::Path::exists)
+            {
+                let path = egress_policy_path;
                 let watch_engine = Arc::clone(&engine);
                 self.supervisor.spawn("egress-policy-watcher", move || {
                     let engine = Arc::clone(&watch_engine);
@@ -1088,5 +1114,59 @@ impl RiggsDaemon {
         drop(store);
         info!("riggs daemon stopped");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riggs_comms::EgressQuery;
+
+    /// An adapter whose startup snapshot is the empty default config, as it was
+    /// when it was seeded from a riggs.toml without an [egress] table.
+    fn stale_adapter(policy_path: PathBuf) -> EgressAdapter {
+        EgressAdapter {
+            engine: Arc::new(riggs_egress::EgressEngine::new(
+                riggs_egress::EgressPolicy::from_config(&Default::default()),
+            )),
+            policy_path,
+            config: std::sync::Mutex::new(Default::default()),
+        }
+    }
+
+    #[test]
+    fn egress_edits_keep_the_policy_file_rules() {
+        let path =
+            std::env::temp_dir().join(format!("riggs-egress-keep-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "enabled = true\nmode = \"monitor\"\n\n[[process_rules]]\nprocess = \"npm\"\nallow_domains = [\"registry.npmjs.org\"]\n",
+        )
+        .unwrap();
+        let adapter = stale_adapter(path.clone());
+
+        adapter.allow_domain("example.com").unwrap();
+        let saved = riggs_egress::reload::load_policy_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(saved.enabled);
+        assert_eq!(saved.process_rules.len(), 1);
+        assert_eq!(saved.allow_domains, ["example.com"]);
+        assert_eq!(adapter.status().process_rules, 1);
+    }
+
+    #[test]
+    fn egress_edits_refuse_to_overwrite_an_unparseable_policy_file() {
+        let path =
+            std::env::temp_dir().join(format!("riggs-egress-bad-{}.toml", std::process::id()));
+        std::fs::write(&path, "mode = [not toml").unwrap();
+        let adapter = stale_adapter(path.clone());
+
+        let result = adapter.set_mode("enforce");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(contents, "mode = [not toml");
     }
 }

@@ -67,9 +67,14 @@ install script that tries to beacon credentials to a C&C host is denied, because
 egress rules are scoped to the originating process — the registry is allowed,
 the beacon is not. Runs entirely on-device; no console, no Zscaler.
 
-Policy lives in `config/egress-policy.toml` (or `/etc/riggs/egress-policy.toml`),
-hot-reloaded on change. A starter file with a dev-tooling profile ships in the
-repo. Manage it locally:
+Policy lives in `/etc/riggs/egress-policy.toml` (or `config/egress-policy.toml`
+in a dev checkout). It is loaded at startup, and the daemon refuses to start if
+the file doesn't parse; unknown keys count as errors, so a typo can't silently
+disable a rule. Changes, including creating the file, are picked up without a
+restart. A change that doesn't parse keeps the current policy and logs an
+error, and the daemon won't start again until it is fixed. A starter file with
+a dev-tooling profile ships in the repo as `config/egress-policy.toml`; copy it
+to `/etc/riggs/` to use it. Manage it locally:
 
 ```
 riggs egress status                    # mode + allow-domain / process-rule counts

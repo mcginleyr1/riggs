@@ -44,7 +44,10 @@ impl Default for RulesConfig {
 /// operator has allowed (plus a system baseline). Rules can be scoped to a
 /// process so package managers/build tools are locked to their registries while
 /// other traffic follows the global policy. Hot-reloaded from a TOML file.
+/// Unknown keys are rejected: a misspelled or `[egress]`-wrapped policy file
+/// would otherwise load as an empty, disabled policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EgressConfig {
     /// Feature master switch. When false the evaluator always allows.
     #[serde(default)]
@@ -89,6 +92,7 @@ impl Default for EgressConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EgressBaseline {
     #[serde(default = "default_true")]
     pub dns: bool,
@@ -109,6 +113,7 @@ impl Default for EgressBaseline {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EgressProcessRule {
     /// Process name to match (basename; case-insensitive substring).
     pub process: String,

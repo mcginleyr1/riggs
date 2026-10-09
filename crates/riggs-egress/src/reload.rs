@@ -5,7 +5,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use riggs_types::config::EgressConfig;
 use riggs_types::errors::RiggsError;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::engine::EgressEngine;
 use crate::policy::EgressPolicy;
@@ -32,7 +32,6 @@ pub fn load_policy_file(path: &Path) -> Result<EgressConfig, RiggsError> {
             path.display()
         ))
     })?;
-    // The file may be a bare [egress] table or the field contents directly.
     let config: EgressConfig = toml::from_str(&contents).map_err(|e| {
         RiggsError::Config(format!(
             "failed to parse egress policy {}: {e}",
@@ -94,11 +93,52 @@ pub async fn watch_policy(
                     info!(mode = %config.mode, "egress policy reloaded");
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to reload egress policy, keeping current");
+                    error!(
+                        error = %e,
+                        "egress policy no longer parses; keeping the current policy, but the daemon will refuse to start until the file is fixed"
+                    );
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_policies_load_with_their_process_rules() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for file in [
+            "config/egress-policy.toml",
+            "demo/egress-supply-chain/egress-policy.demo.toml",
+        ] {
+            let config = load_policy_file(&root.join(file)).unwrap();
+            assert!(config.enabled, "{file}");
+            assert!(!config.process_rules.is_empty(), "{file}");
+        }
+    }
+
+    #[test]
+    fn wrapped_or_misspelled_policies_are_rejected() {
+        let path =
+            std::env::temp_dir().join(format!("riggs-egress-strict-{}.toml", std::process::id()));
+        let results: Vec<_> = [
+            "[egress]\nenabled = true\nmode = \"enforce\"\n",
+            "enable = true\n",
+            "[[process_rules]]\nprocess = \"npm\"\nallow_domain = [\"registry.npmjs.org\"]\n",
+        ]
+        .iter()
+        .map(|policy| {
+            std::fs::write(&path, policy).unwrap();
+            load_policy_file(&path)
+        })
+        .collect();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(results.iter().all(Result::is_err));
+    }
 }
