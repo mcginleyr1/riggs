@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use goblin::mach::constants::{SECTION_TYPE, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL};
 use goblin::Object;
 use thiserror::Error;
 
@@ -109,9 +110,46 @@ fn calculate_entropy(data: &[u8]) -> f32 {
     entropy.clamp(0.0, 8.0) as f32
 }
 
+/// Entropy of each `(offset, size)` section, clipped to the file. Offsets and
+/// sizes come from attacker-controlled headers, so at most two passes over the
+/// file are hashed in total: thousands of whole-file sections would otherwise
+/// cost one pass each. A well-formed table never claims more (callers pass
+/// sections without file bytes as empty), so one that does reports `overrun`
+/// and is treated as packed, rather than letting decoy sections spend the
+/// budget ahead of a packed one.
+fn entropy_by_section(
+    bytes: &[u8],
+    sections: impl IntoIterator<Item = (u64, u64)>,
+) -> (Vec<f32>, bool) {
+    let mut budget = bytes.len().saturating_mul(2);
+    let mut overrun = false;
+    let entropies = sections
+        .into_iter()
+        .map(|(offset, size)| {
+            let start = usize::try_from(offset).map_or(bytes.len(), |o| o.min(bytes.len()));
+            let len = usize::try_from(size)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len() - start);
+            if len > budget {
+                overrun = true;
+                return 0.0;
+            }
+            budget -= len;
+            calculate_entropy(&bytes[start..start + len])
+        })
+        .collect();
+    (entropies, overrun)
+}
+
+/// Collection stops at this many distinct matches: the scores only use
+/// min(count, 20) and min(count, 5), and an unbounded list made the
+/// deduplication quadratic on files crafted with many distinct matches.
+const MAX_SUSPICIOUS_STRINGS: usize = 20;
+
 /// Scan the raw bytes for printable ASCII strings that match known suspicious
 /// patterns. Uses a simple sliding-window extraction of printable runs (length >= 4)
-/// then checks each run against the pattern list, case-insensitively.
+/// then checks each run against the pattern list, case-insensitively. Returns at
+/// most `MAX_SUSPICIOUS_STRINGS` distinct matches.
 pub fn extract_suspicious_strings(bytes: &[u8]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     let mut current = Vec::new();
@@ -143,6 +181,9 @@ pub fn extract_suspicious_strings(bytes: &[u8]) -> Vec<String> {
             current.push(b);
         } else {
             check_and_collect(&current, &mut found, &patterns_lower);
+            if found.len() == MAX_SUSPICIOUS_STRINGS {
+                return found;
+            }
             current.clear();
         }
     }
@@ -358,19 +399,15 @@ impl FileFeatures {
         let sections = &pe.sections;
         let section_count = sections.len();
 
-        let section_entropies: Vec<f32> = sections
-            .iter()
-            .map(|s| {
-                let offset = s.pointer_to_raw_data as usize;
-                let size = s.size_of_raw_data as usize;
-                let end = (offset + size).min(bytes.len());
-                if offset < bytes.len() {
-                    calculate_entropy(&bytes[offset..end])
-                } else {
-                    0.0
-                }
-            })
-            .collect();
+        let (section_entropies, overrun) = entropy_by_section(
+            bytes,
+            sections.iter().map(|s| {
+                (
+                    u64::from(s.pointer_to_raw_data),
+                    u64::from(s.size_of_raw_data),
+                )
+            }),
+        );
 
         let mut import_names: Vec<String> = Vec::new();
         for import in &pe.imports {
@@ -388,8 +425,9 @@ impl FileFeatures {
 
         let has_debug_info = pe.debug_data.is_some();
 
-        let is_packed =
-            section_entropies.iter().any(|&e| e > 7.0) || (section_count <= 2 && entropy > 6.8);
+        let is_packed = overrun
+            || section_entropies.iter().any(|&e| e > 7.0)
+            || (section_count <= 2 && entropy > 6.8);
 
         Ok(Self {
             file_size,
@@ -414,23 +452,17 @@ impl FileFeatures {
     ) -> Result<Self, FeatureError> {
         let section_count = elf.section_headers.len();
 
-        let section_entropies: Vec<f32> = elf
-            .section_headers
-            .iter()
-            .map(|sh| {
-                // sh_offset/sh_size are attacker-controlled u64; use saturating
-                // math and an explicit bound so a crafted header can't overflow
-                // or produce a start > end slice (which would panic).
-                let offset = sh.sh_offset as usize;
-                let size = sh.sh_size as usize;
-                let end = offset.saturating_add(size).min(bytes.len());
-                if offset < end {
-                    calculate_entropy(&bytes[offset..end])
+        let (section_entropies, overrun) = entropy_by_section(
+            bytes,
+            elf.section_headers.iter().map(|sh| {
+                // NOBITS sections (.bss, .tbss) have no bytes in the file.
+                if sh.sh_type == goblin::elf::section_header::SHT_NOBITS {
+                    (0, 0)
                 } else {
-                    0.0
+                    (sh.sh_offset, sh.sh_size)
                 }
-            })
-            .collect();
+            }),
+        );
 
         let mut import_names: Vec<String> = Vec::new();
         for sym in &elf.dynsyms {
@@ -462,8 +494,9 @@ impl FileFeatures {
                 .unwrap_or(false)
         });
 
-        let is_packed =
-            section_entropies.iter().any(|&e| e > 7.0) || (section_count <= 3 && entropy > 6.8);
+        let is_packed = overrun
+            || section_entropies.iter().any(|&e| e > 7.0)
+            || (section_count <= 3 && entropy > 6.8);
 
         Ok(Self {
             file_size,
@@ -525,23 +558,25 @@ impl FileFeatures {
         entropy: f32,
         suspicious_strings: Vec<String>,
     ) -> Result<Self, FeatureError> {
-        let mut section_count = 0;
-        let mut section_entropies = Vec::new();
-
-        for segment in &macho.segments {
-            for (section, _) in segment.sections().unwrap_or_default() {
-                section_count += 1;
-                // Attacker-controlled u64 fields: saturate and bound-check.
-                let offset = section.offset as usize;
-                let size = section.size as usize;
-                let end = offset.saturating_add(size).min(bytes.len());
-                if offset < end {
-                    section_entropies.push(calculate_entropy(&bytes[offset..end]));
+        let sections: Vec<(u64, u64)> = macho
+            .segments
+            .iter()
+            .flat_map(|segment| segment.sections().unwrap_or_default())
+            .map(|(section, _)| {
+                // Zerofill sections (__bss, __common) have no bytes in the file.
+                let zerofill = matches!(
+                    section.flags & SECTION_TYPE,
+                    S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+                );
+                if zerofill {
+                    (0, 0)
                 } else {
-                    section_entropies.push(0.0);
+                    (u64::from(section.offset), section.size)
                 }
-            }
-        }
+            })
+            .collect();
+        let section_count = sections.len();
+        let (section_entropies, overrun) = entropy_by_section(bytes, sections);
 
         let mut import_names: Vec<String> = Vec::new();
         if let Ok(imports) = macho.imports() {
@@ -565,7 +600,7 @@ impl FileFeatures {
             .iter()
             .any(|seg| seg.name().map(|n| n == "__DWARF").unwrap_or(false));
 
-        let is_packed = section_entropies.iter().any(|&e| e > 7.0) || entropy > 7.0;
+        let is_packed = overrun || section_entropies.iter().any(|&e| e > 7.0) || entropy > 7.0;
 
         Ok(Self {
             file_size,
@@ -579,5 +614,37 @@ impl FileFeatures {
             suspicious_imports,
             suspicious_strings,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspicious_strings_stop_at_the_score_cap() {
+        let bytes: Vec<u8> = (0..10_000)
+            .flat_map(|i| format!("cmd.exe /c job{i}\0").into_bytes())
+            .collect();
+
+        assert_eq!(
+            extract_suspicious_strings(&bytes).len(),
+            MAX_SUSPICIOUS_STRINGS
+        );
+    }
+
+    #[test]
+    fn section_entropy_is_bounded_and_fails_closed() {
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+
+        let (halves, halves_overrun) = entropy_by_section(&bytes, [(0, 512), (512, 512)]);
+        // Two whole-file decoys spend the budget ahead of the real section.
+        let (_, decoys_overrun) = entropy_by_section(&bytes, [(0, 1024), (0, 1024), (512, 512)]);
+        let (repeated, _) = entropy_by_section(&bytes, vec![(0, 1024); 1000]);
+
+        assert!(halves.iter().all(|&e| e > 7.9));
+        assert!(!halves_overrun);
+        assert!(decoys_overrun);
+        assert_eq!(repeated.iter().filter(|&&e| e > 0.0).count(), 2);
     }
 }
