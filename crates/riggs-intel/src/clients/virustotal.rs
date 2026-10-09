@@ -55,7 +55,11 @@ impl VtClient {
     }
 
     pub async fn lookup_hash(&self, hash: &str) -> Result<Option<VtResult>, RiggsError> {
-        self.rate_limiter.acquire().await;
+        if !self.rate_limiter.try_acquire().await {
+            return Err(RiggsError::Intel(
+                "VirusTotal quota (4 lookups a minute) exhausted".into(),
+            ));
+        }
 
         let url = format!("https://www.virustotal.com/api/v3/files/{hash}");
 

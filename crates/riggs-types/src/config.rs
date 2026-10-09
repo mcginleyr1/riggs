@@ -199,6 +199,13 @@ pub struct EngineConfig {
     /// Max MiB of a file read for static analysis (headers/strings live early).
     #[serde(default = "default_static_ai_max_scan_mib")]
     pub static_ai_max_scan_mib: u64,
+    /// How long the pipeline waits on each detection stage per event, in
+    /// milliseconds (must be > 0). A file whose analysis runs over it is
+    /// reported Suspicious instead of Clean. It bounds the wait, not the work:
+    /// analysis on a blocking thread keeps running, and a stage that never
+    /// yields can't be interrupted.
+    #[serde(default = "default_stage_timeout_ms")]
+    pub stage_timeout_ms: u64,
     /// Behavioral tracker: max events retained per storyline.
     #[serde(default = "default_behavioral_max_events")]
     pub behavioral_max_events_per_storyline: usize,
@@ -235,6 +242,10 @@ fn default_storyline_prune_interval_secs() -> u64 {
 
 fn default_health_check_secs() -> u64 {
     30
+}
+
+fn default_stage_timeout_ms() -> u64 {
+    5_000
 }
 
 fn default_retention_sweep_secs() -> u64 {
@@ -278,6 +289,7 @@ impl Default for EngineConfig {
             merge_malicious_threshold: default_malicious_threshold(),
             merge_suspicious_threshold: default_suspicious_threshold(),
             static_ai_max_scan_mib: default_static_ai_max_scan_mib(),
+            stage_timeout_ms: default_stage_timeout_ms(),
             behavioral_max_events_per_storyline: default_behavioral_max_events(),
             behavioral_max_storylines: default_behavioral_max_storylines(),
             storyline_max_events: default_storyline_max_events(),

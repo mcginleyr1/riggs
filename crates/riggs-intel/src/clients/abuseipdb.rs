@@ -39,7 +39,9 @@ impl AbuseIpdbClient {
     }
 
     pub async fn check_ip(&self, ip: &str) -> Result<Option<AbuseIpResult>, RiggsError> {
-        self.rate_limiter.acquire().await;
+        if !self.rate_limiter.try_acquire().await {
+            return Ok(None);
+        }
 
         let response = self
             .client

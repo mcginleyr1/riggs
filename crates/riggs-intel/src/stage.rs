@@ -74,8 +74,8 @@ impl ThreatIntelStage {
             }
         };
 
-        match vt_client.lookup_hash(hash).await? {
-            Some(vt) => {
+        match vt_client.lookup_hash(hash).await {
+            Ok(Some(vt)) => {
                 let (threat_level, confidence, desc) = if vt.malicious_count > 5 {
                     (
                         ThreatLevel::Malicious,
@@ -125,12 +125,21 @@ impl ThreatIntelStage {
                     ThreatLevel::Malicious => StageVerdict::Malicious(verdict),
                 })
             }
-            None => Ok(StageVerdict::Suspicious(Verdict::new(
+            Ok(None) => Ok(StageVerdict::Suspicious(Verdict::new(
                 event_id,
                 ThreatLevel::Suspicious,
                 0.3,
                 DetectionSource::ThreatIntel,
                 "hash matched bloom filter but not found in VirusTotal",
+            ))),
+            // Out of quota or unreachable: keep the unconfirmed bloom hit rather
+            // than drop it (or wait for quota on the detection path).
+            Err(e) => Ok(StageVerdict::Suspicious(Verdict::new(
+                event_id,
+                ThreatLevel::Suspicious,
+                0.3,
+                DetectionSource::ThreatIntel,
+                format!("hash matched known-malware bloom filter; VirusTotal not consulted: {e}"),
             ))),
         }
     }
@@ -222,6 +231,10 @@ fn cached_to_stage_verdict(event_id: EventId, cached: &CachedVerdict) -> StageVe
 impl DetectionStage for ThreatIntelStage {
     fn name(&self) -> &str {
         "threat-intel"
+    }
+
+    fn source(&self) -> DetectionSource {
+        DetectionSource::ThreatIntel
     }
 
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {

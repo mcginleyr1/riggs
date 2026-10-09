@@ -70,55 +70,8 @@ impl DetectionPipeline {
         }));
     }
 
-    pub async fn run(&self, event: RiggsEvent) -> MergedVerdict {
-        let allowed_stages = EventRouter::stages_for_event(&event);
-        let storyline_id = extract_storyline_id(&event);
-        let event_id = extract_event_id(&event);
-
-        let mut verdicts: Vec<Verdict> = Vec::new();
-
-        for tracked in &self.stages {
-            if !allowed_stages.contains(&tracked.stage.name()) {
-                continue;
-            }
-
-            let start = Instant::now();
-            let result = tracked.stage.analyze(&event).await;
-            let elapsed_us = start.elapsed().as_micros() as u64;
-
-            tracked
-                .total_duration_us
-                .fetch_add(elapsed_us, Ordering::Relaxed);
-            tracked.invocations.fetch_add(1, Ordering::Relaxed);
-
-            collect_verdict(&*tracked.stage, result, &mut verdicts);
-        }
-
-        self.events_processed.fetch_add(1, Ordering::Relaxed);
-
-        let final_threat_level = merge_verdicts_weighted(
-            &verdicts,
-            self.malicious_threshold,
-            self.suspicious_threshold,
-        );
-
-        if final_threat_level > ThreatLevel::Clean {
-            self.verdicts_issued.fetch_add(1, Ordering::Relaxed);
-        }
-
-        MergedVerdict {
-            event_id,
-            final_threat_level,
-            verdicts,
-            storyline_id,
-        }
-    }
-
-    pub async fn run_with_timeout(
-        &self,
-        event: RiggsEvent,
-        timeout_per_stage: Duration,
-    ) -> MergedVerdict {
+    /// Run every stage routed for the event, each limited to `timeout_per_stage`.
+    pub async fn run(&self, event: RiggsEvent, timeout_per_stage: Duration) -> MergedVerdict {
         let allowed_stages = EventRouter::stages_for_event(&event);
         let storyline_id = extract_storyline_id(&event);
         let event_id = extract_event_id(&event);
@@ -150,6 +103,21 @@ impl DetectionPipeline {
                         timeout_ms = timeout_per_stage.as_millis() as u64,
                         "stage timed out"
                     );
+                    // An unfinished analysis must not read as Clean, or a file
+                    // crafted to run out the clock would slip past.
+                    if matches!(event, RiggsEvent::File(_)) {
+                        verdicts.push(Verdict::new(
+                            event_id.clone(),
+                            ThreatLevel::Suspicious,
+                            0.5,
+                            tracked.stage.source(),
+                            format!(
+                                "{} analysis timed out after {} ms",
+                                tracked.stage.name(),
+                                timeout_per_stage.as_millis()
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -403,5 +371,45 @@ mod tests {
             merge_verdicts_weighted(&verdicts, 0.7, 0.3),
             ThreatLevel::Clean
         );
+    }
+
+    struct StuckStage;
+
+    #[async_trait::async_trait]
+    impl DetectionStage for StuckStage {
+        fn name(&self) -> &str {
+            "behavioral-ai"
+        }
+
+        fn source(&self) -> riggs_types::verdict::DetectionSource {
+            riggs_types::verdict::DetectionSource::BehavioralAI
+        }
+
+        async fn analyze(
+            &self,
+            _event: &RiggsEvent,
+        ) -> Result<StageVerdict, riggs_types::errors::RiggsError> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(StageVerdict::Clean)
+        }
+    }
+
+    #[tokio::test]
+    async fn stuck_stage_times_out_without_clearing_a_file() {
+        use riggs_types::events::{FileAction, ProcessAction, ProcessContext, StorylineId};
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut pipeline = DetectionPipeline::new(tx);
+        pipeline.add_stage(Box::new(StuckStage));
+        let ctx = ProcessContext::new(42, 1, "t", "/bin/t", "t", "root", StorylineId::new());
+        let file = RiggsEvent::new_file(FileAction::Create, ctx.clone(), "/tmp/crafted", None);
+        let process = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
+        let budget = Duration::from_millis(20);
+
+        let file_verdict = pipeline.run(file, budget).await;
+        let process_verdict = pipeline.run(process, budget).await;
+
+        assert_eq!(file_verdict.final_threat_level, ThreatLevel::Suspicious);
+        assert_eq!(process_verdict.final_threat_level, ThreatLevel::Clean);
     }
 }

@@ -45,6 +45,7 @@ list). The knobs you're most likely to touch standalone:
 merge_malicious_threshold = 0.7      # detection sensitivity
 merge_suspicious_threshold = 0.3
 static_ai_max_scan_mib = 64          # lower on tiny hosts
+stage_timeout_ms = 5000              # per-stage budget; overruns on files report Suspicious
 behavioral_max_storylines = 4096     # memory bound
 
 [detection]

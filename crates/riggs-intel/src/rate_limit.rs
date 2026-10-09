@@ -19,24 +19,13 @@ impl RateLimiter {
         }
     }
 
-    pub async fn acquire(&self) {
-        loop {
-            self.try_refill().await;
-
-            let current = self.tokens.load(Ordering::Acquire);
-            if current > 0 {
-                if self
-                    .tokens
-                    .compare_exchange(current, current - 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return;
-                }
-                continue;
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+    /// Take a token if one is left. Lookups run on the detection path, which
+    /// must not wait for API quota, so this never sleeps.
+    pub async fn try_acquire(&self) -> bool {
+        self.try_refill().await;
+        self.tokens
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |t| t.checked_sub(1))
+            .is_ok()
     }
 
     async fn try_refill(&self) {
@@ -50,5 +39,18 @@ impl RateLimiter {
             self.tokens.store(new_val, Ordering::Release);
             *last = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn exhausted_quota_is_refused_without_waiting() {
+        let limiter = RateLimiter::new(1);
+
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
     }
 }

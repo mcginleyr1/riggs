@@ -59,6 +59,10 @@ impl DetectionStage for BehavioralAiStage {
         "behavioral-ai"
     }
 
+    fn source(&self) -> DetectionSource {
+        DetectionSource::BehavioralAI
+    }
+
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {
         let storyline_id = extract_storyline_id(event);
 

@@ -55,6 +55,10 @@ impl DetectionStage for DlpStage {
         "dlp"
     }
 
+    fn source(&self) -> DetectionSource {
+        DetectionSource::Dlp
+    }
+
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {
         match event {
             RiggsEvent::File(fe) if fe.action == FileAction::Open => {

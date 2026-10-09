@@ -14,6 +14,7 @@ merge_malicious_threshold = 0.7
 merge_suspicious_threshold = 0.3
 # Resource limits (advanced — sane defaults; raise for big hosts, lower for tiny).
 static_ai_max_scan_mib = 64                 # max bytes read per file for static AI
+stage_timeout_ms = 5000                     # per-stage wait (> 0); a file analysis that runs over is reported Suspicious
 behavioral_max_events_per_storyline = 512
 behavioral_max_storylines = 4096
 storyline_max_events = 1024
@@ -91,6 +92,8 @@ bloom_capacity = 1000000
 bloom_false_positive_rate = 0.001
 
 [intel.virustotal]
+# At most 4 lookups a minute (free-tier quota). Further feed-matched hashes are
+# reported Suspicious unconfirmed; a later scan confirms them (verdicts are cached).
 enabled = false
 api_key = ""
 

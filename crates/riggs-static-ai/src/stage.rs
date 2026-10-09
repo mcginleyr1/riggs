@@ -60,6 +60,10 @@ impl DetectionStage for StaticAiStage {
         "static-ai"
     }
 
+    fn source(&self) -> DetectionSource {
+        DetectionSource::StaticAI
+    }
+
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {
         let file_event = match event {
             RiggsEvent::File(fe) => fe,

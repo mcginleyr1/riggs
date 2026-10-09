@@ -105,6 +105,11 @@ impl DetectionStage for RulesStage {
         "rules"
     }
 
+    /// The slow part of this stage is the YARA file scan.
+    fn source(&self) -> DetectionSource {
+        DetectionSource::YaraRule
+    }
+
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {
         let eid = event_id(event);
 

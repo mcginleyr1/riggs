@@ -271,6 +271,13 @@ impl RiggsDaemon {
             config.comms.enrollment_token = Some(token);
         }
 
+        // A zero budget would time out every stage and flag every file.
+        if config.engine.stage_timeout_ms == 0 {
+            return Err(RiggsError::Config(
+                "[engine] stage_timeout_ms must be greater than 0".into(),
+            ));
+        }
+
         Ok((config, config_path))
     }
 
@@ -965,6 +972,7 @@ impl RiggsDaemon {
         info!("riggs daemon running");
 
         // -- Main event processing loop --
+        let stage_timeout = Duration::from_millis(self.config.engine.stage_timeout_ms);
         tokio::select! {
             _ = async {
                 while let Some(event) = event_rx.recv().await {
@@ -976,7 +984,7 @@ impl RiggsDaemon {
                     let merged = {
                         let pipeline = Arc::clone(&pipeline);
                         let ev = event.clone();
-                        match tokio::spawn(async move { pipeline.run(ev).await }).await {
+                        match tokio::spawn(async move { pipeline.run(ev, stage_timeout).await }).await {
                             Ok(merged) => merged,
                             Err(e) => {
                                 error!(
