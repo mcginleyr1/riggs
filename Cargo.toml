@@ -63,7 +63,7 @@ goblin = "0.9"
 ort = { version = "2", features = ["load-dynamic"] }
 
 # YARA rules
-yara-x = "0.12"
+yara-x = "1"
 
 # Pattern matching
 aho-corasick = "1"
