@@ -23,9 +23,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Installs the toolchain and components pinned in rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 

@@ -4,7 +4,8 @@
 
 ### Riggs Agent (Rust)
 
-- Rust 1.75+ (via `rustup`)
+- Rust via `rustup`. The toolchain is pinned in `rust-toolchain.toml`, and
+  rustup installs it on the first `cargo` run in the repo.
 - macOS 13+ or Linux
 - Root/sudo for sensor features (Endpoint Security, eBPF)
 

@@ -1,0 +1,7 @@
+# Pinned so a new Rust release (and its stricter clippy lints) can't turn CI red.
+# Upgrade deliberately: bump the version here and in docker/Dockerfile.agent,
+# run `make fmt clippy test`, commit.
+[toolchain]
+channel = "1.99.0"
+# rust-src and rust-analyzer keep editors that use the rustup proxy working.
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
