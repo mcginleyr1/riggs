@@ -104,7 +104,10 @@ pub fn extract_macho_features(data: &[u8]) -> Result<StaticFeatureVector, Featur
     }
     idx = 80;
 
-    // Import features (indices 80-143)
+    // Import features (indices 80-143). Don't call goblin's imports()/exports()
+    // on untrusted files: they run the bind opcodes and export trie without
+    // bounds (a 64-byte trie cycle aborts the process). See macho_symbols in
+    // crates/riggs-static-ai/src/features.rs.
     let imports = macho.imports()?;
     features[idx] = imports.len() as f32; idx += 1;
     // Count imports per dylib

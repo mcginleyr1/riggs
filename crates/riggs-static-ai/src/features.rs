@@ -2,6 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use goblin::mach::constants::{SECTION_TYPE, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL, S_ZEROFILL};
+use goblin::mach::load_command::CommandVariant;
+use goblin::mach::symbols::{N_EXT, N_STAB, N_TYPE, N_UNDF};
+use goblin::mach::MachO;
 use goblin::Object;
 use thiserror::Error;
 
@@ -139,6 +142,75 @@ fn entropy_by_section(
         })
         .collect();
     (entropies, overrun)
+}
+
+/// The suspicious names among `names`, examining at most `budget` bytes of
+/// them in total: many imports can alias one long, crafted name.
+fn find_suspicious_imports<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    mut budget: usize,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for name in names {
+        let Some(left) = budget.checked_sub(name.len()) else {
+            break;
+        };
+        budget = left;
+        if SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)) {
+            found.push(name.to_string());
+        }
+    }
+    found
+}
+
+/// Imported symbol names, the import count and the export count, read straight
+/// from LC_SYMTAB. goblin's export-trie walker recurses without a cycle check
+/// (a 64-byte file overflows the stack and aborts the process) and its
+/// bind-opcode interpreter loops on a count taken from the file, so neither is
+/// used. Name lookups read at most `bytes.len()` bytes in total.
+fn macho_symbols<'a>(macho: &MachO, bytes: &'a [u8]) -> (Vec<&'a str>, usize, usize) {
+    let Some(symtab) = macho.load_commands.iter().find_map(|lc| match lc.command {
+        CommandVariant::Symtab(st) => Some(st),
+        _ => None,
+    }) else {
+        return (Vec::new(), 0, 0);
+    };
+    let strtab = bytes.get(symtab.stroff as usize..).unwrap_or_default();
+    let entries = bytes.get(symtab.symoff as usize..).unwrap_or_default();
+    let mut budget = bytes.len();
+    let (mut names, mut imports, mut exports) = (Vec::new(), 0, 0);
+    for nlist in entries
+        .chunks_exact(if macho.is_64 { 16 } else { 12 })
+        .take(symtab.nsyms as usize)
+    {
+        let n_type = nlist[4];
+        if n_type & N_STAB != 0 || n_type & N_EXT == 0 {
+            continue;
+        }
+        if n_type & N_TYPE != N_UNDF {
+            exports += 1;
+            continue;
+        }
+        imports += 1;
+        let strx = [nlist[0], nlist[1], nlist[2], nlist[3]];
+        let strx = if macho.little_endian {
+            u32::from_le_bytes(strx)
+        } else {
+            u32::from_be_bytes(strx)
+        };
+        let tail = strtab.get(strx as usize..).unwrap_or_default();
+        let window = &tail[..tail.len().min(budget)];
+        match window.iter().position(|&b| b == 0) {
+            Some(end) => {
+                budget -= end + 1;
+                if let Ok(name) = std::str::from_utf8(&window[..end]) {
+                    names.push(name);
+                }
+            }
+            None => budget = 0,
+        }
+    }
+    (names, imports, exports)
 }
 
 /// Collection stops at this many distinct matches: the scores only use
@@ -409,19 +481,10 @@ impl FileFeatures {
             }),
         );
 
-        let mut import_names: Vec<String> = Vec::new();
-        for import in &pe.imports {
-            import_names.push(import.name.to_string());
-        }
-
-        let import_count = import_names.len();
+        let import_count = pe.imports.len();
         let export_count = pe.exports.len();
-
-        let suspicious_imports: Vec<String> = import_names
-            .iter()
-            .filter(|name| SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)))
-            .cloned()
-            .collect();
+        let suspicious_imports =
+            find_suspicious_imports(pe.imports.iter().map(|i| &*i.name), bytes.len());
 
         let has_debug_info = pe.debug_data.is_some();
 
@@ -464,14 +527,12 @@ impl FileFeatures {
             }),
         );
 
-        let mut import_names: Vec<String> = Vec::new();
-        for sym in &elf.dynsyms {
-            if sym.is_import() {
-                if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-                    import_names.push(name.to_string());
-                }
-            }
-        }
+        let import_names: Vec<&str> = elf
+            .dynsyms
+            .iter()
+            .filter(|sym| sym.is_import())
+            .filter_map(|sym| elf.dynstrtab.get_at(sym.st_name))
+            .collect();
 
         let export_count = elf
             .dynsyms
@@ -480,12 +541,7 @@ impl FileFeatures {
             .count();
 
         let import_count = import_names.len();
-
-        let suspicious_imports: Vec<String> = import_names
-            .iter()
-            .filter(|name| SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)))
-            .cloned()
-            .collect();
+        let suspicious_imports = find_suspicious_imports(import_names, bytes.len());
 
         let has_debug_info = elf.section_headers.iter().any(|sh| {
             elf.shdr_strtab
@@ -521,11 +577,12 @@ impl FileFeatures {
     ) -> Result<Self, FeatureError> {
         let macho = match mach {
             goblin::mach::Mach::Binary(m) => m,
-            goblin::mach::Mach::Fat(fat) => match fat.get(0) {
-                Ok(goblin::mach::SingleArch::MachO(m)) => {
+            goblin::mach::Mach::Fat(fat) => match (fat.iter_arches().next(), fat.get(0)) {
+                // Offsets inside a fat binary are relative to its arch slice.
+                (Some(Ok(arch)), Ok(goblin::mach::SingleArch::MachO(m))) => {
                     return Self::from_single_macho(
                         &m,
-                        bytes,
+                        arch.slice(bytes),
                         file_size,
                         entropy,
                         suspicious_strings,
@@ -578,22 +635,8 @@ impl FileFeatures {
         let section_count = sections.len();
         let (section_entropies, overrun) = entropy_by_section(bytes, sections);
 
-        let mut import_names: Vec<String> = Vec::new();
-        if let Ok(imports) = macho.imports() {
-            for imp in imports {
-                import_names.push(imp.name.to_string());
-            }
-        }
-
-        let export_count = macho.exports().map(|e| e.len()).unwrap_or(0);
-
-        let import_count = import_names.len();
-
-        let suspicious_imports: Vec<String> = import_names
-            .iter()
-            .filter(|name| SUSPICIOUS_IMPORT_NAMES.iter().any(|s| name.contains(s)))
-            .cloned()
-            .collect();
+        let (import_names, import_count, export_count) = macho_symbols(macho, bytes);
+        let suspicious_imports = find_suspicious_imports(import_names, bytes.len());
 
         let has_debug_info = macho
             .segments
@@ -646,5 +689,52 @@ mod tests {
         assert!(!halves_overrun);
         assert!(decoys_overrun);
         assert_eq!(repeated.iter().filter(|&&e| e > 0.0).count(), 2);
+    }
+
+    fn le_words(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn macho_export_trie_cycle_is_not_walked() {
+        // A 64-bit header and one LC_DYLD_EXPORTS_TRIE whose only node branches
+        // back to itself. Walking it overflowed the stack and aborted the process.
+        let mut bytes = le_words(&[0xfeed_facf, 0x0100_000c, 0, 2, 1, 16, 0, 0]);
+        bytes.extend(le_words(&[0x8000_0033, 16, 48, 4]));
+        bytes.extend([0x00, 0x01, 0x00, 0x00]);
+        bytes.resize(64, 0);
+
+        assert!(FileFeatures::extract_from_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn macho_imports_and_exports_come_from_the_symbol_table() {
+        let mut bytes = le_words(&[0xfeed_facf, 0x0100_000c, 0, 2, 1, 24, 0, 0]);
+        // LC_SYMTAB: two nlist_64 entries at 64, string table at 96.
+        bytes.extend(le_words(&[0x2, 24, 64, 2, 96, 17]));
+        bytes.resize(64, 0);
+        // _mprotect: undefined external, i.e. an import.
+        bytes.extend(le_words(&[1]));
+        bytes.extend([N_EXT | N_UNDF, 0, 0, 0]);
+        bytes.extend([0; 8]);
+        // _main: external defined in section 1, i.e. an export.
+        bytes.extend(le_words(&[11]));
+        bytes.extend([N_EXT | goblin::mach::symbols::N_SECT, 1, 0, 0]);
+        bytes.extend(0x1000u64.to_le_bytes());
+        bytes.extend(b"\0_mprotect\0_main\0");
+
+        let features = FileFeatures::extract_from_bytes(&bytes).unwrap();
+
+        assert_eq!((features.import_count, features.export_count), (1, 1));
+        assert_eq!(features.suspicious_imports, ["_mprotect"]);
+    }
+
+    #[test]
+    fn import_name_scans_stop_at_the_byte_budget() {
+        let long = format!("{}mprotect", "x".repeat(1_000));
+
+        let found = find_suspicious_imports(std::iter::repeat_n(long.as_str(), 1_000_000), 10_000);
+
+        assert_eq!(found.len(), 9);
     }
 }
