@@ -67,8 +67,11 @@ impl riggs_comms::ControlOps for ControlAdapter {
         let events = self.events.clone();
         tokio::task::spawn_blocking(move || {
             let storyline = StorylineId::new();
+            // A file at rest has no acting process. pid 0 marks it unattributed,
+            // so a hit quarantines the file instead of killing the daemon (the
+            // scan runs inside it).
             let ctx = ProcessContext::new(
-                std::process::id(),
+                0,
                 0,
                 "riggs-scan",
                 "riggs-scan",
@@ -342,5 +345,31 @@ mod tests {
             hash.as_deref(),
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
+    }
+
+    #[tokio::test]
+    async fn scan_events_carry_no_acting_process() {
+        use riggs_comms::ControlOps;
+
+        let dir = std::env::temp_dir().join(format!("riggs-scan-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sample.bin"), b"x").unwrap();
+        let (events, mut queued) = mpsc::channel(8);
+        let adapter = ControlAdapter {
+            config_path: None,
+            events,
+            feeds: None,
+            console: Default::default(),
+            vuln_running: Default::default(),
+            vault: riggs_response::QuarantineVault::new(dir.join("vault")),
+        };
+
+        adapter.trigger_scan(dir.to_str().unwrap()).unwrap();
+        let event = queued.recv().await.unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // With the daemon's own pid here, a critical-confidence hit made the
+        // default response policy SIGKILL the daemon.
+        assert_eq!(event.process_context().pid, 0);
     }
 }

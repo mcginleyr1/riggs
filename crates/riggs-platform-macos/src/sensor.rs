@@ -39,10 +39,11 @@ impl Default for MacOsSensor {
 
 fn send_signal(pid: u32, signal: libc::c_int, signal_name: &str) -> Result<(), RiggsError> {
     // Never signal pid 0 (the caller's entire process group -- would kill the
-    // daemon itself) or pid 1 (init). Response actions must carry a real target.
-    if pid <= 1 {
+    // daemon itself), pid 1 (init) or the daemon's own pid. Response actions
+    // must carry a real target.
+    if pid <= 1 || pid == std::process::id() {
         return Err(RiggsError::Platform(format!(
-            "refusing to send {signal_name} to pid {pid}: pid 0 signals the daemon's own process group, pid 1 is init"
+            "refusing to send {signal_name} to pid {pid}: pid 0 signals the daemon's own process group, pid 1 is init, and the daemon never signals itself"
         )));
     }
     let ret = unsafe { libc::kill(pid as i32, signal) };

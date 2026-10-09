@@ -269,7 +269,7 @@ impl ResponsePolicy {
 /// A pid of 0 or an empty path are placeholders in the policy (the concrete
 /// target is only known at runtime). Returns `None` when a placeholder cannot
 /// be resolved, or when a process target resolves to pid <= 1 (which would
-/// signal the daemon's own process group or init).
+/// signal the daemon's own process group or init) or to the daemon itself.
 /// A Rollback with this storyline id targets the detection's own storyline.
 pub const DETECTED_STORYLINE: StorylineId = StorylineId(uuid::Uuid::nil());
 
@@ -287,11 +287,11 @@ fn concretize_action(
         }
         ResponseAction::KillProcess { pid } => {
             let pid = if *pid == 0 { target_pid } else { *pid };
-            (pid > 1).then_some(ResponseAction::KillProcess { pid })
+            (pid > 1 && pid != std::process::id()).then_some(ResponseAction::KillProcess { pid })
         }
         ResponseAction::SuspendProcess { pid } => {
             let pid = if *pid == 0 { target_pid } else { *pid };
-            (pid > 1).then_some(ResponseAction::SuspendProcess { pid })
+            (pid > 1 && pid != std::process::id()).then_some(ResponseAction::SuspendProcess { pid })
         }
         ResponseAction::QuarantineFile { path } => {
             resolve_path(path, target_path).map(|path| ResponseAction::QuarantineFile { path })
@@ -315,7 +315,7 @@ fn resolve_path(configured: &Path, target: Option<&Path>) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use riggs_types::events::{EventId, StorylineId};
-    use riggs_types::verdict::MergedVerdict;
+    use riggs_types::verdict::{MergedVerdict, Verdict};
 
     fn malicious_verdict() -> MergedVerdict {
         MergedVerdict {
@@ -377,6 +377,45 @@ mod tests {
             concretize_action(&action, 42, None, &storyline),
             Some(ResponseAction::KillProcess { pid: 42 })
         ));
+    }
+
+    #[test]
+    fn critical_hit_on_an_unattributed_file_quarantines_without_killing() {
+        // What an on-demand scan produces: no acting process (pid 0), a file path.
+        let mut verdict = malicious_verdict();
+        verdict.verdicts.push(Verdict::new(
+            verdict.event_id.clone(),
+            ThreatLevel::Malicious,
+            0.99,
+            riggs_types::verdict::DetectionSource::StaticAI,
+            "packed sample",
+        ));
+        let actions = ResponsePolicy::default().evaluate(
+            &verdict,
+            0,
+            Some(Path::new("/tmp/evil")),
+            &StorylineId::new(),
+        );
+
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, ResponseAction::QuarantineFile { .. })));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, ResponseAction::KillProcess { .. })));
+    }
+
+    #[test]
+    fn kill_and_suspend_never_target_the_daemon_itself() {
+        let own_pid = std::process::id();
+        let storyline = StorylineId::new();
+        for action in [
+            ResponseAction::KillProcess { pid: 0 },
+            ResponseAction::SuspendProcess { pid: 0 },
+            ResponseAction::KillProcess { pid: own_pid },
+        ] {
+            assert!(concretize_action(&action, own_pid, None, &storyline).is_none());
+        }
     }
 
     #[test]
