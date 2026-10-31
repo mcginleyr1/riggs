@@ -119,7 +119,7 @@ config/
   dlp-policy.toml         Default DLP policy (hot-reloadable)
   policies/               Example DLP policies for common scenarios
 rules/
-  default/                Shipped YARA and custom rules (install.sh copies to /etc/riggs/rules)
+  default/                Shipped YARA rules, IOC lists and custom rules (install.sh copies to /etc/riggs/rules)
 install/
   install.sh              macOS installer
   uninstall.sh            macOS uninstaller

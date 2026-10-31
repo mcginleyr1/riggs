@@ -316,7 +316,9 @@ impl RiggsDaemon {
 
         // YARA + custom rules, shared with the hot-reload watcher started below.
         let rules_dir = PathBuf::from(&self.config.rules.rules_dir);
-        let (yara, custom_rules) = if self.config.engine.rules_enabled && rules_dir.is_dir() {
+        let (yara, local_ioc, custom_rules) = if self.config.engine.rules_enabled
+            && rules_dir.is_dir()
+        {
             let yara = match YaraEngine::new(rules_dir.clone()) {
                 Ok(engine) => Some(Arc::new(StdRwLock::new(engine))),
                 Err(e) => {
@@ -324,19 +326,26 @@ impl RiggsDaemon {
                     None
                 }
             };
+            let local_ioc = IocMatcher::load_dir(&rules_dir);
+            info!(count = local_ioc.len(), "local IOC lists loaded");
             let custom = CustomRuleEngine::load_dir(&rules_dir);
-            (yara, Some(Arc::new(StdRwLock::new(custom))))
+            (
+                yara,
+                Some(Arc::new(StdRwLock::new(local_ioc))),
+                Some(Arc::new(StdRwLock::new(custom))),
+            )
         } else {
             if self.config.engine.rules_enabled {
-                warn!(dir = %rules_dir.display(), "rules_dir missing; YARA and custom rules disabled");
+                warn!(dir = %rules_dir.display(), "rules_dir missing; YARA, IOC lists and custom rules disabled");
             }
-            (None, None)
+            (None, None, None)
         };
 
         if self.config.engine.rules_enabled {
             pipeline.add_stage(Box::new(RulesStage::new_shared(
                 yara.clone(),
                 Arc::clone(&ioc_handle),
+                local_ioc.clone(),
                 custom_rules.clone(),
             )));
         }
@@ -805,13 +814,14 @@ impl RiggsDaemon {
         info!(socket = %self.config.comms.socket_path, "IPC server started");
 
         // -- Rule hot-reload watcher --
-        if yara.is_some() || custom_rules.is_some() {
+        if yara.is_some() || local_ioc.is_some() || custom_rules.is_some() {
             self.supervisor.spawn("rule-watcher", move || {
                 let dir = rules_dir.clone();
                 let yara = yara.clone();
+                let local_ioc = local_ioc.clone();
                 let custom = custom_rules.clone();
                 Box::pin(async move {
-                    let loader = riggs_rules::RuleLoader::new(dir, yara, custom);
+                    let loader = riggs_rules::RuleLoader::new(dir, yara, local_ioc, custom);
                     if let Err(e) = loader.watch().await {
                         tracing::error!(error = %e, "rule watcher error");
                     }

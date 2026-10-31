@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const YARA_EXTENSIONS: &[&str] = &["yar", "yara"];
 pub(crate) const CUSTOM_RULE_EXTENSIONS: &[&str] = &["toml"];
+pub(crate) const IOC_EXTENSIONS: &[&str] = &["ioc"];
 
 /// Rule files under `dir` (recursively, so `default/yara` and `custom/yara`
 /// both load). Symlinked directories are not followed, so a loop can't hang it.

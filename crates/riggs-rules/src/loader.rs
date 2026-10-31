@@ -7,11 +7,13 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::custom::CustomRuleEngine;
+use crate::ioc::IocMatcher;
 use crate::yara::YaraEngine;
 
 pub struct RuleLoader {
     rules_dir: PathBuf,
     yara: Option<Arc<RwLock<YaraEngine>>>,
+    local_ioc: Option<Arc<RwLock<IocMatcher>>>,
     custom: Option<Arc<RwLock<CustomRuleEngine>>>,
 }
 
@@ -19,11 +21,13 @@ impl RuleLoader {
     pub fn new(
         rules_dir: PathBuf,
         yara: Option<Arc<RwLock<YaraEngine>>>,
+        local_ioc: Option<Arc<RwLock<IocMatcher>>>,
         custom: Option<Arc<RwLock<CustomRuleEngine>>>,
     ) -> Self {
         Self {
             rules_dir,
             yara,
+            local_ioc,
             custom,
         }
     }
@@ -68,9 +72,10 @@ impl RuleLoader {
                     // the async runtime.
                     let dir = self.rules_dir.clone();
                     let yara = self.yara.clone();
+                    let local_ioc = self.local_ioc.clone();
                     let custom = self.custom.clone();
                     let reload = tokio::task::spawn_blocking(move || {
-                        reload_affected(&dir, yara, custom, &event.paths)
+                        reload_affected(&dir, yara, local_ioc, custom, &event.paths)
                     });
                     if let Err(e) = reload.await {
                         warn!(error = %e, "rule reload task failed");
@@ -90,6 +95,7 @@ impl RuleLoader {
 fn reload_affected(
     dir: &Path,
     yara: Option<Arc<RwLock<YaraEngine>>>,
+    local_ioc: Option<Arc<RwLock<IocMatcher>>>,
     custom: Option<Arc<RwLock<CustomRuleEngine>>>,
     paths: &[PathBuf],
 ) {
@@ -103,6 +109,12 @@ fn reload_affected(
             }
             Err(e) => warn!(error = %e, "failed to reload yara rules; keeping previous set"),
         }
+    }
+
+    if let Some(local_ioc) = local_ioc.filter(|_| touches(crate::IOC_EXTENSIONS)) {
+        let fresh = IocMatcher::load_dir(dir);
+        info!(count = fresh.len(), "local IOC lists reloaded");
+        *local_ioc.write().unwrap_or_else(PoisonError::into_inner) = fresh;
     }
 
     if let Some(custom) = custom.filter(|_| touches(crate::CUSTOM_RULE_EXTENSIONS)) {
@@ -131,10 +143,25 @@ mod tests {
             r#"rule fresh { strings: $a = "NEW_MARKER" condition: $a }"#,
         )
         .unwrap();
-        reload_affected(&dir, Some(Arc::clone(&yara)), None, &[rule]);
+        reload_affected(&dir, Some(Arc::clone(&yara)), None, None, &[rule]);
         let matches = yara.read().unwrap().scan_file(&sample).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(matches[0].rule_name, "fresh");
+    }
+
+    #[test]
+    fn reload_swaps_in_edited_ioc_lists() {
+        let dir = std::env::temp_dir().join(format!("riggs-loader-ioc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let local_ioc = Arc::new(RwLock::new(IocMatcher::load_dir(&dir)));
+        assert!(local_ioc.read().unwrap().is_empty());
+
+        let list = dir.join("c2.ioc");
+        std::fs::write(&list, "# c2\nip:203.0.113[.]7\ndomain:c2.example\n").unwrap();
+        reload_affected(&dir, None, Some(Arc::clone(&local_ioc)), None, &[list]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(local_ioc.read().unwrap().len(), 2);
     }
 }

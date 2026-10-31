@@ -16,10 +16,14 @@ use crate::yara::YaraEngine;
 
 pub type SharedYara = Arc<RwLock<YaraEngine>>;
 pub type SharedCustomRules = Arc<RwLock<CustomRuleEngine>>;
+pub type SharedLocalIoc = Arc<RwLock<IocMatcher>>;
 
 pub struct RulesStage {
     yara: Option<SharedYara>,
+    // Feed IOCs are replaced wholesale on every refresh; the operator's local
+    // lists live apart so a refresh can never drop them.
     ioc: Arc<RwLock<Option<IocMatcher>>>,
+    local_ioc: Option<SharedLocalIoc>,
     custom: Option<SharedCustomRules>,
 }
 
@@ -32,18 +36,25 @@ impl RulesStage {
         Self {
             yara: yara.map(|y| Arc::new(RwLock::new(y))),
             ioc: Arc::new(RwLock::new(ioc)),
+            local_ioc: None,
             custom: custom.map(|c| Arc::new(RwLock::new(c))),
         }
     }
 
     /// Build from handles shared with the feed dispatcher (IOC) and the rule
-    /// hot-reload watcher (YARA, custom rules).
+    /// hot-reload watcher (YARA, local IOC lists, custom rules).
     pub fn new_shared(
         yara: Option<SharedYara>,
         ioc: Arc<RwLock<Option<IocMatcher>>>,
+        local_ioc: Option<SharedLocalIoc>,
         custom: Option<SharedCustomRules>,
     ) -> Self {
-        Self { yara, ioc, custom }
+        Self {
+            yara,
+            ioc,
+            local_ioc,
+            custom,
+        }
     }
 
     pub fn ioc_handle(&self) -> Arc<RwLock<Option<IocMatcher>>> {
@@ -117,31 +128,38 @@ impl DetectionStage for RulesStage {
         // hit must not short-circuit a stronger YARA match on the same event.
         let mut candidates: Vec<Verdict> = Vec::new();
 
-        // IOC matching
-        if let Ok(guard) = self.ioc.read() {
-            if let Some(ioc_matcher) = guard.as_ref() {
-                let ioc_hits = ioc_matcher.check_event(event);
-                if !ioc_hits.is_empty() {
-                    let worst_severity = ioc_hits
-                        .iter()
-                        .map(|ioc| ioc.severity)
-                        .max()
-                        .unwrap_or(Severity::Low);
+        // IOC matching (feed + local lists); the guards end with this block, before any await.
+        {
+            let feed = self.ioc.read().unwrap_or_else(PoisonError::into_inner);
+            let local = self
+                .local_ioc
+                .as_ref()
+                .map(|l| l.read().unwrap_or_else(PoisonError::into_inner));
+            let ioc_hits: Vec<_> = feed
+                .iter()
+                .chain(local.as_deref())
+                .flat_map(|matcher| matcher.check_event(event))
+                .collect();
+            if !ioc_hits.is_empty() {
+                let worst_severity = ioc_hits
+                    .iter()
+                    .map(|ioc| ioc.severity)
+                    .max()
+                    .unwrap_or(Severity::Low);
 
-                    let descriptions: Vec<String> = ioc_hits
-                        .iter()
-                        .map(|ioc| format!("{}: {}", ioc.value, ioc.description))
-                        .collect();
+                let descriptions: Vec<String> = ioc_hits
+                    .iter()
+                    .map(|ioc| format!("{}: {}", ioc.value, ioc.description))
+                    .collect();
 
-                    candidates.push(Verdict {
-                        event_id: eid.clone(),
-                        threat_level: severity_to_threat_level(worst_severity),
-                        confidence: severity_to_confidence(worst_severity),
-                        source: DetectionSource::IocMatch,
-                        description: format!("IOC matches: {}", descriptions.join("; ")),
-                        timestamp: Utc::now(),
-                    });
-                }
+                candidates.push(Verdict {
+                    event_id: eid.clone(),
+                    threat_level: severity_to_threat_level(worst_severity),
+                    confidence: severity_to_confidence(worst_severity),
+                    source: DetectionSource::IocMatch,
+                    description: format!("IOC matches: {}", descriptions.join("; ")),
+                    timestamp: Utc::now(),
+                });
             }
         }
 
@@ -248,6 +266,40 @@ mod tests {
     #[test]
     fn strongest_is_none_for_no_matches() {
         assert!(strongest(vec![]).is_none());
+    }
+
+    #[tokio::test]
+    async fn local_ioc_lists_match_while_the_feed_matcher_is_empty() {
+        use riggs_types::events::{ProcessAction, ProcessContext, StorylineId};
+
+        let local = IocMatcher::new(vec![crate::Ioc {
+            ioc_type: crate::IocType::IpAddress,
+            value: "203.0.113.7".into(),
+            description: "test".into(),
+            severity: Severity::High,
+        }]);
+        let stage = RulesStage::new_shared(
+            None,
+            Arc::new(RwLock::new(None)),
+            Some(Arc::new(RwLock::new(local))),
+            None,
+        );
+        let ctx = ProcessContext::new(
+            7,
+            1,
+            "ssh",
+            "/usr/bin/ssh",
+            "ssh -N tunnel@203.0.113.7",
+            "501",
+            StorylineId::new(),
+        );
+        let verdict = stage
+            .analyze(&RiggsEvent::new_process(ProcessAction::Exec, ctx, None))
+            .await
+            .unwrap();
+        assert!(
+            matches!(verdict, StageVerdict::Malicious(v) if v.source == DetectionSource::IocMatch)
+        );
     }
 
     #[tokio::test]
