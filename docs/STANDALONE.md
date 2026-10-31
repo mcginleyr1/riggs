@@ -21,7 +21,10 @@ Everything else works locally out of the box with secure defaults.
 - Sensors → detection pipeline (static AI, behavioral, rules/YARA, threat intel)
 - Response engine (kill / quarantine / network containment)
 - Local event/verdict/response store (redb) with automatic retention
-- Threat-intel feed refresh (MalwareBazaar / URLhaus / OSV) straight from the agent
+- Threat-intel feed refresh (MalwareBazaar / URLhaus / OSV) straight from the agent.
+  MalwareBazaar and URLhaus need a free abuse.ch Auth-Key (https://auth.abuse.ch/)
+  in `[intel.feeds] abusech_auth_key`; edit riggs.toml directly (a secret on the
+  `riggs config` command line would land in shell history)
 
 ## Local control (Unix socket, no network)
 

@@ -534,6 +534,11 @@ pub struct AbuseIpdbConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedsConfig {
+    /// abuse.ch Auth-Key (free at https://auth.abuse.ch/). MalwareBazaar and
+    /// URLhaus exports require it; without it those feeds stay off.
+    /// Secret: never expose over IPC (GetConfig serializes this struct).
+    #[serde(default, skip_serializing)]
+    pub abusech_auth_key: String,
     pub malwarebazaar_enabled: bool,
     pub malwarebazaar_interval_hours: u32,
     pub urlhaus_enabled: bool,
@@ -545,6 +550,7 @@ pub struct FeedsConfig {
 impl Default for FeedsConfig {
     fn default() -> Self {
         Self {
+            abusech_auth_key: String::new(),
             malwarebazaar_enabled: true,
             malwarebazaar_interval_hours: 24,
             urlhaus_enabled: true,

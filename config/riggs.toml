@@ -103,6 +103,9 @@ enabled = false
 api_key = ""
 
 [intel.feeds]
+# MalwareBazaar and URLhaus exports need an abuse.ch Auth-Key (free account at
+# https://auth.abuse.ch/). Left empty, those two feeds stay off.
+abusech_auth_key = ""
 malwarebazaar_enabled = true
 malwarebazaar_interval_hours = 24
 urlhaus_enabled = true

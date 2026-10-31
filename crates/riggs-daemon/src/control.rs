@@ -105,7 +105,10 @@ impl riggs_comms::ControlOps for ControlAdapter {
     fn refresh_feeds(&self) -> Result<String, String> {
         match &self.feeds {
             Some(feeds) if feeds.request_refresh() => Ok("threat feed refresh started".into()),
-            Some(_) => Err("no threat feeds are enabled in [intel.feeds]".into()),
+            Some(_) => Err(
+                "no threat feeds are enabled in [intel.feeds] (MalwareBazaar and URLhaus also need abusech_auth_key)"
+                    .into(),
+            ),
             None => Err("threat intel is disabled ([intel] enabled = false)".into()),
         }
     }

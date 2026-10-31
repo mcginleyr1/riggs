@@ -52,11 +52,19 @@ impl FeedManager {
     /// Ask the running manager to refresh every enabled feed now. Returns
     /// false when no feed is enabled.
     pub fn request_refresh(&self) -> bool {
-        let any_enabled = self.config.malwarebazaar_enabled || self.config.urlhaus_enabled;
+        let any_enabled = self.malwarebazaar_on() || self.urlhaus_on();
         if any_enabled {
             self.refresh_requested.notify_one();
         }
         any_enabled
+    }
+
+    fn malwarebazaar_on(&self) -> bool {
+        self.config.malwarebazaar_enabled && !self.config.abusech_auth_key.is_empty()
+    }
+
+    fn urlhaus_on(&self) -> bool {
+        self.config.urlhaus_enabled && !self.config.abusech_auth_key.is_empty()
     }
 
     pub fn new(
@@ -87,21 +95,30 @@ impl FeedManager {
         let mut mb_ticker = tokio::time::interval(mb_interval);
         let mut uh_ticker = tokio::time::interval(uh_interval);
 
+        if (self.config.malwarebazaar_enabled || self.config.urlhaus_enabled)
+            && self.config.abusech_auth_key.is_empty()
+        {
+            tracing::warn!(
+                "MalwareBazaar and URLhaus need [intel.feeds] abusech_auth_key \
+                 (free at https://auth.abuse.ch/); those feeds stay off"
+            );
+        }
+
         // First tick fires immediately
         loop {
             tokio::select! {
-                _ = mb_ticker.tick(), if self.config.malwarebazaar_enabled => {
+                _ = mb_ticker.tick(), if self.malwarebazaar_on() => {
                     self.refresh_malwarebazaar().await;
                 }
-                _ = uh_ticker.tick(), if self.config.urlhaus_enabled => {
+                _ = uh_ticker.tick(), if self.urlhaus_on() => {
                     self.refresh_urlhaus().await;
                 }
                 _ = self.refresh_requested.notified() => {
                     tracing::info!("feed refresh requested");
-                    if self.config.malwarebazaar_enabled {
+                    if self.malwarebazaar_on() {
                         self.refresh_malwarebazaar().await;
                     }
-                    if self.config.urlhaus_enabled {
+                    if self.urlhaus_on() {
                         self.refresh_urlhaus().await;
                     }
                 }
@@ -111,7 +128,11 @@ impl FeedManager {
 
     async fn refresh_malwarebazaar(&self) {
         tracing::info!("refreshing MalwareBazaar hash feed");
-        match self.malwarebazaar.download_recent_hashes().await {
+        match self
+            .malwarebazaar
+            .download_recent_hashes(&self.config.abusech_auth_key)
+            .await
+        {
             Ok(hashes) => {
                 // Union the new hashes into the cumulative set, then rebuild the
                 // bloom sized for the full set (a fixed bloom can't grow safely).
@@ -148,7 +169,11 @@ impl FeedManager {
 
     async fn refresh_urlhaus(&self) {
         tracing::info!("refreshing URLhaus feed");
-        match self.urlhaus.download_recent().await {
+        match self
+            .urlhaus
+            .download_recent(&self.config.abusech_auth_key)
+            .await
+        {
             Ok(entries) => {
                 let iocs: Vec<IocEntry> = entries
                     .into_iter()

@@ -32,6 +32,8 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
 - **YARA rules** — YARA-X engine with hot-reload from rules directories
 - **IOC matching** — Aho-Corasick and bloom filter matching against threat feeds
 - **Threat intelligence** — VirusTotal, AbuseIPDB, MalwareBazaar, URLhaus, OSV feeds
+  (MalwareBazaar and URLhaus need a free abuse.ch Auth-Key from https://auth.abuse.ch/:
+  put it in `[intel.feeds] abusech_auth_key` in riggs.toml)
 - **Data loss prevention** — blocks sensitive file uploads to AI assistants and cloud services
 - **Storyline correlation** — links events into process-tree storylines
 - **Response engine** — kill, suspend, quarantine, network containment
