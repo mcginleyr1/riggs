@@ -100,6 +100,15 @@ impl StorylineCorrelator {
             self.last_prune = now;
         }
 
+        // pid 0 means "acting process unknown" (notify file events, scans), not a
+        // process: one shared storyline would chain unrelated detections together
+        // and point Rollback at every unattributed file. Such events get a fresh id
+        // and are not tracked here, so their verdicts don't accumulate into any
+        // storyline score; each detection is still stored and reported per event.
+        if ctx.pid == 0 {
+            return StorylineId::new();
+        }
+
         let storyline_id = self.assign(&ctx, event_id, now);
 
         // A process exit ends the pid's association, so a later reused pid does
@@ -392,6 +401,19 @@ mod tests {
         // pid 100 recycled by an unrelated process -> must not inherit the old storyline
         let second = c.correlate(&proc_event(100, 1, ProcessAction::Exec));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn unattributed_events_never_share_a_storyline() {
+        let mut c = StorylineCorrelator::new();
+        let a = c.correlate(&proc_event(0, 0, ProcessAction::Exec));
+        let b = c.correlate(&proc_event(0, 0, ProcessAction::Exec));
+        // A real process whose parent field reads 0 must not join them either.
+        let child = c.correlate(&proc_event(300, 0, ProcessAction::Exec));
+        assert_ne!(a, b);
+        assert_ne!(child, a);
+        assert!(!c.pid_to_storyline.contains_key(&0));
+        assert_eq!(c.storylines.len(), 1);
     }
 
     #[test]
