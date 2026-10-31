@@ -517,17 +517,23 @@ impl BehaviorTracker {
     }
 
     fn check_suspicious_child_process(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Matched against whole name tokens: as substrings, "word" hit 1Password
+        // and the system password agents, "preview" hit spatialpreviewd.
         const SUSPICIOUS_PARENTS: &[&str] = &[
             "office",
             "word",
+            "winword",
             "excel",
             "powerpoint",
+            "powerpnt",
             "outlook",
             "pdf",
             "acrobat",
+            "acrord32",
             "preview",
             "evince",
             "libreoffice",
+            "soffice",
             "pages",
             "numbers",
             "keynote",
@@ -555,10 +561,11 @@ impl BehaviorTracker {
                     continue;
                 }
                 if let Some(parent) = &pe.parent_context {
-                    let parent_name_lower = parent.name.to_lowercase();
-                    let is_suspicious_parent = SUSPICIOUS_PARENTS
-                        .iter()
-                        .any(|s| parent_name_lower.contains(s));
+                    let is_suspicious_parent = parent
+                        .name
+                        .to_lowercase()
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .any(|token| SUSPICIOUS_PARENTS.contains(&token));
 
                     if !is_suspicious_parent {
                         continue;
@@ -3182,6 +3189,39 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_parent_names_containing_office_words_not_flagged() {
+        // Real process names on a Mac that contain "word"/"preview"/"pdf" as substrings.
+        for parent in [
+            "1Password Helper",
+            "PasswordBreachAgent",
+            "spatialpreviewd",
+            "CGPDFService",
+        ] {
+            let event = make_process_event_with_parent(33021, "sh", "/bin/sh", "sh", parent, "/x");
+            let mut tracker = BehaviorTracker::new();
+            tracker.track(event.clone());
+            assert!(
+                tracker.check_patterns(event.storyline_id()).is_empty(),
+                "{parent}"
+            );
+        }
+        let event = make_process_event_with_parent(
+            33022,
+            "sh",
+            "/bin/sh",
+            "sh",
+            "Microsoft Word",
+            "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word",
+        );
+        let mut tracker = BehaviorTracker::new();
+        tracker.track(event.clone());
+        assert_eq!(
+            tracker.check_patterns(event.storyline_id()),
+            vec![BehaviorPattern::SuspiciousChildProcess]
+        );
     }
 
     #[test]

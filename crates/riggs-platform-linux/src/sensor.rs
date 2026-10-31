@@ -45,6 +45,29 @@ impl Default for LinuxSensor {
     }
 }
 
+fn build_process_context(process: &sysinfo::Process, pid: u32) -> ProcessContext {
+    ProcessContext::new(
+        pid,
+        process.parent().map(|p| p.as_u32()).unwrap_or(0),
+        process.name().to_string_lossy().to_string(),
+        process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" "),
+        process
+            .user_id()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        StorylineId::new(),
+    )
+}
+
 #[async_trait]
 impl PlatformSensor for LinuxSensor {
     fn capabilities(&self) -> PlatformCapabilities {
@@ -145,30 +168,21 @@ impl PlatformSensor for LinuxSensor {
                 let current_pids: HashSet<u32> =
                     sys.processes().keys().map(|p| p.as_u32()).collect();
 
-                // New processes
-                for &pid in current_pids.difference(&known_pids) {
+                // New processes, oldest first, so a child that appeared in the
+                // same poll can join its parent's storyline.
+                let mut new_pids: Vec<u32> =
+                    current_pids.difference(&known_pids).copied().collect();
+                new_pids.sort_by_key(|&pid| {
+                    (sys.process(Pid::from_u32(pid)).map(|p| p.start_time()), pid)
+                });
+                for pid in new_pids {
                     if let Some(process) = sys.process(Pid::from_u32(pid)) {
-                        let ctx = ProcessContext::new(
-                            pid,
-                            process.parent().map(|p| p.as_u32()).unwrap_or(0),
-                            process.name().to_string_lossy().to_string(),
-                            process
-                                .exe()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_default(),
-                            process
-                                .cmd()
-                                .iter()
-                                .map(|s| s.to_string_lossy())
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                            process
-                                .user_id()
-                                .map(|u| u.to_string())
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            StorylineId::new(),
-                        );
-                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
+                        let ctx = build_process_context(process, pid);
+                        let parent = process.parent().and_then(|ppid| {
+                            sys.process(ppid)
+                                .map(|p| build_process_context(p, ppid.as_u32()))
+                        });
+                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, parent);
                         if proc_tx.send(event).await.is_err() {
                             return;
                         }
