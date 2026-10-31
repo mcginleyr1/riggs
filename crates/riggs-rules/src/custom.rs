@@ -418,6 +418,12 @@ mod tests {
             engine.evaluate(&ssh("ssh -N -R *:0:localhost:22 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes tunnel@203.0.113.7")),
             vec!["reverse-ssh-tunnel-hostkey-override"]
         );
+        assert_eq!(
+            engine.evaluate(&ssh(
+                "ssh -N -R *:0:localhost:22 -o UserKnownHostsFile=/dev/null tunnel@203.0.113.7"
+            )),
+            vec!["reverse-ssh-tunnel-known-hosts-override"]
+        );
         assert!(engine
             .evaluate(&ssh("ssh -N -R 8080:localhost:80 dev@build-box"))
             .is_empty());

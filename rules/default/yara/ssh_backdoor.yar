@@ -17,14 +17,17 @@ rule SSH_Backdoor_Reverse_Tunnel_Implant {
 
     strings:
         $authorized_keys = "authorized_keys"
-        $pubkey = /ssh-(ed25519|rsa|ecdsa-sha2-nistp(256|384|521)) AAAA[0-9A-Za-z+\/]{40}/
-        $hostkey_override = "StrictHostKeyChecking" nocase
+        // OpenSSH key type names; ECDSA ones carry no "ssh-" prefix.
+        $pubkey = /(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) AAAA[0-9A-Za-z+\/]{40}/
+        $hostkey_strict = "StrictHostKeyChecking" nocase
+        $hostkey_known_hosts = "UserKnownHostsFile" nocase
         $fwd_to_sshd_localhost = "localhost:22"
         $fwd_to_sshd_loopback = "127.0.0.1:22"
+        $fwd_to_sshd_loopback6 = "::1]:22"
         $exit_on_forward_failure = "ExitOnForwardFailure" nocase
 
     condition:
-        $authorized_keys and $pubkey and $hostkey_override
+        $authorized_keys and $pubkey and any of ($hostkey_*)
         and (any of ($fwd_to_sshd_*) or $exit_on_forward_failure)
 }
 
@@ -49,8 +52,10 @@ rule ClaudeCode_VSX_Backdoor_2026_10 {
         $dropped_cmd = { 73 6D 74 2E 63 6D 64 }                                // smt[.]cmd
         $startup_cmd = { 73 79 73 6D 6F 6E 2E 63 6D 64 }                       // sysmon[.]cmd
 
+    // Never one string alone: a Malicious hit quarantines the file, and an
+    // analyst's notes or shell history holding just the IP must survive.
+    // (The IOC list still flags the IP on command lines and connections.)
     condition:
         hash.sha256(0, filesize) == "ecb58cb29078d9646ad1dcdbe51526f2d9cfea06be5fb2ab183e8ecc3ab6bf15"
-        or $tunnel_host
         or 2 of them
 }

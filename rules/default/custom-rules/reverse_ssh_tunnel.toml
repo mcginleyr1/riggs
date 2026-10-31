@@ -11,3 +11,15 @@ conditions = [
   { CmdlineContains = "-R" },
   { CmdlineContains = "StrictHostKeyChecking" },
 ]
+
+# Same tunnel with host-key checking defeated through the known-hosts file
+# instead (-o UserKnownHostsFile=/dev/null).
+[[rule]]
+name = "reverse-ssh-tunnel-known-hosts-override"
+description = "ssh remote port forward (-R) with UserKnownHostsFile overridden"
+action = "alert"
+conditions = [
+  { ProcessName = "ssh" },
+  { CmdlineContains = "-R" },
+  { CmdlineContains = "UserKnownHostsFile" },
+]
