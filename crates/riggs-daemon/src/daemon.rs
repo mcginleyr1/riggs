@@ -1026,8 +1026,15 @@ impl RiggsDaemon {
         let mut egress_warned = std::collections::HashSet::new();
         tokio::select! {
             _ = async {
-                while let Some(event) = event_rx.recv().await {
+                while let Some(mut event) = event_rx.recv().await {
                     events_processed.fetch_add(1, Ordering::Relaxed);
+
+                    // Correlate before detection: sensors stamp every event with
+                    // a fresh storyline, so stages that group by storyline (the
+                    // behavioral tracker, custom-rule sequences) only ever saw
+                    // one event and multi-event patterns could never fire.
+                    let storyline_id = correlator.correlate(&event);
+                    event.process_context_mut().storyline_id = storyline_id.clone();
 
                     // Sensors see the peer address, not the hostname, so only
                     // CIDR rules can allow these flows. Warn once per process
@@ -1079,7 +1086,6 @@ impl RiggsDaemon {
                             }
                         }
                     };
-                    let storyline_id = correlator.correlate(&event);
 
                     for v in &merged.verdicts {
                         correlator.add_verdict(&storyline_id, v.clone());
