@@ -76,7 +76,7 @@ snapshot_retention_hours = 24
 
 # Behavioral detection tuning and signatures (adjust sensitivity per environment).
 [detection]
-exfil_outbound_threshold = 50            # outbound conns before flagging exfiltration
+exfil_outbound_threshold = 50            # external conns that corroborate archive staging as exfiltration
 rapid_encryption_file_threshold = 10     # distinct files in the window -> ransomware
 rapid_encryption_window_secs = 5
 threat_score_threshold = 0.5             # storyline score to treat as a threat

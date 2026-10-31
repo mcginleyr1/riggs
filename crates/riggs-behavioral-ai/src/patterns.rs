@@ -42,7 +42,7 @@ impl BehaviorPattern {
             Self::ProcessInjection => "Process memory injection detected, code injected into remote process",
             Self::PrivilegeEscalation => "Unexpected privilege escalation detected",
             Self::LateralMovement => "Network-based lateral movement pattern detected across hosts",
-            Self::DataExfiltration { .. } => "Large outbound data transfer detected, possible data exfiltration",
+            Self::DataExfiltration { .. } => "Archive staged then sent out of the host, possible data exfiltration",
             Self::PersistenceMechanism => "Persistence mechanism installed (LaunchDaemon, crontab, systemd, SSH authorized_keys, or registry)",
             Self::SuspiciousChildProcess => "Suspicious child process spawned from unexpected parent (e.g., shell from Office app)",
             Self::CryptoMining { .. } => "High CPU usage combined with mining pool network connections",

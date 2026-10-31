@@ -138,7 +138,8 @@ pub struct EgressProcessRule {
 /// adjust sensitivity and add environment-specific persistence locations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionConfig {
-    /// Outbound connections in a storyline before flagging data exfiltration.
+    /// External outbound connections in a storyline that corroborate archive
+    /// staging as data exfiltration (volume alone never fires).
     pub exfil_outbound_threshold: usize,
     /// Distinct files modified within the window before flagging rapid encryption.
     pub rapid_encryption_file_threshold: usize,
