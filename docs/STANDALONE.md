@@ -27,6 +27,29 @@ Everything else works locally out of the box with secure defaults.
   in `[intel.feeds] abusech_auth_key`; edit riggs.toml directly (a secret on the
   `riggs config` command line would land in shell history)
 
+## Linux file attribution
+
+On Linux the daemon uses fanotify (root, `CAP_SYS_ADMIN`) to tie file events to
+the process behind them. Under the watched paths (`/tmp`, `/home`, `/etc`,
+`/usr/bin`, `/var/spool/cron`) each write session is reported once, when the
+file is closed, with the writer's pid, name, executable, command line and uid;
+opens under `/home` and `/tmp` are reported too, for DLP. Creates, renames and
+attribute changes still come from inotify and take the pid fanotify saw on the
+same file within 2 s, which covers write-then-rename saves such as `crontab -`.
+Deletes and directory events (`mkdir`, `touch`/`chmod` on a directory) carry
+pid 0: nothing fanotify reports ties them to a process. The daemon's own file
+reads are ignored.
+
+Without `CAP_SYS_ADMIN` (not root, an unprivileged container) the daemon logs one
+warning, `fanotify unavailable; file events fall back to inotify without process
+attribution`, and every file event carries pid 0, so kill and suspend responses
+have no process to target.
+
+fanotify marks whole mounts and filters paths in the daemon, so every open on
+those mounts reaches it. Idle that costs nothing measurable; in a 20 s
+shell-loop stress test (about 3,500 execs/s, 22k fanotify events/s) daemon CPU
+rose by 40-90% over inotify alone, with no events lost.
+
 ## Local control (Unix socket, no network)
 
 ```

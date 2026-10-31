@@ -26,7 +26,8 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
 ## Features
 
 - **Process monitoring** — tracks exec, fork, exit with full process context
-- **File monitoring** — watches creates, modifies, deletes, opens across sensitive paths
+- **File monitoring** — watches creates, modifies, deletes, opens across sensitive paths;
+  on Linux, fanotify attributes each write to the process that made it (needs root)
 - **Network monitoring** — one event per new outbound TCP/UDP connection with the owning
   process, polled every second from the kernel socket tables (`/proc/net` on Linux,
   libproc on macOS); the egress policy logs would-block flows in monitor mode
@@ -107,7 +108,7 @@ crates/
   riggs-types/            Shared types, event model, errors
   riggs-platform/         Platform sensor trait
   riggs-platform-macos/   macOS sensor (Endpoint Security, FSEvents, sysinfo)
-  riggs-platform-linux/   Linux sensor (eBPF, inotify, sysinfo)
+  riggs-platform-linux/   Linux sensor (fanotify, inotify, sysinfo)
   riggs-sensor/           Event collection and normalization
   riggs-engine/           Detection pipeline, stage routing, verdict merging
   riggs-static-ai/        Static file analysis via ONNX
