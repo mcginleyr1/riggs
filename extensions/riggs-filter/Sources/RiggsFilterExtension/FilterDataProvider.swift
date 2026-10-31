@@ -93,6 +93,10 @@ class FilterDataProvider: NEFilterDataProvider {
         if let hostname = tlsServerName(bytes) {
             return allows(socketFlow, hostname: hostname) ? .allow() : .drop()
         }
+        // Not even a whole record header yet: wait for more before judging.
+        if mayStartTLSHandshake(bytes) {
+            return NEFilterDataVerdict(passBytes: 0, peekBytes: 5 + (1 << 14))
+        }
         // A ClientHello larger than this read (post-quantum key shares make
         // them span TCP segments): pass nothing yet, wait for the full record.
         if let recordLength = tlsHandshakeRecordLength(bytes), recordLength > bytes.count {
@@ -119,14 +123,16 @@ class FilterDataProvider: NEFilterDataProvider {
         let remotePort = endpoint.flatMap { UInt16($0.port) } ?? 0
 
         // No daemon -> fail open (never break the user's network on our account).
-        guard let connection = daemonConnection, pid > 0 else {
+        guard let connection = daemonConnection else {
             return true
         }
 
         // 1) Egress allowlist (default-deny) — evaluated for EVERY flow, keyed on
         //    the originating process. This is what catches an install script's
-        //    beacon to C&C even when the destination looks innocuous.
-        let processPath = processPath(for: pid)
+        //    beacon to C&C even when the destination looks innocuous. A flow with
+        //    no audit token (pid 0) is judged as an unknown process against the
+        //    global allowlist, not waved through.
+        let processPath = pid > 0 ? self.processPath(for: pid) : ""
         let egress = connection.checkEgress(
             pid: pid,
             processPath: processPath,
@@ -141,8 +147,9 @@ class FilterDataProvider: NEFilterDataProvider {
             return false
         }
 
-        // 2) DLP (content) — only for watched domains, once egress permits the flow.
-        guard let hostname, hostMatches(hostname, anyOf: watchedDomains) else {
+        // 2) DLP (content) — only for watched domains, once egress permits the
+        //    flow; it correlates on the pid, so it needs one.
+        guard let hostname, pid > 0, hostMatches(hostname, anyOf: watchedDomains) else {
             return true
         }
         let verdict = connection.checkFlow(

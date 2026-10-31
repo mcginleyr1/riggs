@@ -106,7 +106,7 @@ pub async fn enforce(
             (CLEAR.to_owned(), 0)
         };
 
-        match tokio::task::block_in_place(|| nft(&script, false)) {
+        let failed = match tokio::task::block_in_place(|| nft(&script, false)) {
             Ok(()) if script != applied => {
                 if enforcing {
                     info!(
@@ -119,20 +119,27 @@ pub async fn enforce(
                     info!(mode = snap.mode.as_str(), "egress nftables table removed");
                 }
                 applied = script;
+                false
             }
-            Ok(()) => {}
+            Ok(()) => false,
             // Without nft there is no table of ours to remove.
-            Err(e) if !enforcing && e.kind() == ErrorKind::NotFound => {}
-            Err(e) => error!(
-                error = %e,
-                mode = snap.mode.as_str(),
-                "nft failed; the kernel keeps its previous egress ruleset"
-            ),
-        }
+            Err(e) if !enforcing && e.kind() == ErrorKind::NotFound => false,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    mode = snap.mode.as_str(),
+                    "nft failed; the kernel keeps its previous egress ruleset"
+                );
+                true
+            }
+        };
 
+        // Enforce re-resolves on the interval. A failed run is retried on it in
+        // every mode: a removal that failed must not leave default-deny in force
+        // until the next policy edit.
         tokio::select! {
             changed = policy.changed() => if changed.is_err() { return },
-            _ = tokio::time::sleep(snap.resolve_interval), if enforcing => {}
+            _ = tokio::time::sleep(snap.resolve_interval), if enforcing || failed => {}
         }
     }
 }

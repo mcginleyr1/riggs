@@ -18,6 +18,16 @@ final class ClientHelloTests: XCTestCase {
         }
     }
 
+    func testWaitsOnlyWhileAHeaderCouldStillBeTLS() {
+        for prefix: [UInt8] in [[], [0x16], [0x16, 0x03], [0x16, 0x03, 0x01, 0x02]] {
+            XCTAssertTrue(mayStartTLSHandshake(prefix), "\(prefix)")
+        }
+        // A whole header goes to the record parsers; ssh, HTTP and odd bytes don't wait.
+        for bytes: [UInt8] in [[0x16, 0x03, 0x01, 0x02, 0x00], Array("SSH".utf8), Array("GE".utf8), [0x16, 0x04]] {
+            XCTAssertFalse(mayStartTLSHandshake(bytes), "\(bytes)")
+        }
+    }
+
     func testReadsServerName() {
         XCTAssertEqual(tlsServerName(clientHello(sni: "Registry.NPMjs.org")), "registry.npmjs.org")
     }

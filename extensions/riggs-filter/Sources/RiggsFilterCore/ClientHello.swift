@@ -40,6 +40,15 @@ public func tlsHandshakeRecordLength(_ bytes: [UInt8]) -> Int? {
     return 5 + length
 }
 
+/// True while `bytes` is too short to judge: under the 5-byte record header,
+/// and every byte so far fits a TLS handshake record. TCP does not keep write
+/// boundaries, so the first read can end mid-header; deciding on the IP then
+/// would drop an allowed host (enforce) or skip DLP for the flow (monitor).
+public func mayStartTLSHandshake(_ bytes: [UInt8]) -> Bool {
+    bytes.count < 5 && bytes.first.map { $0 == 0x16 } != false
+        && (bytes.count < 2 || bytes[1] == 0x03)
+}
+
 private func hostName(_ bytes: ArraySlice<UInt8>) -> String? {
     let name = String(decoding: bytes, as: UTF8.self)
     let valid = !name.isEmpty && name.utf8.count <= 253
