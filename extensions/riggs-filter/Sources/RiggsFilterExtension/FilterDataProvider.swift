@@ -23,6 +23,9 @@ class FilterDataProvider: NEFilterDataProvider {
 
     private let logger = Logger(subsystem: "com.riggs.filter", category: "dlp")
     private var daemonConnection: DaemonConnection?
+    // Flows held for the rest of a TLS record header, until more data or a timeout.
+    private let heldLock = NSLock()
+    private var held = Set<UUID>()
 
     // Domains loaded from daemon at startup and refreshed periodically.
     private var watchedDomains: [String] = [
@@ -89,12 +92,15 @@ class FilterDataProvider: NEFilterDataProvider {
         guard let socketFlow = flow as? NEFilterSocketFlow else {
             return .allow()
         }
+        release(socketFlow)
         let bytes = [UInt8](readBytes)
         if let hostname = tlsServerName(bytes) {
             return allows(socketFlow, hostname: hostname) ? .allow() : .drop()
         }
-        // Not even a whole record header yet: wait for more before judging.
+        // Not even a whole record header yet: wait for more before judging, but
+        // not forever (a non-TLS client may send a few bytes and wait).
         if mayStartTLSHandshake(bytes) {
+            holdBriefly(socketFlow)
             return NEFilterDataVerdict(passBytes: 0, peekBytes: 5 + (1 << 14))
         }
         // A ClientHello larger than this read (post-quantum key shares make
@@ -112,7 +118,29 @@ class FilterDataProvider: NEFilterDataProvider {
         guard let socketFlow = flow as? NEFilterSocketFlow else {
             return .allow()
         }
+        release(socketFlow)
         return allows(socketFlow, hostname: nil) ? .allow() : .drop()
+    }
+
+    /// A header still incomplete after a second is not TLS: the IP decides.
+    private func holdBriefly(_ flow: NEFilterSocketFlow) {
+        heldLock.lock()
+        held.insert(flow.identifier)
+        heldLock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.release(flow) else { return }
+            self.update(
+                flow, using: self.allows(flow, hostname: nil) ? .allow() : .drop(),
+                for: .outbound)
+        }
+    }
+
+    /// Stops a pending hold; true if one was pending.
+    @discardableResult
+    private func release(_ flow: NEFilterSocketFlow) -> Bool {
+        heldLock.lock()
+        defer { heldLock.unlock() }
+        return held.remove(flow.identifier) != nil
     }
 
     /// Egress allowlist, then DLP. `hostname` nil means only the IP is known.
