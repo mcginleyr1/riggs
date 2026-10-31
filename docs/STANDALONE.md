@@ -18,7 +18,8 @@ Everything else works locally out of the box with secure defaults.
 
 ## What runs locally
 
-- Sensors → detection pipeline (static AI, behavioral, rules/YARA, threat intel)
+- Sensors (process, file, outbound connections) → detection pipeline (static AI,
+  behavioral, rules/YARA/IOC, threat intel)
 - Response engine (kill / quarantine / network containment)
 - Local event/verdict/response store (redb) with automatic retention
 - Threat-intel feed refresh (MalwareBazaar / URLhaus / OSV) straight from the agent.
@@ -90,6 +91,16 @@ riggs egress mode monitor              # off | monitor | enforce
 **Roll out with monitor first:** `mode = "monitor"` never drops a flow but logs
 every would-block, so you can see what `enforce` would break before flipping it
 on. `mode = "off"` disables it entirely on demand.
+
+On both platforms the daemon also checks every outbound connection the network
+sensor observes (it polls the socket tables once a second) and logs
+`egress would-block (observed connection)` at warn, once per process and
+destination, with the pid, process and reason. These are log lines, not
+detections, and they never block. The sensor sees the peer address but not the
+hostname, so only `allow_cidrs` can allow these flows: a domain-allowlisted
+service still shows up, and a process rule that lists only domains reports
+every connection its process makes. The `reason` names the process rule when
+one applied. Connections that open and close between two polls are not seen.
 
 ### Platform enforcement
 

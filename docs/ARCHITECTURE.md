@@ -100,6 +100,7 @@ spawns all subsystems as supervised tasks.
 ```
 riggs-daemon (main)
   ├── platform-sensor-task       # platform-specific event collection
+  │     └── network-poll         # outbound connections from the socket tables, 1 s
   ├── sensor-normalization-task  # raw → OCSF normalization
   ├── engine-task                # detection pipeline orchestrator
   │     ├── static-ai-worker     # file analysis (spawned per-file)

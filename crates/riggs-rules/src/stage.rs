@@ -303,6 +303,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ip_ioc_matches_a_connection_through_the_pipeline() {
+        use crate::ioc::{Ioc, IocType};
+        use riggs_types::events::{NetworkDirection, ProcessContext, StorylineId};
+
+        let c2 = Ioc {
+            ioc_type: IocType::IpAddress,
+            value: "203.0.113.7".into(),
+            description: "implant C2".into(),
+            severity: Severity::High,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut pipeline = riggs_engine::DetectionPipeline::new(tx);
+        pipeline.add_stage(Box::new(RulesStage::new(
+            None,
+            Some(IocMatcher::new(vec![c2])),
+            None,
+        )));
+        let ctx = ProcessContext::new(7, 1, "ssh", "/usr/bin/ssh", "", "0", StorylineId::new());
+        let event = RiggsEvent::new_network(
+            NetworkDirection::Outbound,
+            ctx,
+            "192.168.215.3",
+            "203.0.113.7",
+            49404,
+            22,
+            "tcp",
+        );
+
+        let merged = pipeline.run(event, std::time::Duration::from_secs(1)).await;
+
+        assert_eq!(merged.final_threat_level, ThreatLevel::Malicious);
+        assert_eq!(merged.verdicts[0].source, DetectionSource::IocMatch);
+    }
+
+    #[tokio::test]
     async fn yara_rules_in_nested_dirs_detect_created_files_only() {
         use riggs_types::events::{ProcessContext, StorylineId};
 

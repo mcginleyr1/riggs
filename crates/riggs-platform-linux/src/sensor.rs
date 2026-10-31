@@ -141,6 +141,8 @@ impl PlatformSensor for LinuxSensor {
             }
         });
 
+        crate::net::spawn(tx.clone());
+
         // -- Process monitoring via sysinfo polling --
         let proc_tx = tx;
         tokio::spawn(async move {

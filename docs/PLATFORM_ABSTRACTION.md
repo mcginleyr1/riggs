@@ -165,6 +165,12 @@ macOS ES provides granular event types. Riggs subscribes to:
 - `ES_EVENT_TYPE_NOTIFY_CONNECT` — outbound connection (macOS 13+)
 - These are supplemented by `pnet` for passive traffic capture where ES
   coverage is limited.
+- Implemented today instead (`riggs-platform-macos/src/net.rs`): once a second
+  the sensor walks every process's socket descriptors with libproc
+  (`proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`) and emits one Outbound
+  `NetworkEvent` per new TCP/UDP connection to a non-loopback peer, skipping
+  listeners, connections accepted on a listening port, closed sockets and the
+  daemon itself. Connections shorter than the poll interval can be missed.
 
 **Auth events:**
 - `ES_EVENT_TYPE_NOTIFY_AUTHENTICATION` — login events (macOS 13+)
@@ -295,6 +301,13 @@ eBPF programs are compiled from Rust source in the `ebpf/` directory using
 - `tracepoint/syscalls/sys_enter_bind` — port binding
 - `tracepoint/syscalls/sys_enter_accept4` — inbound connections
 - `kprobe/tcp_sendmsg` — TCP data sent (size only, no content)
+- Implemented today instead (`riggs-platform-linux/src/net.rs`): once a second
+  the sensor parses `/proc/net/{tcp,tcp6,udp,udp6}` (including `SYN_SENT`
+  connects in progress), maps socket inodes to pids through the
+  `/proc/<pid>/fd` `socket:[inode]` links, and emits one Outbound
+  `NetworkEvent` per new connection to a non-loopback peer, skipping listeners,
+  connections accepted on a listening port, sockets no process holds (inode 0,
+  e.g. `TIME_WAIT`) and the daemon itself.
 
 ### procfs Supplement
 

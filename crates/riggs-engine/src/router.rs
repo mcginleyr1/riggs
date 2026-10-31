@@ -13,7 +13,8 @@ impl EventRouter {
         match event {
             RiggsEvent::File(_) => vec![THREAT_INTEL, STATIC_AI, RULES, BEHAVIORAL_AI, DLP],
             RiggsEvent::Process(_) => vec![RULES, BEHAVIORAL_AI],
-            RiggsEvent::Network(_) => vec![THREAT_INTEL, BEHAVIORAL_AI, DLP],
+            // RULES holds the IOC matcher and NetworkDest custom rules.
+            RiggsEvent::Network(_) => vec![THREAT_INTEL, RULES, BEHAVIORAL_AI, DLP],
             RiggsEvent::Dns(_) => vec![THREAT_INTEL, RULES, BEHAVIORAL_AI],
             RiggsEvent::Auth(_) => vec![RULES, BEHAVIORAL_AI],
             RiggsEvent::Kernel(_) => vec![RULES, BEHAVIORAL_AI],
@@ -72,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn network_events_include_threat_intel() {
+    fn network_events_include_threat_intel_and_rules() {
         let event = RiggsEvent::Network(NetworkEvent {
             event_id: EventId::new(),
             timestamp: Utc::now(),
@@ -86,7 +87,7 @@ mod tests {
         });
         assert_eq!(
             EventRouter::stages_for_event(&event),
-            vec!["threat-intel", "behavioral-ai", "dlp"]
+            vec!["threat-intel", "rules", "behavioral-ai", "dlp"]
         );
     }
 

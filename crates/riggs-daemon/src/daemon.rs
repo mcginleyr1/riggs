@@ -16,7 +16,7 @@ use riggs_store::RiggsStore;
 use riggs_storyline::StorylineCorrelator;
 use riggs_types::config::RiggsConfig;
 use riggs_types::errors::RiggsError;
-use riggs_types::events::{FileAction, RiggsEvent};
+use riggs_types::events::{FileAction, NetworkDirection, RiggsEvent};
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 use riggs_types::Severity;
 use tokio::sync::mpsc;
@@ -478,7 +478,7 @@ impl RiggsDaemon {
         }
 
         // -- Egress allowlist (default-deny, opt-in; local-first) --
-        {
+        let egress_engine = {
             // The policy file is the source of truth, with riggs.toml's [egress]
             // as the fallback. Load it now (the watcher only sees later changes)
             // and refuse to start on a bad one rather than run a policy the
@@ -540,14 +540,16 @@ impl RiggsDaemon {
                     .cloud_endpoint
                     .clone()
                     .filter(|_| self.config.comms.cloud_enabled);
+                let nft_engine = Arc::clone(&engine);
                 self.supervisor.spawn("egress-nftables", move || {
                     Box::pin(riggs_egress::nftables::enforce(
-                        engine.subscribe(),
+                        nft_engine.subscribe(),
                         console.clone(),
                     ))
                 });
             }
-        }
+            engine
+        };
 
         let pipeline = Arc::new(pipeline);
 
@@ -1021,10 +1023,43 @@ impl RiggsDaemon {
 
         // -- Main event processing loop --
         let stage_timeout = Duration::from_millis(self.config.engine.stage_timeout_ms);
+        let mut egress_warned = std::collections::HashSet::new();
         tokio::select! {
             _ = async {
                 while let Some(event) = event_rx.recv().await {
                     events_processed.fetch_add(1, Ordering::Relaxed);
+
+                    // Sensors see the peer address, not the hostname, so only
+                    // CIDR rules can allow these flows. Warn once per process
+                    // and destination; the NEFilter and nftables enforce.
+                    if let RiggsEvent::Network(ne) = &event {
+                        let process = egress_process_name(&ne.process_context.path)
+                            .unwrap_or_else(|| ne.process_context.name.clone());
+                        let decision = egress_engine.evaluate(
+                            Some(&process),
+                            None,
+                            ne.dst_addr.parse().ok(),
+                            ne.dst_port,
+                        );
+                        let dest = format!("{}:{}", ne.dst_addr, ne.dst_port);
+                        if ne.direction == NetworkDirection::Outbound
+                            && decision.would_block
+                            && egress_warned.insert((process.clone(), dest.clone()))
+                        {
+                            warn!(
+                                pid = ne.process_context.pid,
+                                process = %process,
+                                dest = %dest,
+                                mode = %decision.mode.as_str(),
+                                reason = %decision.reason,
+                                "egress would-block (observed connection)"
+                            );
+                            // Bounds memory on hosts that reach many peers.
+                            if egress_warned.len() >= 10_000 {
+                                egress_warned.clear();
+                            }
+                        }
+                    }
 
                     // Isolate detection in its own task: a panic in any stage
                     // (e.g. on a crafted event) becomes a JoinError here instead

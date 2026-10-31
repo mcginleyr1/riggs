@@ -27,6 +27,9 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
 
 - **Process monitoring** — tracks exec, fork, exit with full process context
 - **File monitoring** — watches creates, modifies, deletes, opens across sensitive paths
+- **Network monitoring** — one event per new outbound TCP/UDP connection with the owning
+  process, polled every second from the kernel socket tables (`/proc/net` on Linux,
+  libproc on macOS); the egress policy logs would-block flows in monitor mode
 - **Static AI** — ONNX-based file classification for malware detection
 - **Behavioral AI** — sequence-based anomaly detection across event windows
 - **YARA rules** — YARA-X engine with hot-reload from rules directories
@@ -221,7 +224,8 @@ Events flow through a multi-stage detection pipeline:
 
 1. **Threat intel** — bloom filter + API lookups against known-bad indicators
 2. **Static AI** — ONNX model scores files on structural features
-3. **Rules** — YARA-X pattern matching + IOC matching + custom TOML rules
+3. **Rules** — YARA-X pattern matching + IOC matching + custom TOML rules (including
+   `NetworkDest` rules on connections)
 4. **Behavioral AI** — ONNX model scores event sequences for anomalous behavior
 5. **DLP** — correlates file accesses with network flows to watched domains
 
