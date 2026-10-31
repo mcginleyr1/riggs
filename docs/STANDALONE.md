@@ -46,7 +46,11 @@ attribution`, and every file event carries pid 0, so kill and suspend responses
 have no process to target.
 
 fanotify marks whole mounts and filters paths in the daemon, so every open on
-those mounts reaches it. Idle that costs nothing measurable; in a 20 s
+those mounts reaches it. It marks the mounts holding the watched directories and
+every mount below them at startup (a separately mounted `/home/alice`); one it
+cannot mark is still reported by inotify, without a pid. A mount added after
+startup (a home mounted at login) is watched by neither until the daemon
+restarts: inotify watches the directory the mount covers. Idle that costs nothing measurable; in a 20 s
 shell-loop stress test (about 3,500 execs/s, 22k fanotify events/s) daemon CPU
 rose by 40-90% over inotify alone, with no events lost.
 

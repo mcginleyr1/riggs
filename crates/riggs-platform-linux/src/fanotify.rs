@@ -5,7 +5,7 @@
 //! creates, deletes, renames or attribute changes, so inotify still does; those
 //! events pass through here to borrow the pid fanotify last saw on the same file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
@@ -43,15 +43,34 @@ struct Sighting {
 
 type Sightings = HashMap<Key, (ProcessContext, Instant)>;
 
-/// Starts fanotify on the mounts holding `dirs` and returns the sender inotify
-/// events must go through to be attributed, or None (with one warning) when
-/// fanotify is unavailable and inotify events stay unattributed.
+/// Ids of the mounts fanotify marked. inotify's per-write events are redundant
+/// only on these; on a mount fanotify could not mark, inotify's event is the
+/// only one, so it is kept (without a pid).
+pub(crate) struct Marked(HashSet<u64>);
+
+impl Marked {
+    pub(crate) fn covers(&self, path: &Path) -> bool {
+        mount_id(path).is_some_and(|id| self.0.contains(&id))
+    }
+}
+
+/// Starts fanotify on the mounts holding `dirs` and every mount below them, and
+/// returns the sender inotify events must go through to be attributed plus the
+/// marked mounts, or None (with one warning) when fanotify is unavailable and
+/// inotify events stay unattributed.
 pub(crate) fn start(
     dirs: &'static [&'static str],
     tx: mpsc::Sender<RiggsEvent>,
-) -> Option<mpsc::Sender<RiggsEvent>> {
-    let fd = match init(dirs) {
-        Ok(fd) => fd,
+) -> Option<(mpsc::Sender<RiggsEvent>, Marked)> {
+    // A watched root may be a symlink (/home -> /var/home on Fedora Atomic) and
+    // fanotify reports resolved paths: match those, report the configured path
+    // as inotify does.
+    let roots: Vec<(PathBuf, &'static str)> = dirs
+        .iter()
+        .filter_map(|d| Some((std::fs::canonicalize(d).ok()?, *d)))
+        .collect();
+    let (fd, marked) = match init(&roots) {
+        Ok(init) => init,
         Err(e) => {
             warn!(error = %e, "fanotify unavailable; file events fall back to inotify without process attribution");
             return None;
@@ -60,7 +79,7 @@ pub(crate) fn start(
     info!("fanotify attributing file events to processes");
     let (sighting_tx, mut sighting_rx) = mpsc::channel::<Sighting>(1024);
     let reader_tx = tx.clone();
-    std::thread::spawn(move || read_events(&fd, dirs, &sighting_tx, &reader_tx));
+    std::thread::spawn(move || read_events(&fd, &roots, &sighting_tx, &reader_tx));
 
     let (inotify_tx, mut inotify_rx) = mpsc::channel::<RiggsEvent>(1024);
     tokio::spawn(async move {
@@ -101,10 +120,10 @@ pub(crate) fn start(
             }
         }
     });
-    Some(inotify_tx)
+    Some((inotify_tx, marked))
 }
 
-fn init(dirs: &[&str]) -> io::Result<OwnedFd> {
+fn init(roots: &[(PathBuf, &str)]) -> io::Result<(OwnedFd, Marked)> {
     // O_NONBLOCK: the kernel opens each event's file into our fd table, and a
     // blocking open of a FIFO would stall the reader.
     let event_flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_LARGEFILE | libc::O_CLOEXEC;
@@ -118,9 +137,9 @@ fn init(dirs: &[&str]) -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    for dir in dirs.iter().filter(|d| Path::new(d).exists()) {
-        let path = CString::new(*dir)?;
-        // A mount mark sees the whole mount; read_events filters back down to `dirs`.
+    let mark = |path: &Path| -> io::Result<()> {
+        let path = CString::new(path.as_os_str().as_encoded_bytes())?;
+        // A mount mark sees the whole mount; read_events filters back down to `roots`.
         let ret = unsafe {
             libc::fanotify_mark(
                 fd.as_raw_fd(),
@@ -133,13 +152,44 @@ fn init(dirs: &[&str]) -> io::Result<OwnedFd> {
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
+        Ok(())
+    };
+    let mut marked = HashSet::new();
+    for (root, _) in roots {
+        mark(root)?;
+        marked.extend(mount_id(root));
     }
-    Ok(fd)
+    // A mount mark stops at child mounts (a separately mounted /home/alice), so
+    // mark those too. One that can't be marked stays inotify-only.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+    for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
+        let point = Path::new(point);
+        if roots.iter().any(|(root, _)| point.starts_with(root)) && mark(point).is_ok() {
+            marked.extend(mount_id(point));
+        }
+    }
+    Ok((fd, Marked(marked)))
+}
+
+/// The id of the mount `path` lives on (statx STATX_MNT_ID, Linux 5.8+).
+fn mount_id(path: &Path) -> Option<u64> {
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_MNT_ID,
+            &mut stx,
+        )
+    };
+    (ret == 0 && stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id)
 }
 
 fn read_events(
     fd: &OwnedFd,
-    dirs: &[&str],
+    roots: &[(PathBuf, &str)],
     sightings: &mpsc::Sender<Sighting>,
     tx: &mpsc::Sender<RiggsEvent>,
 ) {
@@ -184,18 +234,21 @@ fn read_events(
             let Ok(link) = std::fs::read_link(format!("/proc/self/fd/{}", meta.fd)) else {
                 continue;
             };
-            if !dirs.iter().any(|d| link.starts_with(d)) {
+            let Some((root, shown)) = roots.iter().find(|(root, _)| link.starts_with(root)) else {
                 continue;
-            }
+            };
             let Ok(stat) = file.metadata() else {
                 continue;
             };
             let link = link.to_string_lossy();
             // The kernel suffixes the path of a file unlinked since it was opened.
-            let path = match stat.nlink() {
+            let real = match stat.nlink() {
                 0 => link.strip_suffix(" (deleted)").unwrap_or(&link),
                 _ => &link,
             };
+            let path =
+                Path::new(shown).join(Path::new(real).strip_prefix(root).unwrap_or(Path::new("")));
+            let path = &*path.to_string_lossy();
             let ctx = crate::sensor::proc_context(pid).unwrap_or_else(|| {
                 ProcessContext::new(
                     pid,
@@ -246,21 +299,22 @@ fn attribution(seen: &Sightings, path: &Path, action: FileAction) -> Option<Proc
     if action == FileAction::Delete {
         return None;
     }
-    let inode = std::fs::symlink_metadata(path)
-        .ok()
-        .map(|m| Key::Inode(m.dev(), m.ino()));
     let fresh = |key: &Key| {
         seen.get(key)
             .filter(|(_, at)| at.elapsed() < ATTRIBUTION_WINDOW)
     };
-    inode
-        .as_ref()
-        .and_then(fresh)
-        .or_else(|| fresh(&Key::Path(path.to_path_buf())))
-        .map(|(ctx, _)| ProcessContext {
-            storyline_id: StorylineId::new(),
-            ..ctx.clone()
-        })
+    // While the file exists only a sighting of this very inode names its process:
+    // a path sighting may be of a different file since replaced at that path, and
+    // a wrong pid is worse than none (kill/suspend would hit it). The path is
+    // for files already renamed away.
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => fresh(&Key::Inode(m.dev(), m.ino())),
+        Err(_) => fresh(&Key::Path(path.to_path_buf())),
+    }
+    .map(|(ctx, _)| ProcessContext {
+        storyline_id: StorylineId::new(),
+        ..ctx.clone()
+    })
 }
 
 #[cfg(test)]
@@ -311,6 +365,11 @@ mod tests {
         assert_eq!(pid(&tmp, FileAction::Delete), None);
         assert_eq!(pid(&dir.join("stale"), FileAction::Modify), None);
         assert_eq!(pid(&dir.join("unseen"), FileAction::Create), None);
+
+        // A reader's sighting of the old file must not name the new one put at
+        // its path: while a file exists, only its own inode counts.
+        std::fs::write(&tmp, "replacement\n").unwrap();
+        assert_eq!(pid(&tmp, FileAction::Create), None, "replaced file");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

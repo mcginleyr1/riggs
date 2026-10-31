@@ -138,13 +138,15 @@ impl PlatformSensor for LinuxSensor {
         // -- File monitoring via notify (inotify on Linux) --
         // fanotify (root on Linux) reports writes with the writer's pid and attributes
         // the inotify events below; without it they carry pid 0.
+        type Covers = Box<dyn Fn(&std::path::Path) -> bool + Send>;
         #[cfg(target_os = "linux")]
-        let (file_tx, fanotify) = match crate::fanotify::start(WATCHED_DIRS, tx.clone()) {
-            Some(attributed) => (attributed, true),
-            None => (tx.clone(), false),
-        };
+        let (file_tx, fanotify_covers): (_, Covers) =
+            match crate::fanotify::start(WATCHED_DIRS, tx.clone()) {
+                Some((attributed, marked)) => (attributed, Box::new(move |p| marked.covers(p))),
+                None => (tx.clone(), Box::new(|_| false)),
+            };
         #[cfg(not(target_os = "linux"))]
-        let (file_tx, fanotify) = (tx.clone(), false);
+        let (file_tx, fanotify_covers): (_, Covers) = (tx.clone(), Box::new(|_| false));
         let (notify_tx, mut notify_rx) =
             tokio::sync::mpsc::channel::<notify::Result<notify::Event>>(1024);
 
@@ -169,8 +171,11 @@ impl PlatformSensor for LinuxSensor {
                 let Ok(event) = result else { continue };
                 let action = match event.kind {
                     notify::EventKind::Create(_) => Some(FileAction::Create),
-                    // fanotify reports each write session once, on close.
-                    notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) if fanotify => {
+                    // fanotify reports each write session once, on close, but only
+                    // on the mounts it marked; elsewhere inotify's event is the only one.
+                    notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+                        if event.paths.iter().all(|p| fanotify_covers(p)) =>
+                    {
                         None
                     }
                     notify::EventKind::Modify(_) => Some(FileAction::Modify),
