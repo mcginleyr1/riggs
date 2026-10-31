@@ -209,6 +209,7 @@ impl PlatformSensor for LinuxSensor {
         tokio::spawn(async move {
             let mut sys = System::new();
             let mut known_pids: HashSet<u32> = HashSet::new();
+            let mut held: HashSet<u32> = HashSet::new();
 
             sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
@@ -241,6 +242,14 @@ impl PlatformSensor for LinuxSensor {
                 for pid in new_pids {
                     if let Some(process) = sys.process(Pid::from_u32(pid)) {
                         let ctx = build_process_context(process, pid);
+                        // Caught mid-execve the command line reads empty, and every
+                        // cmdline rule would miss the process. sysinfo re-reads an
+                        // empty one, so look once more next poll; kernel threads,
+                        // whose line stays empty, go out on that second look.
+                        if ctx.cmdline.is_empty() && held.insert(pid) {
+                            continue;
+                        }
+                        held.remove(&pid);
                         let parent = process.parent().and_then(|ppid| {
                             sys.process(ppid)
                                 .map(|p| build_process_context(p, ppid.as_u32()))
@@ -269,7 +278,11 @@ impl PlatformSensor for LinuxSensor {
                     }
                 }
 
+                // A held pid stays new so the next poll looks again; one that
+                // exited meanwhile is forgotten (no exec was reported for it).
+                held.retain(|pid| current_pids.contains(pid));
                 known_pids = current_pids;
+                known_pids.retain(|pid| !held.contains(pid));
             }
         });
 
