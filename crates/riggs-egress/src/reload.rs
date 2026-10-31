@@ -130,6 +130,7 @@ mod tests {
             "[egress]\nenabled = true\nmode = \"enforce\"\n",
             "enable = true\n",
             "[[process_rules]]\nprocess = \"npm\"\nallow_domain = [\"registry.npmjs.org\"]\n",
+            "resolve_interval_secs = 0\n",
         ]
         .iter()
         .map(|policy| {

@@ -529,6 +529,24 @@ impl RiggsDaemon {
                 });
                 info!("egress policy hot-reload watcher started");
             }
+
+            // Linux has no per-flow filter asking the daemon for verdicts, so
+            // the policy is applied as a host-wide nftables ruleset instead.
+            #[cfg(target_os = "linux")]
+            {
+                let console = self
+                    .config
+                    .comms
+                    .cloud_endpoint
+                    .clone()
+                    .filter(|_| self.config.comms.cloud_enabled);
+                self.supervisor.spawn("egress-nftables", move || {
+                    Box::pin(riggs_egress::nftables::enforce(
+                        engine.subscribe(),
+                        console.clone(),
+                    ))
+                });
+            }
         }
 
         let pipeline = Arc::new(pipeline);
@@ -1122,6 +1140,8 @@ impl RiggsDaemon {
         }
 
         self.supervisor.shutdown_all();
+        #[cfg(target_os = "linux")]
+        riggs_egress::nftables::shutdown();
 
         // Close the store channel so the writer flushes its final batch, then
         // wait briefly for it to drain before we exit.

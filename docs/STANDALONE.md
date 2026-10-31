@@ -117,22 +117,58 @@ How it sees destinations and what it does on failure:
   unreachable and once when it is back (`log stream --predicate
   'subsystem == "com.riggs.filter"'`).
 
-**Linux** — the policy engine and the nftables ruleset generator
-(`riggs_egress::nftables::render_ruleset`) are implemented and unit-tested: they
-turn the CIDR/port/baseline allowlist plus resolved allow-domain IPs into a
-default-deny `inet` table. The remaining runtime, which needs a Linux host with
-`CAP_NET_ADMIN`, is a milestone:
+**Linux** — in `enforce` mode the daemon (as root, or with `CAP_NET_ADMIN`, and
+the `nft` binary installed) applies the allowlist as a default-deny
+`table inet riggs_egress` on the output hook, so it covers traffic that
+originates on the host (including host-network containers, not routed or
+bridged container traffic). Check it with `sudo nft list table inet riggs_egress`.
 
-1. **Domain → IP resolution.** nftables matches addresses, not SNI, so
-   `allow_domains` must be resolved and kept fresh (DNS-snoop or periodic
-   resolve) and fed into `render_ruleset`.
-2. **Apply / teardown.** Pipe the rendered script to `nft -f -`; on daemon exit
-   or a switch to `off`/`monitor`, `nft delete table inet riggs_egress` so the
-   host fails open.
-3. **Per-process attribution.** The process-scoped rules (npm → registry only)
-   need eBPF/cgroup socket attribution, which nftables alone cannot express.
-   Until then Linux enforces the host-level default-deny allowlist, which already
-   blocks a beacon to an un-allowlisted C&C host.
+- **Domains are resolved to addresses.** nftables matches addresses, not
+  hostnames, so the daemon resolves every allowed domain (and the console host)
+  and re-resolves every `resolve_interval_secs` (policy file, default 60). DNS
+  answers rotate, so an address stays allowed for an hour after a lookup last
+  returned it. A client can still be handed an address the daemon has not seen
+  yet and be refused: a host whose DNS gives one rotating address per query
+  (github.com does) fails now and then until the daemon has seen its whole
+  pool, and so does a client using another resolver (DNS over HTTPS). Allow
+  such a service's published ranges as `allow_cidrs` instead (GitHub lists its
+  own at `https://api.github.com/meta`).
+- **Wildcards are not enforceable.** `*.example.com` cannot be resolved ahead
+  of time, so on Linux its hosts are denied; the daemon logs which patterns are
+  affected. List the exact hostnames you need (`raw.githubusercontent.com`).
+  Matching wildcards needs DNS snooping, which is not built.
+- **Process rules are not enforced per process.** nftables cannot tell which
+  process opened a socket, so every process rule's destinations join the global
+  allowlist for the whole host: npm still reaches its registry, but so can any
+  other process, and npm can reach the global allowlist. The default deny still
+  refuses a beacon to any host that is in no list. `allow_ports`, when set,
+  narrows the process-rule destinations too.
+- **The host is never stranded.** Loopback, DNS, DHCP/DHCPv6/NTP (per the
+  `[baseline]` toggles), IPv6 neighbor discovery, replies on connections the
+  remote side opened (an inbound SSH session), and the console endpoint
+  (`[comms] cloud_endpoint`, when `cloud_enabled`) on any port stay allowed.
+- **Existing connections are cut.** Packets of connections the host opened are
+  checked one by one, so switching to `enforce`, or removing a destination,
+  also ends connections already open to hosts not in the allowlist, such as an
+  attacker's `ssh -R` tunnel. A denied TCP connection is reset ("Connection
+  refused"); other protocols get an ICMP administratively-prohibited error.
+- **Changes apply at once and atomically.** Every policy reload, `riggs egress`
+  edit, and mode change replaces the table in one `nft` transaction, so there
+  is never a moment with no rules or half of them. Switching to `off` or
+  `monitor` removes the table.
+- **Failures keep the last good rules.** If `nft` is missing or an apply fails,
+  the daemon logs an error and the kernel keeps the previous ruleset (or none,
+  if nothing was ever applied); it retries on the next change or interval.
+- **Clean stop opens, crash stays closed.** On SIGTERM/SIGINT the daemon removes
+  the table, since nothing would keep its addresses fresh. A crash leaves it in
+  force until the restarted daemon replaces it; to lift it by hand, run
+  `sudo nft delete table inet riggs_egress`.
+- **The daemon's own traffic is filtered too.** Apart from the console, its
+  threat-intel and vulnerability fetches need their hosts allowed
+  (`mb-api.abuse.ch`, `urlhaus-api.abuse.ch`, `api.osv.dev`, and
+  `www.virustotal.com` / `api.abuseipdb.com` when configured).
+- Network containment (`flush ruleset`) also removes the egress table; the next
+  refresh restores it.
 
 ## macOS network filter
 

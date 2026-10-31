@@ -35,6 +35,7 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
   (MalwareBazaar and URLhaus need a free abuse.ch Auth-Key from https://auth.abuse.ch/:
   put it in `[intel.feeds] abusech_auth_key` in riggs.toml)
 - **Data loss prevention** — blocks sensitive file uploads to AI assistants and cloud services
+- **Egress allowlist** — default-deny outbound control: per process on macOS (Network Extension), host-wide on Linux (nftables); see `docs/STANDALONE.md`
 - **Storyline correlation** — links events into process-tree storylines
 - **Response engine** — kill, suspend, quarantine, network containment
 - **Vulnerability scanning** — CVE matching against installed packages via OSV
@@ -210,6 +211,7 @@ riggs scan <path>        Scan files through the detection pipeline (static AI, Y
 riggs quarantine [restore <id>]  List quarantined files, or restore one
 riggs intel [status|update]   Threat intelligence feeds (update = refresh now)
 riggs dlp [status|policy]     DLP module status and active policy
+riggs egress [status|allow|deny|mode]  Egress allowlist status, edits, and off/monitor/enforce
 riggs vuln update             Scan installed packages against OSV.dev, report to console
 ```
 

@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,10 +73,17 @@ pub struct EgressConfig {
     /// rule's destinations (not the global allowlist).
     #[serde(default)]
     pub process_rules: Vec<EgressProcessRule>,
+    /// How often the Linux nftables enforcer re-resolves allowed domains.
+    #[serde(default = "default_egress_resolve_interval_secs")]
+    pub resolve_interval_secs: NonZeroU64,
 }
 
 fn default_egress_mode() -> String {
     "monitor".into()
+}
+
+fn default_egress_resolve_interval_secs() -> NonZeroU64 {
+    NonZeroU64::new(60).expect("nonzero")
 }
 
 impl Default for EgressConfig {
@@ -87,6 +96,7 @@ impl Default for EgressConfig {
             allow_ports: Vec::new(),
             baseline: EgressBaseline::default(),
             process_rules: Vec::new(),
+            resolve_interval_secs: default_egress_resolve_interval_secs(),
         }
     }
 }

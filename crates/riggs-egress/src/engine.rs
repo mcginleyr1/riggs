@@ -1,31 +1,34 @@
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use tokio::sync::watch;
 
 use crate::policy::{EgressDecision, EgressMode, EgressPolicy};
 
-/// Holds the live egress policy behind an RwLock so the hot-reload watcher can
-/// swap it while flow checks read it concurrently.
+/// Holds the live egress policy in a watch channel: flow checks read it, the
+/// hot-reload watcher swaps it, and every swap wakes the subscribers (the
+/// Linux nftables enforcer).
 pub struct EgressEngine {
-    policy: RwLock<Arc<EgressPolicy>>,
+    policy: watch::Sender<Arc<EgressPolicy>>,
 }
 
 impl EgressEngine {
     pub fn new(policy: EgressPolicy) -> Self {
         Self {
-            policy: RwLock::new(Arc::new(policy)),
+            policy: watch::Sender::new(Arc::new(policy)),
         }
     }
 
     pub fn replace_policy(&self, policy: EgressPolicy) {
-        let mut guard = self.policy.write().unwrap_or_else(|e| e.into_inner());
-        *guard = Arc::new(policy);
+        self.policy.send_replace(Arc::new(policy));
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Arc<EgressPolicy>> {
+        self.policy.subscribe()
     }
 
     fn current(&self) -> Arc<EgressPolicy> {
-        self.policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.policy.borrow().clone()
     }
 
     pub fn mode(&self) -> EgressMode {
