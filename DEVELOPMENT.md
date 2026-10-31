@@ -176,7 +176,7 @@ riggs/
 │   ├── priv/tenant_repo/      #   Tenant DB migrations
 │   └── proto/                 #   gRPC protobuf definitions
 ├── extensions/                # macOS System Extension (Swift)
-│   └── riggs-filter/          #   NEFilterDataProvider for DLP
+│   └── riggs-filter/          #   NEFilterDataProvider (egress + DLP), host app, build.sh
 ├── config/                    # Agent configuration
 │   ├── riggs.toml             #   Main agent config
 │   ├── dlp-policy.toml        #   Default DLP policy

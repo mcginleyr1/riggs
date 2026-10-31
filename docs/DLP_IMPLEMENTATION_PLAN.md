@@ -457,6 +457,10 @@ struct DlpVerdict {
 
 #### Signing and Distribution (Open Source)
 
+> Implemented by `extensions/riggs-filter/build.sh`; the current build, signing
+> and install steps are in `docs/STANDALONE.md` ("macOS network filter"). The
+> plan below is kept as written.
+
 Since this is open source for self-install, users have two paths:
 
 **Option A: Self-sign with a Developer ID (recommended)**
@@ -624,6 +628,10 @@ accurate PID→file attribution that the DLP correlator depends on.
 ---
 
 ## Build Sequence
+
+> Superseded: the extension and its host app are built by
+> `extensions/riggs-filter/build.sh` and installed by `install/install.sh`
+> (see `docs/STANDALONE.md`, "macOS network filter").
 
 The build has two parts: the Rust daemon (Cargo) and the Swift extension (Xcode/SPM).
 

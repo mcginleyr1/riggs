@@ -813,6 +813,26 @@ impl RiggsDaemon {
         });
         info!(socket = %self.config.comms.socket_path, "IPC server started");
 
+        // -- Filter IPC (macOS): the sandboxed riggs-filter extension's channel --
+        #[cfg(target_os = "macos")]
+        {
+            let filter_state = Arc::clone(&daemon_state);
+            let filter_socket_path = self.config.comms.filter_socket_path.clone();
+            self.supervisor.spawn("filter-ipc-server", move || {
+                let state = Arc::clone(&filter_state);
+                let socket = filter_socket_path.clone();
+                Box::pin(async move {
+                    let server = riggs_comms::IpcServer::with_state(PathBuf::from(&socket), state)
+                        .with_limits(ipc_max_msg, ipc_max_conn)
+                        .root_only();
+                    if let Err(e) = server.start().await {
+                        tracing::error!(error = %e, socket = %socket, "filter IPC server error");
+                    }
+                })
+            });
+            info!(socket = %self.config.comms.filter_socket_path, "filter IPC server started");
+        }
+
         // -- Rule hot-reload watcher --
         if yara.is_some() || local_ioc.is_some() || custom_rules.is_some() {
             self.supervisor.spawn("rule-watcher", move || {

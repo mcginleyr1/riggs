@@ -63,13 +63,13 @@ from the confined toolchain.
 
 ## Full demo (Tier 2, needs Xcode)
 
-1. Build and sign `extensions/riggs-filter` (needs an Apple Developer account and
-   the Network Extension entitlement).
-2. Enable local system-extension development and load it:
+1. Build and sign `extensions/riggs-filter` with `build.sh` (needs an Apple
+   Developer account and two provisioning profiles; see "macOS network filter"
+   in `docs/STANDALONE.md`).
+2. Install and activate it, approving it in System Settings > General > Login
+   Items & Extensions > Network Extensions:
    ```bash
-   sudo systemextensionsctl developer on
-   # install the containing app / load the extension, approve it in
-   # System Settings > General > Login Items & Extensions > Network Extensions
+   sudo install/install.sh   # copies Riggs Filter.app to /Applications, runs --activate
    systemextensionsctl list | grep -i riggs   # confirm it's [activated enabled]
    ```
 3. In one terminal, watch blocks:

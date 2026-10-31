@@ -74,6 +74,16 @@ sudo install/install.sh
 This installs the daemon, CLI, config, and launchd plists. The daemon starts
 automatically on boot.
 
+Egress and DLP *blocking* on macOS also need the network filter, a signed
+system extension. Build it first (it needs provisioning profiles from your
+Apple Developer account; see "macOS network filter" in `docs/STANDALONE.md`)
+and `install.sh` installs `Riggs Filter.app` and activates it:
+
+```
+extensions/riggs-filter/build.sh --app-profile App.provisionprofile \
+    --extension-profile Extension.provisionprofile
+```
+
 ### Verify
 
 ```
@@ -113,7 +123,8 @@ crates/
   riggs-daemon/           `riggs-daemon` binary, supervisor, lifecycle
   riggs-menubar/          macOS menu bar status app
 extensions/
-  riggs-filter/           macOS Network Extension for DLP flow blocking (Swift)
+  riggs-filter/           macOS Network Extension for egress/DLP flow blocking (Swift)
+                          and its host app "Riggs Filter.app"; build.sh builds both
 config/
   riggs.toml              Main daemon configuration
   dlp-policy.toml         Default DLP policy (hot-reloadable)
@@ -227,7 +238,10 @@ Same PID + sensitive file + watched domain within the correlation window = block
 
 On macOS, the network filter is a System Extension using `NEFilterDataProvider`
 (in `extensions/riggs-filter/`). It queries the daemon over a Unix socket for
-allow/block verdicts. The daemon's DLP correlator responds in under 1ms.
+allow/block verdicts. The daemon's DLP correlator responds in under 1ms. CLI
+tools on BSD sockets don't give the filter a hostname, so it reads the TLS
+SNI from the connection's first bytes. If the daemon can't be reached the
+filter allows the flow (fail-open), so a dead daemon never cuts the network.
 
 Magic byte detection prevents evasion by file renaming (e.g., renaming `.pptx`
 to `.txt` — the OOXML `PK` header is still detected).
@@ -247,6 +261,7 @@ make fmt                 # cargo fmt --check
 make clippy              # clippy, warnings are errors
 make test                # run all tests
 cargo test -p riggs-dlp  # test a specific crate
+swift test --package-path extensions/riggs-filter   # filter SNI/domain logic
 ```
 
 CI runs the same checks on Linux, plus `mix format --check-formatted`,

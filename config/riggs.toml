@@ -39,6 +39,10 @@ rules_dir = "/etc/riggs/rules"
 
 [comms]
 socket_path = "/var/run/riggs.sock"
+# macOS: root-only (0600, uid 0) socket for the sandboxed riggs-filter Network
+# Extension, inside its app group "<TEAM_ID>.com.riggs" under root's home.
+# Change the Team ID here if you build the filter with another one.
+filter_socket_path = "/private/var/root/Library/Group Containers/3KSC5YWCZ6.com.riggs/riggs-filter.sock"
 cloud_enabled = false
 # cloud_endpoint = "https://console.example.com"
 heartbeat_interval_secs = 60

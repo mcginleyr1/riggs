@@ -96,7 +96,26 @@ on. `mode = "off"` disables it entirely on demand.
 **macOS** — enforcement runs inline in the `riggs-filter` Network Extension,
 which queries the daemon per flow and gets a per-process verdict from the
 originating PID's audit token. This is the full feature, including process-scoped
-rules.
+rules. Without the extension installed ("macOS network filter" below) nothing
+is enforced.
+
+How it sees destinations and what it does on failure:
+
+- **Hostnames.** macOS only fills in a flow's hostname for apps on
+  Network.framework/NSURLSession. CLI tools (npm/node, pip, cargo, git, curl)
+  use BSD sockets, so for outbound TCP the filter holds the first bytes, reads
+  the SNI from the TLS ClientHello and decides on that name. The TCP handshake
+  completes first; a dropped flow sends no payload. Non-TLS flows
+  (ssh, plain HTTP) and UDP (DNS, QUIC) are decided on the remote IP, so
+  allow those with `allow_cidrs`/`allow_ports`, not `allow_domains`.
+- **SNI is client-chosen.** It names where an honest client is going; a
+  targeted attacker can send an allowlisted name to a C&C IP. Domain rules
+  stop an install script beaconing to its own domain, not one that forges SNI.
+- **Fail-open.** If the daemon doesn't answer (stopped, crashed, wedged past
+  the 500 ms timeout) every flow is allowed, even in `enforce` mode, so Riggs
+  can never take the network down. The filter logs once when the daemon goes
+  unreachable and once when it is back (`log stream --predicate
+  'subsystem == "com.riggs.filter"'`).
 
 **Linux** — the policy engine and the nftables ruleset generator
 (`riggs_egress::nftables::render_ruleset`) are implemented and unit-tested: they
@@ -114,4 +133,55 @@ default-deny `inet` table. The remaining runtime, which needs a Linux host with
    need eBPF/cgroup socket attribution, which nftables alone cannot express.
    Until then Linux enforces the host-level default-deny allowlist, which already
    blocks a beacon to an un-allowlisted C&C host.
+
+## macOS network filter
+
+The filter is a system extension inside `Riggs Filter.app`. Network
+Extensions are sandboxed, so the daemon also listens on a root-only (0600,
+uid 0) socket in the app group the extension shares with it,
+`comms.filter_socket_path` in `riggs.toml`. The extension falls back to
+`/var/run/riggs.sock`.
+
+Content-filter and system-extension entitlements are restricted: macOS kills
+the app at launch unless a provisioning profile grants them. One-time setup in
+the Apple Developer portal (Certificates, Identifiers & Profiles), using the
+Team ID the filter is signed with (default `3KSC5YWCZ6`; change `TEAM_ID` for
+`build.sh` and `filter_socket_path` together):
+
+1. **Devices**: register this Mac's Provisioning UDID
+   (`system_profiler SPHardwareDataType | grep "Provisioning UDID"`).
+2. **Identifiers → App IDs** (explicit, macOS):
+   - `com.riggs.filter` with *System Extension* and *Network Extensions*
+   - `com.riggs.filter.extension` with *Network Extensions*.
+   The app group `<TEAM_ID>.com.riggs` needs no registration; macOS accepts
+   Team-ID-prefixed groups.
+3. **Profiles**: a *macOS App Development* profile for each App ID, with your
+   Apple Development certificate and this Mac. Download both.
+
+Then build, install and activate:
+
+```
+extensions/riggs-filter/build.sh \
+    --app-profile ~/Downloads/Riggs_Filter.provisionprofile \
+    --extension-profile ~/Downloads/Riggs_Filter_Extension.provisionprofile
+sudo install/install.sh
+```
+
+`build.sh` refuses a profile for the wrong App ID or without the content
+filter entitlement; it signs with `content-filter-provider-systemextension`, or
+`content-filter-provider` when a development profile grants only that. A
+Developer ID build for other Macs also needs notarization. `install.sh`
+copies the app to `/Applications` (macOS only activates system extensions from
+there) and runs its `--activate`; approve the extension in System Settings →
+General → Login Items & Extensions → Network Extensions, then allow the
+content filter when asked. Check it any time with:
+
+```
+"/Applications/Riggs Filter.app/Contents/MacOS/riggs-filter" --status
+```
+
+`--deactivate` turns the filter off and removes the extension;
+`install/uninstall.sh` runs it. Each build gets a new `CFBundleVersion`
+(`BUILD_NUMBER`) because macOS only replaces an active extension whose
+version changed.
 

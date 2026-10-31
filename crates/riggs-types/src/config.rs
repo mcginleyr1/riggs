@@ -342,6 +342,13 @@ impl Default for StoreConfig {
 pub struct CommsConfig {
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
+    /// macOS: root-only socket for the riggs-filter Network Extension. NE
+    /// providers are sandboxed, so it lives in the app-group container the
+    /// extension shares with the daemon (`<TEAM_ID>.com.riggs`, under root's
+    /// home because the extension runs as root). Follow the Team ID the
+    /// filter is signed with.
+    #[serde(default = "default_filter_socket_path")]
+    pub filter_socket_path: String,
     pub cloud_enabled: bool,
     pub cloud_endpoint: Option<String>,
     // Secret: never expose over IPC (GetConfig serializes this struct).
@@ -399,10 +406,15 @@ fn default_socket_path() -> String {
     "/var/run/riggs.sock".into()
 }
 
+fn default_filter_socket_path() -> String {
+    "/private/var/root/Library/Group Containers/3KSC5YWCZ6.com.riggs/riggs-filter.sock".into()
+}
+
 impl Default for CommsConfig {
     fn default() -> Self {
         Self {
             socket_path: default_socket_path(),
+            filter_socket_path: default_filter_socket_path(),
             cloud_enabled: false,
             cloud_endpoint: None,
             enrollment_token: None,
