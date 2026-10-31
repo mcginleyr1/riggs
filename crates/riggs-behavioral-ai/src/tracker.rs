@@ -2527,6 +2527,44 @@ mod tests {
     }
 
     #[test]
+    fn test_ssh_backdoor_footholds_detected() {
+        // What the 2026-10 Claude Code VSX implant writes, as the real paths
+        // the notify sensors report (no "~").
+        for (action, path) in [
+            (FileAction::Modify, "/Users/dev/.ssh/authorized_keys"),
+            (FileAction::Create, "/home/dev/.ssh/authorized_keys"),
+            (FileAction::Create, "/home/dev/.ssh/authorized_keys2"),
+            (
+                FileAction::Create,
+                "/Users/dev/Library/LaunchAgents/com.apple.sysmond.plist",
+            ),
+            (FileAction::Create, "/var/spool/cron/crontabs/dev"),
+        ] {
+            let event = make_file_event(0, "unknown", action, path);
+            let mut tracker = BehaviorTracker::new();
+            tracker.track(event.clone());
+            assert_eq!(
+                tracker.check_patterns(event.storyline_id()),
+                vec![BehaviorPattern::PersistenceMechanism],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssh_known_hosts_not_persistence() {
+        let event = make_file_event(
+            0,
+            "unknown",
+            FileAction::Modify,
+            "/Users/dev/.ssh/known_hosts",
+        );
+        let mut tracker = BehaviorTracker::new();
+        tracker.track(event.clone());
+        assert!(tracker.check_patterns(event.storyline_id()).is_empty());
+    }
+
+    #[test]
     fn test_config_autostart_detected() {
         let event = make_file_event(
             32005,

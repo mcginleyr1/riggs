@@ -1,0 +1,13 @@
+# A reverse SSH tunnel with host-key checking overridden: an implant exposing
+# this host's sshd to a remote operator. The 2026-10 Claude Code VSX backdoor
+# runs `ssh -N` with remote forward `*:0:localhost:22` and host-key checking
+# disabled, from a detached retry loop (autossh's ssh child matches too).
+[[rule]]
+name = "reverse-ssh-tunnel-hostkey-override"
+description = "ssh remote port forward (-R) with StrictHostKeyChecking overridden"
+action = "alert"
+conditions = [
+  { ProcessName = "ssh" },
+  { CmdlineContains = "-R" },
+  { CmdlineContains = "StrictHostKeyChecking" },
+]

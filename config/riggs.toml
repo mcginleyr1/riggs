@@ -80,6 +80,7 @@ persistence_paths = [
   "/Library/LaunchDaemons", "/Library/LaunchAgents", "~/Library/LaunchAgents",
   ".config/autostart", "/etc/cron.d", "/etc/crontab", "/var/spool/cron",
   "/etc/systemd/system", "/usr/lib/systemd/system", "/etc/init.d", "/etc/rc.local",
+  "/.ssh/authorized_keys",   # also matches authorized_keys2
 ]
 
 [intel]

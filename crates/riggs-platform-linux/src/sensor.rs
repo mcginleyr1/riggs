@@ -75,7 +75,8 @@ impl PlatformSensor for LinuxSensor {
         )
         .map_err(|e| RiggsError::Platform(format!("failed to create file watcher: {e}")))?;
 
-        for dir in ["/tmp", "/home", "/etc", "/usr/bin"] {
+        // /var/spool/cron holds per-user crontabs (`crontab -`), a persistence path.
+        for dir in ["/tmp", "/home", "/etc", "/usr/bin", "/var/spool/cron"] {
             let path = std::path::Path::new(dir);
             if path.exists() {
                 let _ = watcher.watch(path, notify::RecursiveMode::Recursive);

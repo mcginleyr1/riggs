@@ -241,6 +241,31 @@ Riggs supports multiple IOC sources:
 3. **STIX/TAXII feed** (future): Automated IOC ingestion from threat intel
    feeds, written to `rules/custom/ioc/feeds/`.
 
+## Custom Rules (TOML)
+
+What the daemon loads today from `*.toml` under `rules_dir` (`CustomRuleEngine`).
+A rule fires when every condition matches one event (verdict: Suspicious);
+a `Sequence` condition instead steps through events in one storyline.
+
+```toml
+[[rule]]
+name = "reverse-ssh-tunnel-hostkey-override"
+description = "ssh remote port forward (-R) with StrictHostKeyChecking overridden"
+action = "alert"
+conditions = [
+  { ProcessName = "ssh" },                        # exact process name
+  { CmdlineContains = "-R" },                     # case-sensitive substring of the command line
+  { CmdlineContains = "StrictHostKeyChecking" },
+]
+```
+
+Other conditions: `{ FilePath = "/exact/path" }`, `{ NetworkDest = "addr" }`,
+`{ Sequence = [ ...conditions... ] }`.
+
+Shipped rules live in `rules/default/` (`yara/`, `custom-rules/`). Rules that
+carry campaign indicators write them as YARA hex strings, so the rule files
+and riggs's own source don't match themselves.
+
 ## STAR Rules (Stateful Temporal Analysis Rules)
 
 STAR rules detect behavioral patterns that unfold over time. Unlike YARA (which

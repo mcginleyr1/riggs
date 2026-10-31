@@ -159,6 +159,7 @@ impl Default for DetectionConfig {
                 "/usr/lib/systemd/system".into(),
                 "/etc/init.d".into(),
                 "/etc/rc.local".into(),
+                "/.ssh/authorized_keys".into(),
             ],
         }
     }
