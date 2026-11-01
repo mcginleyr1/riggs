@@ -253,23 +253,30 @@ impl BehaviorTracker {
     }
 
     fn check_lateral_movement(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // Signal 1: Outbound connections to internal IPs on lateral movement ports
-        // Internal ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        // Signal 1: one process tree reaching several internal hosts on lateral
+        // movement ports (a sweep). A single SSH/RDP session to an internal box
+        // is routine administration, so on its own it never fires.
+        // Internal ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (loopback is not lateral)
         // Ports: 22 (SSH), 135 (DCOM), 445 (SMB), 3389 (RDP), 5985 (WinRM), 5986 (WinRM-SSL)
         const LATERAL_PORTS: &[u16] = &[22, 135, 445, 3389, 5985, 5986];
+        const LATERAL_HOST_THRESHOLD: usize = 3;
 
-        for event in events {
-            if let RiggsEvent::Network(ne) = event {
-                if ne.direction != NetworkDirection::Outbound {
-                    continue;
+        let lateral_hosts: HashSet<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                RiggsEvent::Network(ne)
+                    if ne.direction == NetworkDirection::Outbound
+                        && LATERAL_PORTS.contains(&ne.dst_port)
+                        && Self::is_internal_ip(&ne.dst_addr)
+                        && !ne.dst_addr.starts_with("127.") =>
+                {
+                    Some(ne.dst_addr.as_str())
                 }
-                if !LATERAL_PORTS.contains(&ne.dst_port) {
-                    continue;
-                }
-                if Self::is_internal_ip(&ne.dst_addr) {
-                    return Some(BehaviorPattern::LateralMovement);
-                }
-            }
+                _ => None,
+            })
+            .collect();
+        if lateral_hosts.len() >= LATERAL_HOST_THRESHOLD {
+            return Some(BehaviorPattern::LateralMovement);
         }
 
         // Signal 2: DNS query for internal hostname followed by network connection
@@ -389,114 +396,64 @@ impl BehaviorTracker {
     }
 
     fn check_data_exfiltration(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // Data exfiltration detection (MITRE T1041)
-        // Uses multi-signal scoring to reduce false positives.
-        // No single signal is definitive — we look for combinations.
-
-        let mut score: u8 = 0;
-
-        // === Signal 1: High volume outbound connections ===
-        // Large number of EXTERNAL outbound connections in the storyline. Internal
-        // traffic (backups, replication) is excluded so it doesn't read as exfil.
-        // (threshold is operator-configurable via [detection].exfil_outbound_threshold)
-        let outbound_count = events
-            .iter()
-            .filter(|e| {
-                matches!(e, RiggsEvent::Network(ne)
-                if ne.direction == NetworkDirection::Outbound
-                    && !Self::is_internal_ip(&ne.dst_addr))
-            })
-            .count();
-
-        if outbound_count >= self.exfil_threshold {
-            score += 1;
-        }
-
-        // === Signal 2: External destination concentration ===
-        // Many outbound connections to external (non-private) IPs
-        let external_outbound_count = events
-            .iter()
-            .filter(|e| {
-                matches!(e, RiggsEvent::Network(ne)
-                    if ne.direction == NetworkDirection::Outbound
-                        && !Self::is_internal_ip(&ne.dst_addr))
-            })
-            .count();
-
-        const EXTERNAL_THRESHOLD: usize = 20;
-        if external_outbound_count >= EXTERNAL_THRESHOLD {
-            score += 1;
-        }
-
-        // === Signal 3: Connection to unusual/suspicious ports ===
-        // Non-standard ports for outbound connections (not 80, 443, 53, 25)
-        const STANDARD_PORTS: &[u16] = &[80, 443, 53, 25, 587, 993, 995, 5222];
-        let unusual_port_connections: Vec<_> = events
-            .iter()
-            .filter_map(|e| match e {
+        // Data exfiltration (MITRE T1041) after staging (T1560). Connection
+        // counts alone describe every browser and chat client, and sensors give
+        // no byte counts, so the anchor is staging: the process tree writes an
+        // archive and then connects out. Volume and unusual ports only
+        // corroborate it: staging alone is Suspicious, with either Malicious.
+        const ARCHIVE_EXTENSIONS: &[&str] = &[
+            "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "gpg", "enc",
+        ];
+        let external_outbound = || {
+            events.iter().filter_map(|e| match e {
                 RiggsEvent::Network(ne)
                     if ne.direction == NetworkDirection::Outbound
-                        && !Self::is_internal_ip(&ne.dst_addr)
-                        && !STANDARD_PORTS.contains(&ne.dst_port) =>
+                        && !Self::is_internal_ip(&ne.dst_addr) =>
                 {
-                    Some((ne.timestamp, &ne.dst_addr, ne.dst_port))
+                    Some(ne)
                 }
                 _ => None,
             })
-            .collect();
+        };
 
-        if unusual_port_connections.len() >= 5 {
-            score += 1;
-        }
-
-        // === Signal 4: Data staging + exfiltration pattern ===
-        // File operations followed by outbound network transfers
-        let mut has_outbound_after_staging = false;
-
-        // Find the most recent file operation (Create/Modify), then look for an
-        // external outbound transfer at or after it.
-        let max_file_timestamp = events
+        // Browser downloads land in Downloads/; staging for exfiltration doesn't.
+        let staged_at = events
             .iter()
-            .filter_map(|event| match event {
+            .filter_map(|e| match e {
                 RiggsEvent::File(fe)
-                    if matches!(fe.action, FileAction::Create | FileAction::Modify) =>
+                    if matches!(fe.action, FileAction::Create | FileAction::Modify)
+                        && !fe.path.contains("/Downloads/")
+                        && std::path::Path::new(&fe.path)
+                            .extension()
+                            .and_then(|x| x.to_str())
+                            .is_some_and(|x| {
+                                ARCHIVE_EXTENSIONS.contains(&x.to_ascii_lowercase().as_str())
+                            }) =>
                 {
                     Some(fe.timestamp)
                 }
                 _ => None,
             })
-            .max();
-
-        if let Some(max_ts) = max_file_timestamp {
-            for event in events {
-                if let RiggsEvent::Network(ne) = event {
-                    if ne.direction == NetworkDirection::Outbound
-                        && ne.timestamp >= max_ts
-                        && !Self::is_internal_ip(&ne.dst_addr)
-                    {
-                        has_outbound_after_staging = true;
-                        break;
-                    }
-                }
-            }
+            .max()?;
+        if !external_outbound().any(|ne| ne.timestamp >= staged_at) {
+            return None;
         }
 
-        // Check if there were file operations at all
-        let file_ops_count = events.iter().filter(|e| {
-            matches!(e, RiggsEvent::File(fe) if matches!(fe.action, FileAction::Create | FileAction::Modify))
-        }).count();
-
-        if file_ops_count >= 3 && has_outbound_after_staging {
-            score += 1;
+        let mut signals: u8 = 1;
+        // Volume (operator-configurable via [detection].exfil_outbound_threshold)
+        if external_outbound().count() >= self.exfil_threshold {
+            signals += 1;
         }
-
-        // === Decision: multi-signal scoring ===
-        // 1 signal alone: Suspicious (could be legitimate large transfer)
-        // 2+ signals: Malicious (strong indicator of exfiltration)
-        match score {
-            0 => None,
-            signals => Some(BehaviorPattern::DataExfiltration { signals }),
+        // Non-standard destination ports
+        const STANDARD_PORTS: &[u16] = &[80, 443, 53, 25, 587, 993, 995, 5222];
+        if external_outbound()
+            .filter(|ne| !STANDARD_PORTS.contains(&ne.dst_port))
+            .count()
+            >= 5
+        {
+            signals += 1;
         }
+        Some(BehaviorPattern::DataExfiltration { signals })
     }
 
     fn check_persistence_mechanism(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
@@ -517,17 +474,23 @@ impl BehaviorTracker {
     }
 
     fn check_suspicious_child_process(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
+        // Matched against whole name tokens: as substrings, "word" hit 1Password
+        // and the system password agents, "preview" hit spatialpreviewd.
         const SUSPICIOUS_PARENTS: &[&str] = &[
             "office",
             "word",
+            "winword",
             "excel",
             "powerpoint",
+            "powerpnt",
             "outlook",
             "pdf",
             "acrobat",
+            "acrord32",
             "preview",
             "evince",
             "libreoffice",
+            "soffice",
             "pages",
             "numbers",
             "keynote",
@@ -555,10 +518,11 @@ impl BehaviorTracker {
                     continue;
                 }
                 if let Some(parent) = &pe.parent_context {
-                    let parent_name_lower = parent.name.to_lowercase();
-                    let is_suspicious_parent = SUSPICIOUS_PARENTS
-                        .iter()
-                        .any(|s| parent_name_lower.contains(s));
+                    let is_suspicious_parent = parent
+                        .name
+                        .to_lowercase()
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .any(|token| SUSPICIOUS_PARENTS.contains(&token));
 
                     if !is_suspicious_parent {
                         continue;
@@ -739,11 +703,14 @@ impl BehaviorTracker {
         // 1 signal alone = Suspicious (conflict with legitimate uses)
         // 2+ signals = Malicious (strong indicator of mining)
         // Miner binary + mining port = Malicious (very strong indicator)
-        // Any distinctive mining signal (miner binary, mining-pool domain, or a
-        // dedicated Stratum port) is enough; combinations only reinforce it.
+        // A miner binary, a mining-pool domain or an exec storm is enough on its
+        // own; a port is not: with live network events, 8888 (Jupyter), 5555
+        // (adb), 8333 (Bitcoin nodes) and 4444 are everyday destinations, so a
+        // mining port only counts next to another signal.
         // 443 was already excluded from the port list above.
         match score {
             0 => None,
+            1 if !mining_port_connections.is_empty() => None,
             signals => Some(BehaviorPattern::CryptoMining { signals }),
         }
     }
@@ -1133,84 +1100,53 @@ mod tests {
         RiggsEvent::new_dns(ctx, query, response, "A")
     }
 
-    #[test]
-    fn test_ssh_to_internal_ip_detected() {
-        let event = make_network_event(
-            NetworkDirection::Outbound,
-            9001,
-            "192.168.1.50",
-            22, // SSH
-        );
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
+    /// What the daemon's correlator does for one process tree's events.
+    fn in_one_storyline(mut events: Vec<RiggsEvent>) -> Vec<RiggsEvent> {
+        let id = events[0].storyline_id().clone();
+        for e in &mut events {
+            e.process_context_mut().storyline_id = id.clone();
         }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+        events
     }
 
     #[test]
-    fn test_rdp_to_internal_ip_detected() {
-        let event = make_network_event(
-            NetworkDirection::Outbound,
-            9002,
-            "10.0.0.50",
-            3389, // RDP
-        );
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
+    fn test_single_internal_session_not_flagged() {
+        // One SSH/RDP/SMB/WinRM session to an internal host is routine administration.
+        for (dst, port) in [
+            ("192.168.1.50", 22),
+            ("10.0.0.50", 3389),
+            ("172.16.5.10", 445),
+            ("10.10.0.20", 5985),
+        ] {
+            let event = make_network_event(NetworkDirection::Outbound, 9001, dst, port);
+            let mut tracker = BehaviorTracker::new();
+            tracker.track(event.clone());
+            assert!(
+                tracker.check_patterns(event.storyline_id()).is_empty(),
+                "{dst}:{port}"
+            );
         }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
     }
 
     #[test]
-    fn test_smb_to_internal_ip_detected() {
-        let event = make_network_event(
-            NetworkDirection::Outbound,
-            9003,
-            "172.16.5.10",
-            445, // SMB
-        );
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
+    fn test_internal_sweep_detected() {
+        // One process tree reaching three internal hosts on a lateral movement port.
+        for port in [22, 3389, 445, 5985] {
+            let events = in_one_storyline(
+                ["192.168.1.50", "10.0.0.50", "172.16.5.10"]
+                    .map(|dst| make_network_event(NetworkDirection::Outbound, 9002, dst, port))
+                    .to_vec(),
+            );
+            let mut tracker = BehaviorTracker::new();
+            for e in &events {
+                tracker.track(e.clone());
+            }
+            assert_eq!(
+                tracker.check_patterns(events[0].storyline_id()),
+                vec![BehaviorPattern::LateralMovement],
+                "{port}"
+            );
         }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
-    }
-
-    #[test]
-    fn test_winrm_to_internal_ip_detected() {
-        let event = make_network_event(
-            NetworkDirection::Outbound,
-            9004,
-            "10.10.0.20",
-            5985, // WinRM
-        );
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
-        }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
     }
 
     #[test]
@@ -1266,7 +1202,7 @@ mod tests {
         // DNS query for internal host, then network connection to that host
         let dns_event = make_dns_event(10001, "192.168.1.50", "192.168.1.50");
         let net_event = make_network_event(NetworkDirection::Outbound, 10001, "192.168.1.50", 22);
-        let events = vec![dns_event, net_event];
+        let events = in_one_storyline(vec![dns_event, net_event]);
 
         let mut tracker = BehaviorTracker::new();
         for e in &events {
@@ -1282,7 +1218,7 @@ mod tests {
     fn test_auth_failed_with_internal_network_detected() {
         let auth_event = make_auth_event(AuthAction::Failed, 11001, "admin", "password");
         let net_event = make_network_event(NetworkDirection::Outbound, 11001, "10.0.0.100", 445);
-        let events = vec![auth_event, net_event];
+        let events = in_one_storyline(vec![auth_event, net_event]);
 
         let mut tracker = BehaviorTracker::new();
         for e in &events {
@@ -1298,7 +1234,7 @@ mod tests {
     fn test_auth_login_with_internal_network_detected() {
         let auth_event = make_auth_event(AuthAction::Login, 12001, "admin", "ssh");
         let net_event = make_network_event(NetworkDirection::Outbound, 12001, "172.16.0.5", 3389);
-        let events = vec![auth_event, net_event];
+        let events = in_one_storyline(vec![auth_event, net_event]);
 
         let mut tracker = BehaviorTracker::new();
         for e in &events {
@@ -1415,65 +1351,18 @@ mod tests {
     }
 
     #[test]
-    fn test_mining_port_connection_detected() {
-        let event = make_mining_network_event(20001, "pool.example.com", 3333);
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
+    fn test_mining_port_alone_not_flagged() {
+        // Everyday services share these ports (8888 Jupyter, 4444, ...): a port
+        // only counts next to another mining signal.
+        for port in [3333, 4444, 8888, 14444, 45700] {
+            let event = make_mining_network_event(20001, "203.0.113.9", port);
+            let mut tracker = BehaviorTracker::new();
+            tracker.track(event.clone());
+            assert!(
+                tracker.check_patterns(event.storyline_id()).is_empty(),
+                "{port}"
+            );
         }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        // Mining port alone is suspicious but not conclusive (443 is noisy)
-        // Port 3333 should trigger detection
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
-    }
-
-    #[test]
-    fn test_mining_port_4444_detected() {
-        let event = make_mining_network_event(20002, "f2pool.com", 4444);
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
-        }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
-    }
-
-    #[test]
-    fn test_mining_port_14444_detected() {
-        let event = make_mining_network_event(20003, "ethermine.org", 14444);
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
-        }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
-    }
-
-    #[test]
-    fn test_mining_port_45700_detected() {
-        let event = make_mining_network_event(20004, "nicehash.com", 45700);
-        let events = vec![event];
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
-        }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::CryptoMining { .. }));
     }
 
     #[test]
@@ -1704,7 +1593,7 @@ mod tests {
         // Two signals: miner binary + mining port = strong indicator
         let proc_event = make_mining_process_event(23002, "xmrig", "/tmp/xmrig", "./xmrig");
         let net_event = make_mining_network_event(23002, "pool.example.com", 3333);
-        let events = vec![proc_event, net_event];
+        let events = in_one_storyline(vec![proc_event, net_event]);
 
         let mut tracker = BehaviorTracker::new();
         for e in &events {
@@ -1769,8 +1658,8 @@ mod tests {
     // --- Data Exfiltration Tests (T1041) ---
 
     #[test]
-    fn test_high_outbound_volume_detected() {
-        // 50 outbound connections to external IPs should trigger detection
+    fn test_high_outbound_volume_alone_not_flagged() {
+        // 50 external connections without staging: a browser's tree does this too
         let ctx = ProcessContext::new(
             31001,
             0,
@@ -1802,11 +1691,7 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(
-            patterns[0],
-            BehaviorPattern::DataExfiltration { .. }
-        ));
+        assert!(patterns.is_empty());
     }
 
     #[test]
@@ -1848,47 +1733,6 @@ mod tests {
     }
 
     #[test]
-    fn test_external_destination_concentration_detected() {
-        // 20+ outbound connections to external IPs triggers this signal
-        let ctx = ProcessContext::new(
-            31003,
-            0,
-            "scanner",
-            "/usr/bin/nmap",
-            "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..20)
-            .map(|i| {
-                RiggsEvent::Network(NetworkEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    direction: NetworkDirection::Outbound,
-                    src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("203.0.{}.{}", i / 256, i % 256),
-                    src_port: 52000,
-                    dst_port: 80,
-                    protocol: "tcp".to_string(),
-                })
-            })
-            .collect();
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
-        }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(
-            patterns[0],
-            BehaviorPattern::DataExfiltration { .. }
-        ));
-    }
-
-    #[test]
     fn test_internal_connections_not_flagged() {
         // Outbound connections to internal IPs should not trigger
         let ctx = ProcessContext::new(
@@ -1927,8 +1771,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unusual_port_connections_detected() {
-        // 5+ connections to unusual ports on external IPs
+    fn test_unusual_port_connections_alone_not_flagged() {
+        // 5 connections to unusual ports without staging (Zoom, games, ...)
         let ctx = ProcessContext::new(
             31005,
             0,
@@ -1960,11 +1804,7 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(
-            patterns[0],
-            BehaviorPattern::DataExfiltration { .. }
-        ));
+        assert!(patterns.is_empty());
     }
 
     #[test]
@@ -2200,47 +2040,6 @@ mod tests {
     }
 
     #[test]
-    fn test_data_exfiltration_boundary_20_external() {
-        // Exactly 20 external connections — at threshold
-        let ctx = ProcessContext::new(
-            31011,
-            0,
-            "scanner",
-            "/usr/bin/nmap",
-            "",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..20)
-            .map(|i| {
-                RiggsEvent::Network(NetworkEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    direction: NetworkDirection::Outbound,
-                    src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("203.0.{}.{}", i / 256, i % 256),
-                    src_port: 52000,
-                    dst_port: 80,
-                    protocol: "tcp".to_string(),
-                })
-            })
-            .collect();
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
-        }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(
-            patterns[0],
-            BehaviorPattern::DataExfiltration { .. }
-        ));
-    }
-
-    #[test]
     fn test_data_exfiltration_below_external_threshold() {
         // 19 external connections — below threshold
         let ctx = ProcessContext::new(
@@ -2315,50 +2114,45 @@ mod tests {
     }
 
     #[test]
-    fn test_data_exfiltration_unusual_port_boundary_5() {
-        // 5 unusual port connections — at threshold
-        let ctx = ProcessContext::new(
-            31014,
-            0,
-            "exfiltrator",
-            "/tmp/exfil",
-            "./exfil",
-            "user",
-            StorylineId::new(),
-        );
-        let events: Vec<_> = (0..5)
-            .map(|i| {
-                RiggsEvent::Network(NetworkEvent {
-                    event_id: EventId::new(),
-                    timestamp: Utc::now(),
-                    process_context: ctx.clone(),
-                    direction: NetworkDirection::Outbound,
-                    src_addr: "192.168.1.100".to_string(),
-                    dst_addr: format!("203.0.0.{}", i),
-                    src_port: 52000,
-                    dst_port: 41000 + i, // Unusual, non-mining ports
-                    protocol: "tcp".to_string(),
-                })
-            })
-            .collect();
-
-        let mut tracker = BehaviorTracker::new();
-        for e in &events {
-            tracker.track(e.clone());
+    fn test_staging_writes_that_are_not_exfil_staging() {
+        // Cache files (not archives) and browser downloads are not staging.
+        for path in [
+            "/home/u/.cache/chrome/f_000123",
+            "/home/u/Downloads/release.zip",
+        ] {
+            let ctx = make_ctx(31016, "chrome");
+            let mut events = vec![RiggsEvent::new_file(
+                FileAction::Create,
+                ctx.clone(),
+                path,
+                None,
+            )];
+            events.extend((0..60).map(|i| {
+                RiggsEvent::new_network(
+                    NetworkDirection::Outbound,
+                    ctx.clone(),
+                    "192.168.1.100",
+                    format!("203.0.{}.{}", i / 256, i % 256),
+                    52000,
+                    443,
+                    "tcp",
+                )
+            }));
+            let mut tracker = BehaviorTracker::new();
+            for e in &events {
+                tracker.track(e.clone());
+            }
+            assert!(
+                tracker.check_patterns(events[0].storyline_id()).is_empty(),
+                "{path}"
+            );
         }
-        let patterns = tracker.check_patterns(events[0].storyline_id());
-
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(
-            patterns[0],
-            BehaviorPattern::DataExfiltration { .. }
-        ));
     }
 
     #[test]
     fn test_data_exfiltration_no_other_signals() {
-        // Ensure data exfiltration detection is independent of
-        // other signals (no mining, no injection, no privilege escalation)
+        // Staging corroborated by volume is DataExfiltration and nothing else
+        // (no mining, no injection, no privilege escalation)
         let ctx = ProcessContext::new(
             31015,
             0,
@@ -2368,8 +2162,9 @@ mod tests {
             "user",
             StorylineId::new(),
         );
-        let events: Vec<_> = (0..50)
-            .map(|i| {
+        let staged = RiggsEvent::new_file(FileAction::Create, ctx.clone(), "/tmp/.loot.tgz", None);
+        let events: Vec<_> = std::iter::once(staged)
+            .chain((1..=50).map(|i| {
                 RiggsEvent::Network(NetworkEvent {
                     event_id: EventId::new(),
                     timestamp: Utc::now(),
@@ -2381,7 +2176,7 @@ mod tests {
                     dst_port: 443,
                     protocol: "tcp".to_string(),
                 })
-            })
+            }))
             .collect();
 
         let mut tracker = BehaviorTracker::new();
@@ -2390,11 +2185,10 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(
-            patterns[0],
-            BehaviorPattern::DataExfiltration { .. }
-        ));
+        assert_eq!(
+            patterns,
+            vec![BehaviorPattern::DataExfiltration { signals: 2 }]
+        );
 
         // Verify it's ONLY DataExfiltration, not crypto mining or anything else
         assert!(!patterns
@@ -2524,6 +2318,44 @@ mod tests {
 
         assert_eq!(patterns.len(), 1);
         assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
+    }
+
+    #[test]
+    fn test_ssh_backdoor_footholds_detected() {
+        // What the 2026-10 Claude Code VSX implant writes, as the real paths
+        // the notify sensors report (no "~").
+        for (action, path) in [
+            (FileAction::Modify, "/Users/dev/.ssh/authorized_keys"),
+            (FileAction::Create, "/home/dev/.ssh/authorized_keys"),
+            (FileAction::Create, "/home/dev/.ssh/authorized_keys2"),
+            (
+                FileAction::Create,
+                "/Users/dev/Library/LaunchAgents/com.apple.sysmond.plist",
+            ),
+            (FileAction::Create, "/var/spool/cron/crontabs/dev"),
+        ] {
+            let event = make_file_event(0, "unknown", action, path);
+            let mut tracker = BehaviorTracker::new();
+            tracker.track(event.clone());
+            assert_eq!(
+                tracker.check_patterns(event.storyline_id()),
+                vec![BehaviorPattern::PersistenceMechanism],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssh_known_hosts_not_persistence() {
+        let event = make_file_event(
+            0,
+            "unknown",
+            FileAction::Modify,
+            "/Users/dev/.ssh/known_hosts",
+        );
+        let mut tracker = BehaviorTracker::new();
+        tracker.track(event.clone());
+        assert!(tracker.check_patterns(event.storyline_id()).is_empty());
     }
 
     #[test]
@@ -3144,6 +2976,39 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_parent_names_containing_office_words_not_flagged() {
+        // Real process names on a Mac that contain "word"/"preview"/"pdf" as substrings.
+        for parent in [
+            "1Password Helper",
+            "PasswordBreachAgent",
+            "spatialpreviewd",
+            "CGPDFService",
+        ] {
+            let event = make_process_event_with_parent(33021, "sh", "/bin/sh", "sh", parent, "/x");
+            let mut tracker = BehaviorTracker::new();
+            tracker.track(event.clone());
+            assert!(
+                tracker.check_patterns(event.storyline_id()).is_empty(),
+                "{parent}"
+            );
+        }
+        let event = make_process_event_with_parent(
+            33022,
+            "sh",
+            "/bin/sh",
+            "sh",
+            "Microsoft Word",
+            "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word",
+        );
+        let mut tracker = BehaviorTracker::new();
+        tracker.track(event.clone());
+        assert_eq!(
+            tracker.check_patterns(event.storyline_id()),
+            vec![BehaviorPattern::SuspiciousChildProcess]
+        );
     }
 
     #[test]

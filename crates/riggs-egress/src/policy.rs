@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::time::Duration;
 
 use ipnetwork::IpNetwork;
 use riggs_types::config::{EgressConfig, EgressProcessRule};
@@ -52,7 +53,7 @@ struct ProcessRule {
     cidrs: Vec<IpNetwork>,
 }
 
-/// Snapshot of the global allowlist for an out-of-band enforcer. See
+/// Host-level allowlist for an out-of-band enforcer. See
 /// [`EgressPolicy::snapshot`].
 #[derive(Debug, Clone)]
 pub struct PolicySnapshot {
@@ -63,6 +64,7 @@ pub struct PolicySnapshot {
     pub baseline_dns: bool,
     pub baseline_dhcp_ntp: bool,
     pub baseline_loopback: bool,
+    pub resolve_interval: Duration,
 }
 
 pub struct EgressPolicy {
@@ -74,6 +76,7 @@ pub struct EgressPolicy {
     baseline_dhcp_ntp: bool,
     baseline_loopback: bool,
     process_rules: Vec<ProcessRule>,
+    resolve_interval: Duration,
 }
 
 impl EgressPolicy {
@@ -91,6 +94,7 @@ impl EgressPolicy {
             baseline_dhcp_ntp: config.baseline.dhcp_ntp,
             baseline_loopback: config.baseline.loopback,
             process_rules: config.process_rules.iter().map(compile_rule).collect(),
+            resolve_interval: Duration::from_secs(config.resolve_interval_secs.get()),
         }
     }
 
@@ -106,19 +110,31 @@ impl EgressPolicy {
         self.process_rules.len()
     }
 
-    /// Read-only view of the allowlist fields an out-of-band enforcer (the Linux
-    /// nftables backend) needs to materialize a ruleset. `allow_domains` are
-    /// included so the caller knows what to resolve; they must be turned into
-    /// IPs before rendering (nftables matches addresses, not SNI).
+    /// The allowlist an out-of-band enforcer that cannot tell processes apart
+    /// (the Linux nftables backend) can apply host-wide. Every process rule's
+    /// destinations join the global ones, so package managers still reach their
+    /// registries, but any process may then reach them too: process rules
+    /// widen this allowlist and never restrict a process. `allow_domains` must
+    /// still be resolved to IPs before rendering (nftables matches addresses,
+    /// not SNI).
     pub fn snapshot(&self) -> PolicySnapshot {
+        let mut allow_domains = self.allow_domains.clone();
+        let mut allow_cidrs = self.allow_cidrs.clone();
+        for rule in &self.process_rules {
+            allow_domains.extend(rule.domains.iter().cloned());
+            allow_cidrs.extend(rule.cidrs.iter().copied());
+        }
+        allow_domains.sort();
+        allow_domains.dedup();
         PolicySnapshot {
             mode: self.mode,
-            allow_cidrs: self.allow_cidrs.clone(),
+            allow_cidrs,
             allow_ports: self.allow_ports.clone(),
-            allow_domains: self.allow_domains.clone(),
+            allow_domains,
             baseline_dns: self.baseline_dns,
             baseline_dhcp_ntp: self.baseline_dhcp_ntp,
             baseline_loopback: self.baseline_loopback,
+            resolve_interval: self.resolve_interval,
         }
     }
 
@@ -165,7 +181,7 @@ impl EgressPolicy {
         if self.baseline_dns && port == 53 {
             return (true, "baseline: dns".into());
         }
-        if self.baseline_dhcp_ntp && matches!(port, 67 | 68 | 123) {
+        if self.baseline_dhcp_ntp && matches!(port, 67 | 68 | 123 | 546 | 547) {
             return (true, "baseline: dhcp/ntp".into());
         }
 
@@ -277,11 +293,19 @@ mod tests {
             allow_cidrs: vec!["10.0.0.0/8".into()],
             allow_ports: vec![],
             baseline: Default::default(),
-            process_rules: vec![EgressProcessRule {
-                process: "npm".into(),
-                allow_domains: vec!["registry.npmjs.org".into(), "*.npmjs.org".into()],
-                allow_cidrs: vec![],
-            }],
+            process_rules: vec![
+                EgressProcessRule {
+                    process: "npm".into(),
+                    allow_domains: vec!["registry.npmjs.org".into(), "*.npmjs.org".into()],
+                    allow_cidrs: vec![],
+                },
+                EgressProcessRule {
+                    process: "node".into(),
+                    allow_domains: vec!["registry.npmjs.org".into()],
+                    allow_cidrs: vec!["172.16.0.0/12".into()],
+                },
+            ],
+            ..Default::default()
         }
     }
 
@@ -360,6 +384,29 @@ mod tests {
             p.evaluate(None, None, Some("127.0.0.1".parse().unwrap()), 8080)
                 .allow
         );
+        assert!(p.evaluate(None, Some("ff02::1:2"), None, 547).allow);
+    }
+
+    #[test]
+    fn snapshot_widens_the_global_allowlist_with_every_process_rule() {
+        let s = policy().snapshot();
+        assert_eq!(
+            s.allow_domains,
+            [
+                "*.githubusercontent.com",
+                "*.npmjs.org",
+                "github.com",
+                "registry.npmjs.org"
+            ]
+        );
+        assert_eq!(
+            s.allow_cidrs,
+            [
+                "10.0.0.0/8".parse::<IpNetwork>().unwrap(),
+                "172.16.0.0/12".parse().unwrap()
+            ]
+        );
+        assert_eq!(s.resolve_interval, Duration::from_secs(60));
     }
 
     #[test]

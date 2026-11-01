@@ -1,0 +1,13 @@
+# Backdoored Claude Code VS Code extension, Cursor Marketplace 2.1.312 / 2.1.313
+# https://phorion.io/blog/offical-claude-code-vsx-compromise/
+# Values are defanged with [.]; riggs refangs them on load, so this list can't
+# match content rules (YARA) itself.
+
+# Reverse-SSH tunnel and beacon host: matches the ssh command line and outbound
+# connections. High, not critical: a substring hit on a command line (an analyst
+# grepping logs for it) must alert, not get the process killed.
+ip:134.209.82[.]225:high
+
+# The backdoored extension.js (exact file; matches events that carry a hash,
+# e.g. `riggs scan`). The YARA rule ClaudeCode_VSX_Backdoor_2026_10 also checks it.
+sha256:ecb58cb29078d9646ad1dcdbe51526f2d9cfea06be5fb2ab183e8ecc3ab6bf15:critical

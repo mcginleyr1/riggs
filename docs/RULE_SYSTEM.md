@@ -241,6 +241,47 @@ Riggs supports multiple IOC sources:
 3. **STIX/TAXII feed** (future): Automated IOC ingestion from threat intel
    feeds, written to `rules/custom/ioc/feeds/`.
 
+### What is implemented today
+
+- Every `*.ioc` file under `rules_dir` is loaded at startup and hot-reloaded on
+  change. Types: `sha256`, `md5`, `ip`, `domain`, `url`, `file_path`
+  (`cidr` is not supported yet; such lines are logged and skipped, as is any
+  unparseable line). Severity defaults to `high`.
+- Values may be defanged with `[.]` (`ip:203.0.113[.]7`); they are refanged on
+  load. Shipped lists do this so a list file can't match a YARA rule that
+  carries the same indicator.
+- All indicators are matched as substrings (one Aho-Corasick automaton) against
+  the event's process name, path and command line, its parent's name and path,
+  file paths and hashes, network addresses and DNS names. Hash indicators only
+  hit events that carry a hash (e.g. `riggs scan`).
+- Local lists are kept apart from feed IOCs (URLhaus), so a feed refresh never
+  drops them.
+
+## Custom Rules (TOML)
+
+What the daemon loads today from `*.toml` under `rules_dir` (`CustomRuleEngine`).
+A rule fires when every condition matches one event (verdict: Suspicious);
+a `Sequence` condition instead steps through events in one storyline.
+
+```toml
+[[rule]]
+name = "reverse-ssh-tunnel-hostkey-override"
+description = "ssh remote port forward (-R) with StrictHostKeyChecking overridden"
+action = "alert"
+conditions = [
+  { ProcessName = "ssh" },                        # exact process name
+  { CmdlineContains = "-R" },                     # case-sensitive substring of the command line
+  { CmdlineContains = "StrictHostKeyChecking" },
+]
+```
+
+Other conditions: `{ FilePath = "/exact/path" }`, `{ NetworkDest = "addr" }`,
+`{ Sequence = [ ...conditions... ] }`.
+
+Shipped rules live in `rules/default/` (`yara/`, `ioc/`, `custom-rules/`). Rules
+that carry campaign indicators write them as YARA hex strings (and IOC lists
+defang them), so the rule files and riggs's own source don't match themselves.
+
 ## STAR Rules (Stateful Temporal Analysis Rules)
 
 STAR rules detect behavioral patterns that unfold over time. Unlike YARA (which

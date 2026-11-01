@@ -153,11 +153,15 @@ impl PlatformSensor for MacOsSensor {
             }
         });
 
+        #[cfg(target_os = "macos")]
+        crate::net::spawn(tx.clone());
+
         // -- Process monitoring via sysinfo polling --
         let proc_tx = tx;
         tokio::spawn(async move {
             let mut sys = System::new();
             let mut known_pids: HashSet<u32> = HashSet::new();
+            let mut held: HashSet<u32> = HashSet::new();
 
             // Capture the initial set of running PIDs
             sys.refresh_processes_specifics(
@@ -181,11 +185,29 @@ impl PlatformSensor for MacOsSensor {
                 let current_pids: HashSet<u32> =
                     sys.processes().keys().map(|p| p.as_u32()).collect();
 
-                // Detect newly spawned processes
-                for &pid in current_pids.difference(&known_pids) {
+                // Detect newly spawned processes, oldest first, so a child that
+                // appeared in the same poll can join its parent's storyline.
+                let mut new_pids: Vec<u32> =
+                    current_pids.difference(&known_pids).copied().collect();
+                new_pids.sort_by_key(|&pid| {
+                    (sys.process(Pid::from_u32(pid)).map(|p| p.start_time()), pid)
+                });
+                for pid in new_pids {
                     if let Some(process) = sys.process(Pid::from_u32(pid)) {
                         let ctx = build_process_context(process, pid);
-                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
+                        // Caught mid-execve the command line reads empty, and every
+                        // cmdline rule would miss the process. sysinfo re-reads an
+                        // empty one, so look once more next poll; a process whose
+                        // line stays empty goes out on that second look.
+                        if ctx.cmdline.is_empty() && held.insert(pid) {
+                            continue;
+                        }
+                        held.remove(&pid);
+                        let parent = process.parent().and_then(|ppid| {
+                            sys.process(ppid)
+                                .map(|p| build_process_context(p, ppid.as_u32()))
+                        });
+                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, parent);
                         if proc_tx.send(event).await.is_err() {
                             return;
                         }
@@ -209,7 +231,11 @@ impl PlatformSensor for MacOsSensor {
                     }
                 }
 
+                // A held pid stays new so the next poll looks again; one that
+                // exited meanwhile is forgotten (no exec was reported for it).
+                held.retain(|pid| current_pids.contains(pid));
                 known_pids = current_pids;
+                known_pids.retain(|pid| !held.contains(pid));
             }
         });
 

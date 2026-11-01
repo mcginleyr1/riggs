@@ -26,13 +26,20 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
 ## Features
 
 - **Process monitoring** — tracks exec, fork, exit with full process context
-- **File monitoring** — watches creates, modifies, deletes, opens across sensitive paths
+- **File monitoring** — watches creates, modifies, deletes, opens across sensitive paths;
+  on Linux, fanotify attributes each write to the process that made it (needs root)
+- **Network monitoring** — one event per new outbound TCP/UDP connection with the owning
+  process, polled every second from the kernel socket tables (`/proc/net` on Linux,
+  libproc on macOS); the egress policy logs would-block flows in monitor mode
 - **Static AI** — ONNX-based file classification for malware detection
 - **Behavioral AI** — sequence-based anomaly detection across event windows
 - **YARA rules** — YARA-X engine with hot-reload from rules directories
 - **IOC matching** — Aho-Corasick and bloom filter matching against threat feeds
 - **Threat intelligence** — VirusTotal, AbuseIPDB, MalwareBazaar, URLhaus, OSV feeds
+  (MalwareBazaar and URLhaus need a free abuse.ch Auth-Key from https://auth.abuse.ch/:
+  put it in `[intel.feeds] abusech_auth_key` in riggs.toml)
 - **Data loss prevention** — blocks sensitive file uploads to AI assistants and cloud services
+- **Egress allowlist** — default-deny outbound control: per process on macOS (Network Extension), host-wide on Linux (nftables); see `docs/STANDALONE.md`
 - **Storyline correlation** — links events into process-tree storylines
 - **Response engine** — kill, suspend, quarantine, network containment
 - **Vulnerability scanning** — CVE matching against installed packages via OSV
@@ -72,6 +79,16 @@ sudo install/install.sh
 This installs the daemon, CLI, config, and launchd plists. The daemon starts
 automatically on boot.
 
+Egress and DLP *blocking* on macOS also need the network filter, a signed
+system extension. Build it first (it needs provisioning profiles from your
+Apple Developer account; see "macOS network filter" in `docs/STANDALONE.md`)
+and `install.sh` installs `Riggs Filter.app` and activates it:
+
+```
+extensions/riggs-filter/build.sh --app-profile App.provisionprofile \
+    --extension-profile Extension.provisionprofile
+```
+
 ### Verify
 
 ```
@@ -91,7 +108,7 @@ crates/
   riggs-types/            Shared types, event model, errors
   riggs-platform/         Platform sensor trait
   riggs-platform-macos/   macOS sensor (Endpoint Security, FSEvents, sysinfo)
-  riggs-platform-linux/   Linux sensor (eBPF, inotify, sysinfo)
+  riggs-platform-linux/   Linux sensor (fanotify, inotify, sysinfo)
   riggs-sensor/           Event collection and normalization
   riggs-engine/           Detection pipeline, stage routing, verdict merging
   riggs-static-ai/        Static file analysis via ONNX
@@ -111,11 +128,14 @@ crates/
   riggs-daemon/           `riggs-daemon` binary, supervisor, lifecycle
   riggs-menubar/          macOS menu bar status app
 extensions/
-  riggs-filter/           macOS Network Extension for DLP flow blocking (Swift)
+  riggs-filter/           macOS Network Extension for egress/DLP flow blocking (Swift)
+                          and its host app "Riggs Filter.app"; build.sh builds both
 config/
   riggs.toml              Main daemon configuration
   dlp-policy.toml         Default DLP policy (hot-reloadable)
   policies/               Example DLP policies for common scenarios
+rules/
+  default/                Shipped YARA rules, IOC lists and custom rules (install.sh copies to /etc/riggs/rules)
 install/
   install.sh              macOS installer
   uninstall.sh            macOS uninstaller
@@ -195,6 +215,7 @@ riggs scan <path>        Scan files through the detection pipeline (static AI, Y
 riggs quarantine [restore <id>]  List quarantined files, or restore one
 riggs intel [status|update]   Threat intelligence feeds (update = refresh now)
 riggs dlp [status|policy]     DLP module status and active policy
+riggs egress [status|allow|deny|mode]  Egress allowlist status, edits, and off/monitor/enforce
 riggs vuln update             Scan installed packages against OSV.dev, report to console
 ```
 
@@ -204,7 +225,8 @@ Events flow through a multi-stage detection pipeline:
 
 1. **Threat intel** — bloom filter + API lookups against known-bad indicators
 2. **Static AI** — ONNX model scores files on structural features
-3. **Rules** — YARA-X pattern matching + IOC matching + custom TOML rules
+3. **Rules** — YARA-X pattern matching + IOC matching + custom TOML rules (including
+   `NetworkDest` rules on connections)
 4. **Behavioral AI** — ONNX model scores event sequences for anomalous behavior
 5. **DLP** — correlates file accesses with network flows to watched domains
 
@@ -223,7 +245,10 @@ Same PID + sensitive file + watched domain within the correlation window = block
 
 On macOS, the network filter is a System Extension using `NEFilterDataProvider`
 (in `extensions/riggs-filter/`). It queries the daemon over a Unix socket for
-allow/block verdicts. The daemon's DLP correlator responds in under 1ms.
+allow/block verdicts. The daemon's DLP correlator responds in under 1ms. CLI
+tools on BSD sockets don't give the filter a hostname, so it reads the TLS
+SNI from the connection's first bytes. If the daemon can't be reached the
+filter allows the flow (fail-open), so a dead daemon never cuts the network.
 
 Magic byte detection prevents evasion by file renaming (e.g., renaming `.pptx`
 to `.txt` — the OOXML `PK` header is still detected).
@@ -243,6 +268,7 @@ make fmt                 # cargo fmt --check
 make clippy              # clippy, warnings are errors
 make test                # run all tests
 cargo test -p riggs-dlp  # test a specific crate
+swift test --package-path extensions/riggs-filter   # filter SNI/domain logic
 ```
 
 CI runs the same checks on Linux, plus `mix format --check-formatted`,

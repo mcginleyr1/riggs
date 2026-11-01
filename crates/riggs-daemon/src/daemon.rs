@@ -16,7 +16,7 @@ use riggs_store::RiggsStore;
 use riggs_storyline::StorylineCorrelator;
 use riggs_types::config::RiggsConfig;
 use riggs_types::errors::RiggsError;
-use riggs_types::events::{FileAction, RiggsEvent};
+use riggs_types::events::{FileAction, NetworkDirection, RiggsEvent};
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 use riggs_types::Severity;
 use tokio::sync::mpsc;
@@ -316,7 +316,9 @@ impl RiggsDaemon {
 
         // YARA + custom rules, shared with the hot-reload watcher started below.
         let rules_dir = PathBuf::from(&self.config.rules.rules_dir);
-        let (yara, custom_rules) = if self.config.engine.rules_enabled && rules_dir.is_dir() {
+        let (yara, local_ioc, custom_rules) = if self.config.engine.rules_enabled
+            && rules_dir.is_dir()
+        {
             let yara = match YaraEngine::new(rules_dir.clone()) {
                 Ok(engine) => Some(Arc::new(StdRwLock::new(engine))),
                 Err(e) => {
@@ -324,19 +326,26 @@ impl RiggsDaemon {
                     None
                 }
             };
+            let local_ioc = IocMatcher::load_dir(&rules_dir);
+            info!(count = local_ioc.len(), "local IOC lists loaded");
             let custom = CustomRuleEngine::load_dir(&rules_dir);
-            (yara, Some(Arc::new(StdRwLock::new(custom))))
+            (
+                yara,
+                Some(Arc::new(StdRwLock::new(local_ioc))),
+                Some(Arc::new(StdRwLock::new(custom))),
+            )
         } else {
             if self.config.engine.rules_enabled {
-                warn!(dir = %rules_dir.display(), "rules_dir missing; YARA and custom rules disabled");
+                warn!(dir = %rules_dir.display(), "rules_dir missing; YARA, IOC lists and custom rules disabled");
             }
-            (None, None)
+            (None, None, None)
         };
 
         if self.config.engine.rules_enabled {
             pipeline.add_stage(Box::new(RulesStage::new_shared(
                 yara.clone(),
                 Arc::clone(&ioc_handle),
+                local_ioc.clone(),
                 custom_rules.clone(),
             )));
         }
@@ -469,7 +478,7 @@ impl RiggsDaemon {
         }
 
         // -- Egress allowlist (default-deny, opt-in; local-first) --
-        {
+        let egress_engine = {
             // The policy file is the source of truth, with riggs.toml's [egress]
             // as the fallback. Load it now (the watcher only sees later changes)
             // and refuse to start on a bad one rather than run a policy the
@@ -520,7 +529,27 @@ impl RiggsDaemon {
                 });
                 info!("egress policy hot-reload watcher started");
             }
-        }
+
+            // Linux has no per-flow filter asking the daemon for verdicts, so
+            // the policy is applied as a host-wide nftables ruleset instead.
+            #[cfg(target_os = "linux")]
+            {
+                let console = self
+                    .config
+                    .comms
+                    .cloud_endpoint
+                    .clone()
+                    .filter(|_| self.config.comms.cloud_enabled);
+                let nft_engine = Arc::clone(&engine);
+                self.supervisor.spawn("egress-nftables", move || {
+                    Box::pin(riggs_egress::nftables::enforce(
+                        nft_engine.subscribe(),
+                        console.clone(),
+                    ))
+                });
+            }
+            engine
+        };
 
         let pipeline = Arc::new(pipeline);
 
@@ -804,14 +833,35 @@ impl RiggsDaemon {
         });
         info!(socket = %self.config.comms.socket_path, "IPC server started");
 
+        // -- Filter IPC (macOS): the sandboxed riggs-filter extension's channel --
+        #[cfg(target_os = "macos")]
+        {
+            let filter_state = Arc::clone(&daemon_state);
+            let filter_socket_path = self.config.comms.filter_socket_path.clone();
+            self.supervisor.spawn("filter-ipc-server", move || {
+                let state = Arc::clone(&filter_state);
+                let socket = filter_socket_path.clone();
+                Box::pin(async move {
+                    let server = riggs_comms::IpcServer::with_state(PathBuf::from(&socket), state)
+                        .with_limits(ipc_max_msg, ipc_max_conn)
+                        .root_only();
+                    if let Err(e) = server.start().await {
+                        tracing::error!(error = %e, socket = %socket, "filter IPC server error");
+                    }
+                })
+            });
+            info!(socket = %self.config.comms.filter_socket_path, "filter IPC server started");
+        }
+
         // -- Rule hot-reload watcher --
-        if yara.is_some() || custom_rules.is_some() {
+        if yara.is_some() || local_ioc.is_some() || custom_rules.is_some() {
             self.supervisor.spawn("rule-watcher", move || {
                 let dir = rules_dir.clone();
                 let yara = yara.clone();
+                let local_ioc = local_ioc.clone();
                 let custom = custom_rules.clone();
                 Box::pin(async move {
-                    let loader = riggs_rules::RuleLoader::new(dir, yara, custom);
+                    let loader = riggs_rules::RuleLoader::new(dir, yara, local_ioc, custom);
                     if let Err(e) = loader.watch().await {
                         tracing::error!(error = %e, "rule watcher error");
                     }
@@ -973,10 +1023,50 @@ impl RiggsDaemon {
 
         // -- Main event processing loop --
         let stage_timeout = Duration::from_millis(self.config.engine.stage_timeout_ms);
+        let mut egress_warned = std::collections::HashSet::new();
         tokio::select! {
             _ = async {
-                while let Some(event) = event_rx.recv().await {
+                while let Some(mut event) = event_rx.recv().await {
                     events_processed.fetch_add(1, Ordering::Relaxed);
+
+                    // Correlate before detection: sensors stamp every event with
+                    // a fresh storyline, so stages that group by storyline (the
+                    // behavioral tracker, custom-rule sequences) only ever saw
+                    // one event and multi-event patterns could never fire.
+                    let storyline_id = correlator.correlate(&event);
+                    event.process_context_mut().storyline_id = storyline_id.clone();
+
+                    // Sensors see the peer address, not the hostname, so only
+                    // CIDR rules can allow these flows. Warn once per process
+                    // and destination; the NEFilter and nftables enforce.
+                    if let RiggsEvent::Network(ne) = &event {
+                        let process = egress_process_name(&ne.process_context.path)
+                            .unwrap_or_else(|| ne.process_context.name.clone());
+                        let decision = egress_engine.evaluate(
+                            Some(&process),
+                            None,
+                            ne.dst_addr.parse().ok(),
+                            ne.dst_port,
+                        );
+                        let dest = format!("{}:{}", ne.dst_addr, ne.dst_port);
+                        if ne.direction == NetworkDirection::Outbound
+                            && decision.would_block
+                            && egress_warned.insert((process.clone(), dest.clone()))
+                        {
+                            warn!(
+                                pid = ne.process_context.pid,
+                                process = %process,
+                                dest = %dest,
+                                mode = %decision.mode.as_str(),
+                                reason = %decision.reason,
+                                "egress would-block (observed connection)"
+                            );
+                            // Bounds memory on hosts that reach many peers.
+                            if egress_warned.len() >= 10_000 {
+                                egress_warned.clear();
+                            }
+                        }
+                    }
 
                     // Isolate detection in its own task: a panic in any stage
                     // (e.g. on a crafted event) becomes a JoinError here instead
@@ -996,7 +1086,6 @@ impl RiggsDaemon {
                             }
                         }
                     };
-                    let storyline_id = correlator.correlate(&event);
 
                     for v in &merged.verdicts {
                         correlator.add_verdict(&storyline_id, v.clone());
@@ -1092,6 +1181,8 @@ impl RiggsDaemon {
         }
 
         self.supervisor.shutdown_all();
+        #[cfg(target_os = "linux")]
+        riggs_egress::nftables::shutdown();
 
         // Close the store channel so the writer flushes its final batch, then
         // wait briefly for it to drain before we exit.

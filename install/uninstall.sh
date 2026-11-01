@@ -18,6 +18,15 @@ fi
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(eval echo "~$REAL_USER")
 
+# Deactivate while the app is still in /Applications: its binary owns the extension.
+FILTER_APP="/Applications/Riggs Filter.app"
+if [[ -d "$FILTER_APP" ]]; then
+    info "Deactivating the network filter (approve the removal if prompted)..."
+    sudo -u "$REAL_USER" "$FILTER_APP/Contents/MacOS/riggs-filter" --deactivate ||
+        warn "Filter deactivation failed; remove it in System Settings > Network Extensions."
+    rm -rf "$FILTER_APP"
+fi
+
 info "Unloading launchd daemon..."
 if launchctl list com.riggs.daemon &>/dev/null; then
     launchctl unload /Library/LaunchDaemons/com.riggs.daemon.plist 2>/dev/null || true
@@ -66,11 +75,13 @@ else
 fi
 
 rm -f /var/run/riggs.sock
+rm -rf "/private/var/root/Library/Group Containers/"*.com.riggs  # filter IPC socket's app group
 
 echo ""
 info "Riggs endpoint protection uninstalled."
 echo ""
 echo "  Summary:"
+echo "    - Network filter:  deactivated and removed (if it was installed)"
 echo "    - Launchd plists:  removed"
 echo "    - Binaries:        removed"
 echo "    - Logs:            removed"

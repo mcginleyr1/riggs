@@ -76,11 +76,27 @@ info "Loading launchd menubar agent..."
 sudo -u "$REAL_USER" launchctl unload "$AGENT_DIR/com.riggs.menubar.plist" 2>/dev/null || true
 sudo -u "$REAL_USER" launchctl load "$AGENT_DIR/com.riggs.menubar.plist" || warn "Failed to load menubar plist."
 
+# The network filter enforces egress/DLP verdicts. It needs signing with
+# provisioning profiles, so it is built separately (extensions/riggs-filter/build.sh).
+FILTER_APP="$PROJECT_ROOT/extensions/riggs-filter/.build/bundle/Riggs Filter.app"
+if [[ -f "$FILTER_APP/Contents/embedded.provisionprofile" ]]; then
+    info "Installing Riggs Filter.app (macOS activates system extensions only from /Applications)..."
+    rm -rf "/Applications/Riggs Filter.app"
+    ditto "$FILTER_APP" "/Applications/Riggs Filter.app"
+    info "Activating the network filter: approve it in System Settings when prompted..."
+    sudo -u "$REAL_USER" "/Applications/Riggs Filter.app/Contents/MacOS/riggs-filter" --activate ||
+        warn "Filter activation failed; fix the error above and rerun it."
+else
+    warn "Riggs Filter.app not built with provisioning profiles: egress/DLP verdicts are not enforced."
+    warn "See \"macOS network filter\" in docs/STANDALONE.md."
+fi
+
 echo ""
 info "Riggs endpoint protection installed successfully."
 echo ""
 echo "  Daemon:   launchctl list com.riggs.daemon"
 echo "  Menubar:  launchctl list com.riggs.menubar"
+echo "  Filter:   \"/Applications/Riggs Filter.app/Contents/MacOS/riggs-filter\" --status"
 echo "  CLI:      riggs status"
 echo "  Config:   /etc/riggs/riggs.toml"
 echo "  Logs:     /var/log/riggs/"

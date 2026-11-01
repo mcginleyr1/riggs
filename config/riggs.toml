@@ -39,6 +39,10 @@ rules_dir = "/etc/riggs/rules"
 
 [comms]
 socket_path = "/var/run/riggs.sock"
+# macOS: root-only (0600, uid 0) socket for the sandboxed riggs-filter Network
+# Extension, inside its app group "<TEAM_ID>.com.riggs" under root's home.
+# Change the Team ID here if you build the filter with another one.
+filter_socket_path = "/private/var/root/Library/Group Containers/3KSC5YWCZ6.com.riggs/riggs-filter.sock"
 cloud_enabled = false
 # cloud_endpoint = "https://console.example.com"
 heartbeat_interval_secs = 60
@@ -72,7 +76,7 @@ snapshot_retention_hours = 24
 
 # Behavioral detection tuning and signatures (adjust sensitivity per environment).
 [detection]
-exfil_outbound_threshold = 50            # outbound conns before flagging exfiltration
+exfil_outbound_threshold = 50            # external conns that corroborate archive staging as exfiltration
 rapid_encryption_file_threshold = 10     # distinct files in the window -> ransomware
 rapid_encryption_window_secs = 5
 threat_score_threshold = 0.5             # storyline score to treat as a threat
@@ -80,6 +84,7 @@ persistence_paths = [
   "/Library/LaunchDaemons", "/Library/LaunchAgents", "~/Library/LaunchAgents",
   ".config/autostart", "/etc/cron.d", "/etc/crontab", "/var/spool/cron",
   "/etc/systemd/system", "/usr/lib/systemd/system", "/etc/init.d", "/etc/rc.local",
+  "/.ssh/authorized_keys",   # also matches authorized_keys2
 ]
 
 [intel]
@@ -102,6 +107,9 @@ enabled = false
 api_key = ""
 
 [intel.feeds]
+# MalwareBazaar and URLhaus exports need an abuse.ch Auth-Key (free account at
+# https://auth.abuse.ch/). Left empty, those two feeds stay off.
+abusech_auth_key = ""
 malwarebazaar_enabled = true
 malwarebazaar_interval_hours = 24
 urlhaus_enabled = true

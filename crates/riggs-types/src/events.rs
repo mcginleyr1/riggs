@@ -144,6 +144,17 @@ impl RiggsEvent {
         }
     }
 
+    pub fn process_context_mut(&mut self) -> &mut ProcessContext {
+        match self {
+            RiggsEvent::Process(e) => &mut e.process_context,
+            RiggsEvent::File(e) => &mut e.process_context,
+            RiggsEvent::Network(e) => &mut e.process_context,
+            RiggsEvent::Dns(e) => &mut e.process_context,
+            RiggsEvent::Auth(e) => &mut e.process_context,
+            RiggsEvent::Kernel(e) => &mut e.process_context,
+        }
+    }
+
     pub fn storyline_id(&self) -> &StorylineId {
         &self.process_context().storyline_id
     }

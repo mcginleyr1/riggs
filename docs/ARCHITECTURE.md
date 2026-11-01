@@ -23,7 +23,7 @@ protect/
     riggs-types/          # shared types, event model, error types
     riggs-platform/       # PlatformSensor trait, platform-agnostic abstractions
     riggs-platform-macos/ # Endpoint Security Framework bindings
-    riggs-platform-linux/ # eBPF (Aya) + procfs implementation
+    riggs-platform-linux/ # fanotify + inotify file events, procfs/sysinfo processes
     riggs-platform-windows/ # ETW stub (future)
     riggs-sensor/         # sensor normalization, OCSF event emission
     riggs-engine/         # detection pipeline orchestrator
@@ -100,6 +100,7 @@ spawns all subsystems as supervised tasks.
 ```
 riggs-daemon (main)
   ├── platform-sensor-task       # platform-specific event collection
+  │     └── network-poll         # outbound connections from the socket tables, 1 s
   ├── sensor-normalization-task  # raw → OCSF normalization
   ├── engine-task                # detection pipeline orchestrator
   │     ├── static-ai-worker     # file analysis (spawned per-file)
@@ -132,7 +133,9 @@ degraded mode where only the sensor and store remain active.
 4. Load detection rules from `rules/default/` and `rules/custom/`.
 5. Load ONNX models from `models/`.
 6. Create all channels (bounded mpsc and broadcast).
-7. Spawn platform sensor task (requires root/elevated privileges on macOS).
+7. Spawn platform sensor task (requires root/elevated privileges on macOS; on
+   Linux, without root (CAP_SYS_ADMIN) fanotify is unavailable and file events
+   fall back to inotify with no process attribution).
 8. Spawn remaining tasks in dependency order.
 9. Begin accepting CLI connections on the IPC socket.
 10. If cloud feature is enabled, begin gRPC connection with backoff.

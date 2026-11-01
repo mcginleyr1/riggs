@@ -88,8 +88,8 @@ if [ -n "$EXT_LOADED" ]; then
 else
   info "${ylw}riggs-filter Network Extension not loaded — skipping the live packet-drop step.${rst}"
   info "Tier 1 above already proved the decision engine end-to-end through the real daemon IPC."
-  info "To run Tier 2: build + sign the extension in extensions/riggs-filter, enable"
-  info "  developer mode ( sudo systemextensionsctl developer on ), load it, then re-run."
+  info "To run Tier 2: build + sign it with extensions/riggs-filter/build.sh, install and"
+  info "  activate it with sudo install/install.sh (docs/STANDALONE.md), then re-run."
 fi
 
 hdr "Result"

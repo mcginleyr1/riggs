@@ -8,14 +8,22 @@ import os.log
 ///
 /// Request:  {"DlpCheckFlow":{"pid":1234,"remote_hostname":"claude.ai",...}}
 /// Response: {"DlpVerdict":{"allow":false,"reason":"..."}}
+///
+/// Fail-open, deliberately and even in enforce mode: when no socket answers
+/// within the timeout every check allows the flow, because a dead or wedged
+/// daemon must never cut the user's network. The cost is that killing the
+/// daemon disables enforcement, so the switch between reachable and
+/// unreachable is logged once per transition (not per flow).
 class DaemonConnection {
 
     private let logger = Logger(subsystem: "com.riggs.filter", category: "daemon-conn")
-    private let socketPath: String
-    private let queue = DispatchQueue(label: "com.riggs.filter.daemon", qos: .userInteractive)
+    private let socketPaths: [String]
+    private let lock = NSLock()
+    private var reachable: Bool?  // nil until the first request, so its outcome is logged too
 
-    init(socketPath: String) {
-        self.socketPath = socketPath
+    /// `socketPaths` are tried in order for every request.
+    init(socketPaths: [String]) {
+        self.socketPaths = socketPaths
     }
 
     struct DlpVerdict {
@@ -90,24 +98,42 @@ class DaemonConnection {
     // MARK: - Socket communication
 
     private func sendAndReceive(_ jsonString: String) -> Data? {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            logger.error("failed to create socket: \(errno)")
-            return nil
+        // Move to the next path only when connecting fails: a daemon that
+        // accepted and then stalled would stall on its other socket too.
+        for path in socketPaths {
+            guard let fd = connect(to: path) else { continue }
+            defer { close(fd) }
+            let response = exchange(jsonString, fd: fd)
+            noteReachable(response != nil, via: path)
+            return response
         }
-        defer { close(fd) }
+        noteReachable(false, via: nil)
+        return nil
+    }
 
-        // Set a 500ms timeout so we don't block the filter indefinitely
-        var tv = timeval(tv_sec: 0, tv_usec: 500_000)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    private func noteReachable(_ now: Bool, via path: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard now != reachable else { return }
+        reachable = now
+        if now {
+            logger.notice("daemon reachable via \(path ?? "", privacy: .public); filtering")
+        } else {
+            logger.error(
+                "daemon unreachable on \(self.socketPaths, privacy: .public); FAILING OPEN, all flows allowed until it answers"
+            )
+        }
+    }
 
-        // Connect
+    // Per-request failures below log at debug level only; noteReachable
+    // reports the state change.
+
+    private func connect(to socketPath: String) -> Int32? {
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString
         guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            logger.error("socket path too long")
+            logger.debug("socket path too long: \(socketPath, privacy: .public)")
             return nil
         }
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
@@ -118,34 +144,49 @@ class DaemonConnection {
             }
         }
 
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            logger.debug("failed to create socket: \(errno)")
+            return nil
+        }
+
+        // Set a 500ms timeout so we don't block the filter indefinitely
+        var tv = timeval(tv_sec: 0, tv_usec: 500_000)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
         let connectResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
         guard connectResult == 0 else {
-            logger.warning("failed to connect to daemon socket: \(errno)")
+            logger.debug("failed to connect to \(socketPath, privacy: .public): \(errno)")
+            close(fd)
             return nil
         }
+        return fd
+    }
 
+    private func exchange(_ jsonString: String, fd: Int32) -> Data? {
         // Send: 4-byte LE length + JSON
         guard let payload = jsonString.data(using: .utf8) else { return nil }
         var length = UInt32(payload.count).littleEndian
         let lengthData = Data(bytes: &length, count: 4)
 
         guard sendAll(fd: fd, data: lengthData) && sendAll(fd: fd, data: payload) else {
-            logger.warning("failed to send to daemon")
+            logger.debug("failed to send to daemon")
             return nil
         }
 
         // Receive: 4-byte LE length + JSON response
         guard let respLenData = recvExact(fd: fd, count: 4) else {
-            logger.warning("failed to receive response length")
+            logger.debug("failed to receive response length")
             return nil
         }
         let respLen = respLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
         guard respLen > 0, respLen < 1_000_000 else {
-            logger.warning("invalid response length: \(respLen)")
+            logger.debug("invalid response length: \(respLen)")
             return nil
         }
 

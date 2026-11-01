@@ -9,6 +9,9 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::sync::mpsc;
 use tracing::info;
 
+// /var/spool/cron holds per-user crontabs (`crontab -`), a persistence path.
+const WATCHED_DIRS: &[&str] = &["/tmp", "/home", "/etc", "/usr/bin", "/var/spool/cron"];
+
 pub struct LinuxSensor {
     running: bool,
 }
@@ -45,6 +48,76 @@ impl Default for LinuxSensor {
     }
 }
 
+fn build_process_context(process: &sysinfo::Process, pid: u32) -> ProcessContext {
+    ProcessContext::new(
+        pid,
+        process.parent().map(|p| p.as_u32()).unwrap_or(0),
+        process.name().to_string_lossy().to_string(),
+        process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" "),
+        process
+            .user_id()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        StorylineId::new(),
+    )
+}
+
+pub(crate) fn proc_context(pid: u32) -> Option<ProcessContext> {
+    let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+    if !proc_path.exists() {
+        return None;
+    }
+
+    let name = std::fs::read_to_string(proc_path.join("comm"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let exe = std::fs::read_link(proc_path.join("exe"))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let cmdline = std::fs::read_to_string(proc_path.join("cmdline"))
+        .unwrap_or_default()
+        .replace('\0', " ")
+        .trim()
+        .to_string();
+
+    let status = std::fs::read_to_string(proc_path.join("status")).unwrap_or_default();
+    let mut ppid: u32 = 0;
+    let mut uid_str = String::from("unknown");
+    for line in status.lines() {
+        if let Some(val) = line.strip_prefix("PPid:\t") {
+            ppid = val.trim().parse().unwrap_or(0);
+        } else if let Some(val) = line.strip_prefix("Uid:\t") {
+            uid_str = val
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
+        }
+    }
+
+    Some(ProcessContext::new(
+        pid,
+        ppid,
+        name,
+        exe,
+        cmdline,
+        uid_str,
+        StorylineId::new(),
+    ))
+}
+
 #[async_trait]
 impl PlatformSensor for LinuxSensor {
     fn capabilities(&self) -> PlatformCapabilities {
@@ -63,7 +136,17 @@ impl PlatformSensor for LinuxSensor {
         self.running = true;
 
         // -- File monitoring via notify (inotify on Linux) --
-        let file_tx = tx.clone();
+        // fanotify (root on Linux) reports writes with the writer's pid and attributes
+        // the inotify events below; without it they carry pid 0.
+        type Covers = Box<dyn Fn(&std::path::Path) -> bool + Send>;
+        #[cfg(target_os = "linux")]
+        let (file_tx, fanotify_covers): (_, Covers) =
+            match crate::fanotify::start(WATCHED_DIRS, tx.clone()) {
+                Some((attributed, marked)) => (attributed, Box::new(move |p| marked.covers(p))),
+                None => (tx.clone(), Box::new(|_| false)),
+            };
+        #[cfg(not(target_os = "linux"))]
+        let (file_tx, fanotify_covers): (_, Covers) = (tx.clone(), Box::new(|_| false));
         let (notify_tx, mut notify_rx) =
             tokio::sync::mpsc::channel::<notify::Result<notify::Event>>(1024);
 
@@ -75,7 +158,7 @@ impl PlatformSensor for LinuxSensor {
         )
         .map_err(|e| RiggsError::Platform(format!("failed to create file watcher: {e}")))?;
 
-        for dir in ["/tmp", "/home", "/etc", "/usr/bin"] {
+        for dir in WATCHED_DIRS {
             let path = std::path::Path::new(dir);
             if path.exists() {
                 let _ = watcher.watch(path, notify::RecursiveMode::Recursive);
@@ -88,6 +171,13 @@ impl PlatformSensor for LinuxSensor {
                 let Ok(event) = result else { continue };
                 let action = match event.kind {
                     notify::EventKind::Create(_) => Some(FileAction::Create),
+                    // fanotify reports each write session once, on close, but only
+                    // on the mounts it marked; elsewhere inotify's event is the only one.
+                    notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+                        if event.paths.iter().all(|p| fanotify_covers(p)) =>
+                    {
+                        None
+                    }
                     notify::EventKind::Modify(_) => Some(FileAction::Modify),
                     notify::EventKind::Remove(_) => Some(FileAction::Delete),
                     _ => None,
@@ -117,11 +207,14 @@ impl PlatformSensor for LinuxSensor {
             }
         });
 
+        crate::net::spawn(tx.clone());
+
         // -- Process monitoring via sysinfo polling --
         let proc_tx = tx;
         tokio::spawn(async move {
             let mut sys = System::new();
             let mut known_pids: HashSet<u32> = HashSet::new();
+            let mut held: HashSet<u32> = HashSet::new();
 
             sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
@@ -144,30 +237,29 @@ impl PlatformSensor for LinuxSensor {
                 let current_pids: HashSet<u32> =
                     sys.processes().keys().map(|p| p.as_u32()).collect();
 
-                // New processes
-                for &pid in current_pids.difference(&known_pids) {
+                // New processes, oldest first, so a child that appeared in the
+                // same poll can join its parent's storyline.
+                let mut new_pids: Vec<u32> =
+                    current_pids.difference(&known_pids).copied().collect();
+                new_pids.sort_by_key(|&pid| {
+                    (sys.process(Pid::from_u32(pid)).map(|p| p.start_time()), pid)
+                });
+                for pid in new_pids {
                     if let Some(process) = sys.process(Pid::from_u32(pid)) {
-                        let ctx = ProcessContext::new(
-                            pid,
-                            process.parent().map(|p| p.as_u32()).unwrap_or(0),
-                            process.name().to_string_lossy().to_string(),
-                            process
-                                .exe()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_default(),
-                            process
-                                .cmd()
-                                .iter()
-                                .map(|s| s.to_string_lossy())
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                            process
-                                .user_id()
-                                .map(|u| u.to_string())
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            StorylineId::new(),
-                        );
-                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, None);
+                        let ctx = build_process_context(process, pid);
+                        // Caught mid-execve the command line reads empty, and every
+                        // cmdline rule would miss the process. sysinfo re-reads an
+                        // empty one, so look once more next poll; kernel threads,
+                        // whose line stays empty, go out on that second look.
+                        if ctx.cmdline.is_empty() && held.insert(pid) {
+                            continue;
+                        }
+                        held.remove(&pid);
+                        let parent = process.parent().and_then(|ppid| {
+                            sys.process(ppid)
+                                .map(|p| build_process_context(p, ppid.as_u32()))
+                        });
+                        let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, parent);
                         if proc_tx.send(event).await.is_err() {
                             return;
                         }
@@ -191,7 +283,11 @@ impl PlatformSensor for LinuxSensor {
                     }
                 }
 
+                // A held pid stays new so the next poll looks again; one that
+                // exited meanwhile is forgotten (no exec was reported for it).
+                held.retain(|pid| current_pids.contains(pid));
                 known_pids = current_pids;
+                known_pids.retain(|pid| !held.contains(pid));
             }
         });
 
@@ -205,50 +301,7 @@ impl PlatformSensor for LinuxSensor {
     }
 
     async fn process_context(&self, pid: u32) -> Result<Option<ProcessContext>, RiggsError> {
-        let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
-        if !proc_path.exists() {
-            return Ok(None);
-        }
-
-        let name = std::fs::read_to_string(proc_path.join("comm"))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-
-        let exe = std::fs::read_link(proc_path.join("exe"))
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let cmdline = std::fs::read_to_string(proc_path.join("cmdline"))
-            .unwrap_or_default()
-            .replace('\0', " ")
-            .trim()
-            .to_string();
-
-        let status = std::fs::read_to_string(proc_path.join("status")).unwrap_or_default();
-        let mut ppid: u32 = 0;
-        let mut uid_str = String::from("unknown");
-        for line in status.lines() {
-            if let Some(val) = line.strip_prefix("PPid:\t") {
-                ppid = val.trim().parse().unwrap_or(0);
-            } else if let Some(val) = line.strip_prefix("Uid:\t") {
-                uid_str = val
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("unknown")
-                    .to_string();
-            }
-        }
-
-        Ok(Some(ProcessContext::new(
-            pid,
-            ppid,
-            name,
-            exe,
-            cmdline,
-            uid_str,
-            StorylineId::new(),
-        )))
+        Ok(proc_context(pid))
     }
 
     async fn health_check(&self) -> Result<bool, RiggsError> {

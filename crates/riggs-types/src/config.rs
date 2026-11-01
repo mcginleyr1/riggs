@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,10 +73,17 @@ pub struct EgressConfig {
     /// rule's destinations (not the global allowlist).
     #[serde(default)]
     pub process_rules: Vec<EgressProcessRule>,
+    /// How often the Linux nftables enforcer re-resolves allowed domains.
+    #[serde(default = "default_egress_resolve_interval_secs")]
+    pub resolve_interval_secs: NonZeroU64,
 }
 
 fn default_egress_mode() -> String {
     "monitor".into()
+}
+
+fn default_egress_resolve_interval_secs() -> NonZeroU64 {
+    NonZeroU64::new(60).expect("nonzero")
 }
 
 impl Default for EgressConfig {
@@ -87,6 +96,7 @@ impl Default for EgressConfig {
             allow_ports: Vec::new(),
             baseline: EgressBaseline::default(),
             process_rules: Vec::new(),
+            resolve_interval_secs: default_egress_resolve_interval_secs(),
         }
     }
 }
@@ -128,7 +138,8 @@ pub struct EgressProcessRule {
 /// adjust sensitivity and add environment-specific persistence locations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionConfig {
-    /// Outbound connections in a storyline before flagging data exfiltration.
+    /// External outbound connections in a storyline that corroborate archive
+    /// staging as data exfiltration (volume alone never fires).
     pub exfil_outbound_threshold: usize,
     /// Distinct files modified within the window before flagging rapid encryption.
     pub rapid_encryption_file_threshold: usize,
@@ -159,6 +170,7 @@ impl Default for DetectionConfig {
                 "/usr/lib/systemd/system".into(),
                 "/etc/init.d".into(),
                 "/etc/rc.local".into(),
+                "/.ssh/authorized_keys".into(),
             ],
         }
     }
@@ -341,6 +353,13 @@ impl Default for StoreConfig {
 pub struct CommsConfig {
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
+    /// macOS: root-only socket for the riggs-filter Network Extension. NE
+    /// providers are sandboxed, so it lives in the app-group container the
+    /// extension shares with the daemon (`<TEAM_ID>.com.riggs`, under root's
+    /// home because the extension runs as root). Follow the Team ID the
+    /// filter is signed with.
+    #[serde(default = "default_filter_socket_path")]
+    pub filter_socket_path: String,
     pub cloud_enabled: bool,
     pub cloud_endpoint: Option<String>,
     // Secret: never expose over IPC (GetConfig serializes this struct).
@@ -398,10 +417,15 @@ fn default_socket_path() -> String {
     "/var/run/riggs.sock".into()
 }
 
+fn default_filter_socket_path() -> String {
+    "/private/var/root/Library/Group Containers/3KSC5YWCZ6.com.riggs/riggs-filter.sock".into()
+}
+
 impl Default for CommsConfig {
     fn default() -> Self {
         Self {
             socket_path: default_socket_path(),
+            filter_socket_path: default_filter_socket_path(),
             cloud_enabled: false,
             cloud_endpoint: None,
             enrollment_token: None,
@@ -533,6 +557,11 @@ pub struct AbuseIpdbConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedsConfig {
+    /// abuse.ch Auth-Key (free at https://auth.abuse.ch/). MalwareBazaar and
+    /// URLhaus exports require it; without it those feeds stay off.
+    /// Secret: never expose over IPC (GetConfig serializes this struct).
+    #[serde(default, skip_serializing)]
+    pub abusech_auth_key: String,
     pub malwarebazaar_enabled: bool,
     pub malwarebazaar_interval_hours: u32,
     pub urlhaus_enabled: bool,
@@ -544,6 +573,7 @@ pub struct FeedsConfig {
 impl Default for FeedsConfig {
     fn default() -> Self {
         Self {
+            abusech_auth_key: String::new(),
             malwarebazaar_enabled: true,
             malwarebazaar_interval_hours: 24,
             urlhaus_enabled: true,

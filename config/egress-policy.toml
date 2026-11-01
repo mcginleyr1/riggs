@@ -12,7 +12,12 @@
 enabled = true
 mode    = "monitor"        # off | monitor | enforce
 
+# How often Linux re-resolves the allowed domains for its nftables ruleset.
+resolve_interval_secs = 60
+
 # Global allowlist (applies to processes without a specific rule below).
+# On Linux, wildcard patterns are denied (they can't be resolved ahead of time):
+# list exact hostnames there. See docs/STANDALONE.md.
 allow_domains = [
   "github.com",
   "*.githubusercontent.com",

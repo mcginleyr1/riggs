@@ -214,16 +214,12 @@ pub struct IpcServer {
     state: Arc<DaemonState>,
     max_message_bytes: usize,
     max_connections: usize,
+    root_only: bool,
 }
 
 impl IpcServer {
     pub fn new(socket_path: PathBuf) -> Self {
-        Self {
-            socket_path,
-            state: Arc::new(DaemonState::new()),
-            max_message_bytes: DEFAULT_MAX_MSG_LEN,
-            max_connections: DEFAULT_MAX_CONCURRENT_CLIENTS,
-        }
+        Self::with_state(socket_path, Arc::new(DaemonState::new()))
     }
 
     pub fn with_state(socket_path: PathBuf, state: Arc<DaemonState>) -> Self {
@@ -232,6 +228,7 @@ impl IpcServer {
             state,
             max_message_bytes: DEFAULT_MAX_MSG_LEN,
             max_connections: DEFAULT_MAX_CONCURRENT_CLIENTS,
+            root_only: false,
         }
     }
 
@@ -242,25 +239,39 @@ impl IpcServer {
         self
     }
 
+    /// Make the socket 0600 and drop every peer that is not uid 0. For the
+    /// channel the root macOS filter extension uses; creates the parent
+    /// directory (its app-group container) when missing.
+    pub fn root_only(mut self) -> Self {
+        self.root_only = true;
+        self
+    }
+
     pub fn state(&self) -> &Arc<DaemonState> {
         &self.state
     }
 
     pub async fn start(&self) -> Result<()> {
+        if self.root_only {
+            if let Some(dir) = self.socket_path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
         }
 
         let listener = UnixListener::bind(&self.socket_path)?;
 
-        // Non-root users (CLI, menubar) may connect for read-only status/query
-        // commands; state-changing commands are gated per-connection by peer uid
-        // in handle_client, and secrets are stripped from GetConfig responses.
+        // On the main socket non-root users (CLI, menubar) may connect for
+        // read-only status/query commands; state-changing commands are gated
+        // per-connection by peer uid in handle_client, and secrets are
+        // stripped from GetConfig responses.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o666);
-            std::fs::set_permissions(&self.socket_path, perms)?;
+            let mode = if self.root_only { 0o600 } else { 0o666 };
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(mode))?;
         }
 
         info!("IPC server listening on {:?}", self.socket_path);
@@ -274,6 +285,10 @@ impl IpcServer {
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
+                    if self.root_only && !stream.peer_cred().is_ok_and(|cred| cred.uid() == 0) {
+                        warn!(socket = ?self.socket_path, "dropping non-root IPC peer");
+                        continue;
+                    }
                     let is_owner = peer_is_owner(&stream);
                     let limiter = if is_owner {
                         &owner_limiter
@@ -565,6 +580,27 @@ mod tests {
         let response = client.send(&ClientMessage::GetStatus).await.unwrap();
         assert!(matches!(response, DaemonMessage::Status { .. }));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn root_only_socket_is_private_and_serves_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("riggs-ipc-root-{}", std::process::id()));
+        let path = dir.join("riggs-filter.sock");
+        let server = IpcServer::new(path.clone()).root_only();
+        tokio::spawn(async move { server.start().await });
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+
+        // The exchange orders the mode check after start() has applied it.
+        let mut client = IpcClient::connect(&path).await.unwrap();
+        let response = client.send(&ClientMessage::GetStatus).await;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(mode, 0o600);
+        assert_eq!(response.is_ok(), unsafe { libc::geteuid() } == 0);
     }
 
     #[tokio::test]
