@@ -2,6 +2,7 @@ use std::path::Path;
 
 use riggs_comms::{ClientMessage, DaemonMessage, IpcClient};
 use riggs_types::errors::RiggsError;
+use riggs_types::phishing::{Level, Mode, ObservationKind, PhishingRequest, PhishingResponse};
 
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
@@ -590,4 +591,285 @@ pub async fn vuln(socket_path: &Path, args: &[String]) -> Result<(), RiggsError>
     }
 
     Ok(())
+}
+
+pub async fn phishing(socket_path: &Path, args: &[String]) -> Result<(), RiggsError> {
+    let sudo_uid = std::env::var("SUDO_UID").ok();
+    let request = phishing_request(args, sudo_uid.as_deref(), unsafe { libc::getuid() })?;
+
+    let mut client = connect(socket_path).await?;
+    let unexpected = || RiggsError::Comms("Unexpected response from daemon".into());
+    let response = match send(&mut client, &ClientMessage::Phishing(request)).await? {
+        DaemonMessage::Phishing(PhishingResponse::Error(e)) | DaemonMessage::Error(e) => {
+            return Err(RiggsError::Other(e));
+        }
+        DaemonMessage::Phishing(response) => response,
+        _ => return Err(unexpected()),
+    };
+
+    match response {
+        PhishingResponse::Status(status) => {
+            let (color, mode) = match status.mode {
+                Mode::Warn => (GREEN, "warn"),
+                Mode::Monitor => (YELLOW, "monitor"),
+                Mode::Off => (DIM, "off"),
+            };
+            println!("{BOLD}Phishing Protection{RESET}");
+            println!("{DIM}────────────────────────────────────{RESET}");
+            println!("  {BOLD}Mode:{RESET}     {color}{mode}{RESET}");
+            println!("  {BOLD}Logins:{RESET}   {}", status.logins);
+        }
+        PhishingResponse::Recent(entries) => {
+            if entries.is_empty() {
+                println!("{DIM}No phishing checks recorded.{RESET}");
+                return Ok(());
+            }
+            println!("{BOLD}Recent Phishing Checks{RESET}");
+            println!("{DIM}─────────────────────────────────────────────────────────────────────────────{RESET}");
+            println!(
+                "  {BOLD}{:<20} {:<5} {:<30} {:<8} {:<6} CUES{RESET}",
+                "TIME (UTC)", "KIND", "DOMAIN", "LEVEL", "SHOWN"
+            );
+            for entry in &entries {
+                let kind = match entry.kind {
+                    ObservationKind::Mail => "mail",
+                    ObservationKind::Page => "page",
+                };
+                let (color, level) = match entry.level {
+                    Level::Danger => (RED, "danger"),
+                    Level::Caution => (YELLOW, "caution"),
+                    Level::None => (DIM, "none"),
+                };
+                let shown = if entry.shown { "yes" } else { "no" };
+                println!(
+                    "  {:<20} {:<5} {:<30} {color}{:<8}{RESET} {:<6} {}",
+                    utc_time(entry.time_ms),
+                    kind,
+                    entry.domain,
+                    level,
+                    shown,
+                    entry.cues.join(", "),
+                );
+            }
+        }
+        PhishingResponse::Stats(mut stats) => {
+            stats
+                .cues
+                .sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| a.cue.cmp(&b.cue)));
+            println!("{BOLD}Phishing Statistics{RESET}");
+            println!("{DIM}────────────────────────────────────{RESET}");
+            println!("  {BOLD}Total:{RESET}     {}", stats.total);
+            println!("  {BOLD}Caution:{RESET}   {YELLOW}{}{RESET}", stats.caution);
+            println!("  {BOLD}Danger:{RESET}    {RED}{}{RESET}", stats.danger);
+            if !stats.cues.is_empty() {
+                println!();
+                println!("  {BOLD}{:<40} HITS{RESET}", "CUE");
+                for cue in &stats.cues {
+                    println!("  {:<40} {}", cue.cue, cue.hits);
+                }
+            }
+        }
+        PhishingResponse::Logins(logins) => {
+            if logins.is_empty() {
+                println!("{DIM}No logins recorded.{RESET}");
+                return Ok(());
+            }
+            println!("{BOLD}Known Logins{RESET}");
+            println!("{DIM}─────────────────────────────────────────────────────────────────────────────{RESET}");
+            println!(
+                "  {BOLD}{:<30} {:<20} {:<20} COUNT{RESET}",
+                "DOMAIN", "FIRST (UTC)", "LAST (UTC)"
+            );
+            for login in &logins {
+                println!(
+                    "  {:<30} {:<20} {:<20} {}",
+                    login.domain,
+                    utc_time(login.first_ms),
+                    utc_time(login.last_ms),
+                    login.count,
+                );
+            }
+        }
+        PhishingResponse::Ok => println!("{GREEN}ok{RESET}"),
+        PhishingResponse::Verdict(_) | PhishingResponse::Error(_) => return Err(unexpected()),
+    }
+
+    Ok(())
+}
+
+fn phishing_request(
+    args: &[String],
+    sudo_uid: Option<&str>,
+    own_uid: u32,
+) -> Result<PhishingRequest, RiggsError> {
+    let usage = || {
+        RiggsError::Other(
+            "Usage: riggs phishing [status | recent [--limit N] [--user UID] | stats [--user UID] \
+             | logins [--user UID] | trust <domain> [--user UID] | forget <domain> [--user UID] \
+             | mode off|monitor|warn]"
+                .into(),
+        )
+    };
+
+    let mut words = Vec::new();
+    let mut user = None;
+    let mut limit = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--user" => user = Some(rest.next().ok_or_else(usage)?.as_str()),
+            "--limit" => {
+                let value = rest.next().ok_or_else(usage)?;
+                limit =
+                    Some(value.parse::<u32>().map_err(|_| {
+                        RiggsError::Other(format!("invalid --limit value: {value}"))
+                    })?);
+            }
+            word => words.push(word),
+        }
+    }
+
+    let uid = || target_uid(user, sudo_uid, own_uid);
+    match (words.as_slice(), limit) {
+        ([] | ["status"], None) if user.is_none() => Ok(PhishingRequest::Status),
+        (["recent"], limit) => Ok(PhishingRequest::Recent {
+            uid: uid()?,
+            limit: limit.unwrap_or(50),
+        }),
+        (["stats"], None) => Ok(PhishingRequest::Stats { uid: uid()? }),
+        (["logins"], None) => Ok(PhishingRequest::Logins { uid: uid()? }),
+        (["trust", domain], None) => Ok(PhishingRequest::Trust {
+            uid: uid()?,
+            domain: domain.to_string(),
+        }),
+        (["forget", domain], None) => Ok(PhishingRequest::Forget {
+            uid: uid()?,
+            domain: domain.to_string(),
+        }),
+        (["mode", mode], None) if user.is_none() => Ok(PhishingRequest::SetMode {
+            mode: serde_json::from_value(serde_json::Value::from(*mode)).map_err(|_| usage())?,
+        }),
+        _ => Err(usage()),
+    }
+}
+
+/// The local user whose phishing state an admin request targets. The daemon runs
+/// as root on an installed host, so under `sudo` this is the invoking user.
+fn target_uid(user: Option<&str>, sudo_uid: Option<&str>, own_uid: u32) -> Result<u32, RiggsError> {
+    match user {
+        Some(user) => user.parse().map_err(|_| {
+            RiggsError::Other(format!("invalid --user value: {user} (expected a uid)"))
+        }),
+        None => Ok(sudo_uid.and_then(|uid| uid.parse().ok()).unwrap_or(own_uid)),
+    }
+}
+
+/// Milliseconds since the Unix epoch in UTC, formatted like `events`; the raw
+/// number when chrono cannot represent it.
+fn utc_time(ms: u64) -> String {
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || ms.to_string(),
+            |time| time.format("%Y-%m-%d %H:%M:%S").to_string(),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn target_uid_is_the_user_flag_then_sudo_uid_then_own_uid() {
+        assert_eq!(target_uid(Some("1000"), Some("501"), 0).unwrap(), 1000);
+        assert_eq!(target_uid(None, Some("501"), 0).unwrap(), 501);
+        assert_eq!(target_uid(None, None, 502).unwrap(), 502);
+        assert_eq!(target_uid(None, Some("not-a-uid"), 502).unwrap(), 502);
+        assert!(target_uid(Some("alice"), Some("501"), 0).is_err());
+        assert!(target_uid(Some("-1"), None, 502).is_err());
+    }
+
+    #[test]
+    fn each_phishing_subcommand_builds_its_request() {
+        let trust = |uid| PhishingRequest::Trust {
+            uid,
+            domain: "example.com".into(),
+        };
+        let cases = [
+            ("", PhishingRequest::Status),
+            ("status", PhishingRequest::Status),
+            (
+                "recent",
+                PhishingRequest::Recent {
+                    uid: 501,
+                    limit: 50,
+                },
+            ),
+            (
+                "recent --limit 5 --user 1000",
+                PhishingRequest::Recent {
+                    uid: 1000,
+                    limit: 5,
+                },
+            ),
+            ("stats", PhishingRequest::Stats { uid: 501 }),
+            ("stats --user 1000", PhishingRequest::Stats { uid: 1000 }),
+            ("logins", PhishingRequest::Logins { uid: 501 }),
+            ("logins --user 1000", PhishingRequest::Logins { uid: 1000 }),
+            ("trust example.com", trust(501)),
+            ("trust --user 1000 example.com", trust(1000)),
+            (
+                "forget example.com",
+                PhishingRequest::Forget {
+                    uid: 501,
+                    domain: "example.com".into(),
+                },
+            ),
+            ("mode off", PhishingRequest::SetMode { mode: Mode::Off }),
+            (
+                "mode monitor",
+                PhishingRequest::SetMode {
+                    mode: Mode::Monitor,
+                },
+            ),
+            ("mode warn", PhishingRequest::SetMode { mode: Mode::Warn }),
+        ];
+        for (line, expected) in cases {
+            let request = phishing_request(&args(line), Some("501"), 0).unwrap();
+            assert_eq!(request, expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn malformed_phishing_arguments_are_refused() {
+        for line in [
+            "bogus",
+            "trust",
+            "trust example.com example.org",
+            "mode",
+            "mode loud",
+            "mode warn --user 1000",
+            "status --user 1000",
+            "stats --limit 5",
+            "recent --limit many",
+            "logins --user",
+            "logins --user alice",
+        ] {
+            assert!(phishing_request(&args(line), None, 501).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn utc_time_formats_epoch_milliseconds() {
+        assert_eq!(utc_time(0), "1970-01-01 00:00:00");
+        assert_eq!(utc_time(951_782_400_000), "2000-02-29 00:00:00");
+        assert_eq!(utc_time(1_700_000_000_999), "2023-11-14 22:13:20");
+        assert_eq!(utc_time(i64::MAX as u64), i64::MAX.to_string());
+        assert_eq!(utc_time(u64::MAX), u64::MAX.to_string());
+    }
 }
