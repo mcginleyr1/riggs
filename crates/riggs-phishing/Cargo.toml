@@ -20,3 +20,12 @@ sha2 = "0.10"
 [dev-dependencies]
 mail-parser = { version = "1", features = ["full_encoding"] }
 scraper = "0.29"
+
+# Cargo builds examples under `cargo test` but runs their tests only when asked.
+[[example]]
+name = "eval"
+test = true
+
+[[example]]
+name = "lookalike_fp"
+test = true
