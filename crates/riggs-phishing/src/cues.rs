@@ -31,6 +31,7 @@ pub enum Cue {
     LinkTextHidesUrl,
     LinkOnlyBody,
     LinkTargetHighRiskFile,
+    LinkWrapperUnreadable,
     AttachmentPresent,
     AttachmentHighRiskType,
     AttachmentTypeDiffersFromBodyMention,
@@ -59,7 +60,7 @@ const ANY_KNOWN: &str = "a site where you log in";
 const MAX_REASON_CHARS: usize = 120;
 
 impl Cue {
-    pub const ALL: [Cue; 35] = [
+    pub const ALL: [Cue; 36] = [
         Cue::DomainLookalikeMisspelling,
         Cue::DomainLookalikeEmbedded,
         Cue::PageFromMailUnknownLogin,
@@ -76,6 +77,7 @@ impl Cue {
         Cue::LinkTextHidesUrl,
         Cue::LinkOnlyBody,
         Cue::LinkTargetHighRiskFile,
+        Cue::LinkWrapperUnreadable,
         Cue::AttachmentPresent,
         Cue::AttachmentHighRiskType,
         Cue::AttachmentTypeDiffersFromBodyMention,
@@ -160,6 +162,10 @@ impl Cue {
             Cue::LinkTargetHighRiskFile => (
                 "link_target_high_risk_file",
                 "A link downloads a file that runs code when opened.",
+            ),
+            Cue::LinkWrapperUnreadable => (
+                "link_wrapper_unreadable",
+                "A link passes through a link checker, and where it leads could not be read.",
             ),
             Cue::AttachmentPresent => ("attachment_present", "Has an attachment."),
             Cue::AttachmentHighRiskType => (
@@ -283,6 +289,24 @@ impl Cue {
             .filter(|text| text.chars().count() <= MAX_REASON_CHARS)
             .unwrap_or_else(|| template.replace(KNOWN, ANY_KNOWN))
     }
+
+    /// Banner text for a lookalike cue that names the candidate too, at most 120 characters;
+    /// [`Cue::reason`] with the known domain alone when it does not fit. The lookalike templates
+    /// open with a capitalized verb, which follows the candidate in lower case.
+    pub fn lookalike_reason(self, candidate: &str, known: &str) -> String {
+        let template = self.row().1;
+        let text = format!(
+            "{candidate} {}{}",
+            template[..1].to_lowercase(),
+            &template[1..]
+        )
+        .replace(KNOWN, &format!("{known}, where you log in,"));
+        if text.chars().count() <= MAX_REASON_CHARS {
+            text
+        } else {
+            self.reason(Some(known))
+        }
+    }
 }
 
 impl From<Lookalike> for Cue {
@@ -296,6 +320,16 @@ impl From<Lookalike> for Cue {
     }
 }
 
+/// A fired lookalike cue and the two registrable domains behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookalikeHit {
+    pub cue: Cue,
+    /// The host that fired it: the sender's domain, a link's target, a link's text, or a page.
+    pub candidate: String,
+    /// The login-set domain it resembles.
+    pub known: String,
+}
+
 /// Every mail cue the mail fires, in cue order, each with the known domain it names when it names
 /// one. `known` is the user's login set; `never_seen` says whether the sender counts as never seen.
 pub fn mail_cues(
@@ -304,14 +338,39 @@ pub fn mail_cues(
     known: &[&Name],
     never_seen: bool,
 ) -> BTreeMap<Cue, Option<String>> {
-    let mut fired = BTreeMap::new();
-    for candidate in mail_names(mail) {
-        if let Some((k, rule)) = lookalike(&candidate, known.iter().copied(), &policy.guards) {
-            fired
-                .entry(Cue::from(rule))
-                .or_insert_with(|| Some(k.registrable.clone()));
+    mail_cues_and_lookalikes(mail, policy, known, never_seen).0
+}
+
+/// [`mail_cues`], plus one [`LookalikeHit`] per fired lookalike cue, in cue order: the first
+/// candidate host that fired it.
+pub fn mail_cues_and_lookalikes(
+    mail: &MailObservation,
+    policy: &Policy,
+    known: &[&Name],
+    never_seen: bool,
+) -> (BTreeMap<Cue, Option<String>>, Vec<LookalikeHit>) {
+    let targets: Vec<(Option<Url>, bool)> = mail
+        .links
+        .iter()
+        .map(|l| link_target(&l.href, policy))
+        .collect();
+    let candidates = mail_names(mail, &targets);
+    let capped = candidates.len() > policy.max_hosts;
+    let mut hits = BTreeMap::new();
+    for candidate in candidates.iter().take(policy.max_hosts) {
+        if let Some((k, rule)) = lookalike(candidate, known.iter().copied(), &policy.guards) {
+            let cue = Cue::from(rule);
+            hits.entry(cue).or_insert_with(|| LookalikeHit {
+                cue,
+                candidate: candidate.registrable.clone(),
+                known: k.registrable.clone(),
+            });
         }
     }
+    let mut fired: BTreeMap<Cue, Option<String>> = hits
+        .values()
+        .map(|hit| (hit.cue, Some(hit.known.clone())))
+        .collect();
     if let Some(k) = brand_name_in_freemail_sender(mail, policy, known) {
         fired.insert(Cue::BrandNameInFreemailSender, Some(k));
     }
@@ -353,7 +412,10 @@ pub fn mail_cues(
             Cue::DisplayNameAddressMismatch,
             display_name_address_mismatch(mail),
         ),
-        (Cue::LinkTextTargetMismatch, link_text_target_mismatch(mail)),
+        (
+            Cue::LinkTextTargetMismatch,
+            link_text_target_mismatch(mail, &targets),
+        ),
         (
             Cue::LinkTextHidesUrl,
             mail.links.iter().any(|l| text_host(&l.text).is_none()),
@@ -361,7 +423,11 @@ pub fn mail_cues(
         (Cue::LinkOnlyBody, link_only_body(mail)),
         (
             Cue::LinkTargetHighRiskFile,
-            link_target_high_risk_file(mail, policy),
+            link_target_high_risk_file(&targets, policy),
+        ),
+        (
+            Cue::LinkWrapperUnreadable,
+            targets.iter().any(|(_, unreadable)| *unreadable),
         ),
         (Cue::AttachmentPresent, attached),
         (
@@ -376,24 +442,60 @@ pub fn mail_cues(
             Cue::AttachmentTypeDiffersFromBodyMention,
             attachment_type_differs_from_body_mention(mail, policy),
         ),
-        (Cue::ObservationTruncated, mail.truncated),
+        (Cue::ObservationTruncated, mail.truncated || capped),
     ];
     for (cue, on) in structural {
         if on {
             fired.insert(cue, None);
         }
     }
-    fired
+    (fired, hits.into_values().collect())
+}
+
+/// Where a link leads. For a redirector's link it is the `http` or `https` URL, with a host, in the
+/// redirector's query parameter (form-decoded); otherwise the href itself. The flag marks a
+/// redirector's link whose destination cannot be read, which is then judged by its href. One
+/// level is unwrapped: a destination that is itself a redirector's link stays as it is.
+pub(crate) fn link_target(href: &str, policy: &Policy) -> (Option<Url>, bool) {
+    let Ok(url) = Url::parse(href.trim()) else {
+        return (None, false);
+    };
+    let Some(param) = policy.redirector_param(&url) else {
+        return (Some(url), false);
+    };
+    let destination = url
+        .query_pairs()
+        .find(|(key, _)| key == param)
+        .and_then(|(_, value)| Url::parse(&value).ok())
+        .filter(|d| matches!(d.scheme(), "http" | "https") && d.host().is_some());
+    match destination {
+        Some(destination) => (Some(destination), false),
+        None => (Some(url), true),
+    }
+}
+
+/// The hosts this mail's lookalike rules would check, in order, before the `max_hosts` cap.
+pub fn lookalike_hosts(mail: &MailObservation, policy: &Policy) -> Vec<Name> {
+    let targets: Vec<(Option<Url>, bool)> = mail
+        .links
+        .iter()
+        .map(|l| link_target(&l.href, policy))
+        .collect();
+    mail_names(mail, &targets)
 }
 
 /// Every host name a lookalike rule checks, once each: the sender's domain, then each link's
-/// target and the domain its text names, in link order.
-fn mail_names(mail: &MailObservation) -> Vec<Name> {
+/// target and the domain its text names, in link order. `targets` are the links' [`link_target`]s.
+fn mail_names(mail: &MailObservation, targets: &[(Option<Url>, bool)]) -> Vec<Name> {
     let sender = mail.from_addr.rsplit_once('@').map(|(_, d)| d.to_owned());
     let links = mail
         .links
         .iter()
-        .flat_map(|l| [href_host(&l.href), text_host(&l.text)])
+        .zip(targets)
+        .flat_map(|(l, (target, _))| {
+            let target = target.as_ref().and_then(Url::host).map(|h| h.to_owned());
+            [target, text_host(&l.text)]
+        })
         .filter_map(|host| match host {
             Some(Host::Domain(d)) => Some(d),
             _ => None,
@@ -438,21 +540,22 @@ fn site(host: &Host) -> String {
     }
 }
 
-fn link_text_target_mismatch(mail: &MailObservation) -> bool {
-    mail.links.iter().any(|l| {
+fn link_text_target_mismatch(mail: &MailObservation, targets: &[(Option<Url>, bool)]) -> bool {
+    mail.links.iter().zip(targets).any(|(l, (target, _))| {
+        let target = target.as_ref().and_then(Url::host).map(|h| h.to_owned());
         matches!(
-            (text_host(&l.text), href_host(&l.href)),
+            (text_host(&l.text), target),
             (Some(text), Some(target)) if site(&text) != site(&target)
         )
     })
 }
 
 /// Nothing is left of the body once link texts, link targets and URL or domain words are removed.
-fn link_only_body(mail: &MailObservation) -> bool {
+pub(crate) fn link_only_body(mail: &MailObservation) -> bool {
     let mut rest = mail.body_text.clone();
     for link in &mail.links {
         for s in [link.text.trim(), link.href.trim()] {
-            if !s.is_empty() {
+            if !s.is_empty() && rest.contains(s) {
                 rest = rest.replace(s, " ");
             }
         }
@@ -463,10 +566,10 @@ fn link_only_body(mail: &MailObservation) -> bool {
             .all(|w| text_host(w).is_some() || !w.chars().any(char::is_alphanumeric))
 }
 
-fn link_target_high_risk_file(mail: &MailObservation, policy: &Policy) -> bool {
-    mail.links
+fn link_target_high_risk_file(targets: &[(Option<Url>, bool)], policy: &Policy) -> bool {
+    targets
         .iter()
-        .filter_map(|l| Url::parse(l.href.trim()).ok())
+        .filter_map(|(target, _)| target.as_ref())
         .filter_map(|url| url.path_segments()?.next_back().and_then(extension))
         .any(|e| policy.high_risk.contains(&e))
 }
@@ -513,15 +616,36 @@ fn display_name_address_mismatch(mail: &MailObservation) -> bool {
             _ => None,
         })
         .any(|n| Some(n.registrable) != from_domain);
-    let shares_word = |addr: &str| {
-        let addr_words = words(addr);
-        name_words.iter().any(|w| addr_words.contains(w))
+    // Related when a display-name word of 3 or more characters occurs anywhere in the address, or
+    // an address word of 3 or more characters occurs anywhere in the display name, ignoring case:
+    // "John Smith" and jsmith@ are related through "smith". The address's public suffix is left
+    // out, or "com" would relate "Commerce Dept" to every .com address; a domain without a
+    // registrable name keeps all its words.
+    let display = mail.from_name.to_lowercase();
+    let long = |w: &&String| w.chars().count() >= 3;
+    let related = |addr: &str| {
+        let addr = addr.trim().to_lowercase();
+        let addr = match addr.rsplit_once('@').map(|(local, d)| (local, name(d))) {
+            Some((local, Some(n))) => {
+                let rest = n.host.strip_suffix(&n.suffix).unwrap_or(&n.host);
+                format!("{local}@{}", rest.trim_end_matches('.'))
+            }
+            _ => addr,
+        };
+        name_words
+            .iter()
+            .filter(long)
+            .any(|w| addr.contains(w.as_str()))
+            || words(&addr)
+                .iter()
+                .filter(long)
+                .any(|w| display.contains(w.as_str()))
     };
     let reply_to = mail.reply_to.as_deref().filter(|r| !r.trim().is_empty());
     !name_words.is_empty()
         && (names_other_domain
-            || !shares_word(&mail.from_addr)
-            || reply_to.is_some_and(|r| !shares_word(r)))
+            || !related(&mail.from_addr)
+            || reply_to.is_some_and(|r| !related(r)))
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -558,9 +682,12 @@ fn is_reply(subject: &str) -> bool {
         .is_some_and(|p| p.eq_ignore_ascii_case("re: "))
 }
 
-/// Lowercased, with every run of whitespace made one space.
+/// Lowercased, typographic quotes made ASCII, and every run of whitespace made one space.
 pub(crate) fn normalize(text: &str) -> String {
     text.to_lowercase()
+        // U+2018..U+201B single and U+201C..U+201F double quotation marks.
+        .replace(['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'], "'")
+        .replace(['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'], "\"")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -618,6 +745,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// The shipped policy plus a constructed redirector under the reserved `.example` name.
+    pub(crate) fn wrapping() -> Policy {
+        let mut p = shipped();
+        p.redirectors = vec![crate::policy::Redirector {
+            suffix: "linkcheck.example".into(),
+            param: "url".into(),
+        }];
+        p
+    }
+
     fn fires(cue: Cue, mail: &MailObservation, known: &[&str], never_seen: bool) -> bool {
         fires_with(&shipped(), cue, mail, known, never_seen)
     }
@@ -645,7 +782,7 @@ pub(crate) mod tests {
         let ids: BTreeSet<&str> = Cue::ALL.iter().map(|c| c.id()).collect();
         assert_eq!(ids.len(), Cue::ALL.len());
         assert!(Cue::ALL.windows(2).all(|w| w[0] < w[1]));
-        assert_eq!(Cue::ALL.iter().filter(|c| c.is_soft()).count(), 31);
+        assert_eq!(Cue::ALL.iter().filter(|c| c.is_soft()).count(), 32);
         assert_eq!(Cue::ALL.iter().filter(|c| c.is_phrase()).count(), 16);
         for rule in [
             Lookalike::Misspelling,
@@ -678,6 +815,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn lookalike_reasons_name_the_candidate_when_it_fits() {
+        assert_eq!(
+            Cue::DomainLookalikeMisspelling.lookalike_reason("micorsoft-support.com", "microsoft.com"),
+            "micorsoft-support.com looks like microsoft.com, where you log in, but is a different site."
+        );
+        let long = format!("{}.com", "a".repeat(60));
+        for cue in Cue::ALL
+            .into_iter()
+            .filter(|c| c.id().starts_with("domain_lookalike_"))
+        {
+            for (candidate, known) in [
+                ("nist.com", "nist.gov"),
+                (long.as_str(), "nist.gov"),
+                (long.as_str(), long.as_str()),
+            ] {
+                let text = cue.lookalike_reason(candidate, known);
+                assert!(text.chars().count() <= 120, "{}: {text}", cue.id());
+                assert!(!text.contains('{'), "{}: {text}", cue.id());
+            }
+            // Too long with the candidate: the known domain alone, as `reason` gives it.
+            assert_eq!(
+                cue.lookalike_reason(&long, "nist.gov"),
+                cue.reason(Some("nist.gov"))
+            );
+        }
+    }
+
+    #[test]
     fn phrases_match_case_insensitively_on_collapsed_whitespace_at_word_boundaries() {
         assert!(contains_phrase(
             &normalize("Please\n  CLICK   here"),
@@ -689,6 +854,17 @@ pub(crate) mod tests {
         assert!(contains_phrase("carefree free", "free"));
         assert!(contains_phrase("dear user,x", "dear user,"));
         assert!(contains_phrase("x-a-a", "a-a"));
+    }
+
+    #[test]
+    fn typographic_quotes_fold_to_ascii() {
+        assert_eq!(
+            normalize("\u{2018}a\u{2019} \u{201A}b\u{201B} \u{201C}c\u{201D} \u{201E}d\u{201F}"),
+            "'a' 'b' \"c\" \"d\""
+        );
+        // CISA-ASE indicator 2's seed "Sir/Ma'am", written with a typographic apostrophe.
+        let m = with(|m| m.body_text = "Dear Sir/Ma\u{2019}am,".into());
+        assert!(fires(Cue::GenericGreeting, &m, &[], false));
     }
 
     // Hard lookalikes on each mail field. Examples from PHISHING_CUES.md section 4.
@@ -838,6 +1014,58 @@ pub(crate) mod tests {
         });
         assert!(!fires(Cue::DisplayNameAddressMismatch, &m, &[], false));
         assert!(!fires(Cue::DisplayNameAddressMismatch, &mail(), &[], false));
+
+        // Containment, not whole words: the abbreviation misfire measurement 2H found.
+        let john = |addr: &str| {
+            with(|m| {
+                m.from_name = "John Smith".into();
+                m.from_addr = addr.into();
+            })
+        };
+        assert!(!fires(
+            Cue::DisplayNameAddressMismatch,
+            &john("jsmith@example.com"),
+            &[],
+            false
+        ));
+        assert!(!fires(
+            Cue::DisplayNameAddressMismatch,
+            &john("smith.j@example.com"),
+            &[],
+            false
+        ));
+        assert!(fires(
+            Cue::DisplayNameAddressMismatch,
+            &john("accounts-payable@example.com"),
+            &[],
+            false
+        ));
+        // Address words reach into the display name too, and words under 3 characters do not count.
+        let m = with(|m| {
+            m.from_name = "Contoso Billing Team".into();
+            m.from_addr = "billing@example.net".into();
+        });
+        assert!(!fires(Cue::DisplayNameAddressMismatch, &m, &[], false));
+        let m = with(|m| {
+            m.from_name = "Al Bo".into();
+            m.from_addr = "albo.x@example.org".into();
+        });
+        assert!(fires(Cue::DisplayNameAddressMismatch, &m, &[], false));
+
+        // The public suffix is no word, in either direction.
+        let unrelated = |from_name: &str, from_addr: &str| {
+            let m = with(|m| {
+                m.from_name = from_name.into();
+                m.from_addr = from_addr.into();
+            });
+            fires(Cue::DisplayNameAddressMismatch, &m, &[], false)
+        };
+        assert!(unrelated("Commerce Dept", "billing@example.com"));
+        assert!(unrelated("Net Solutions", "billing@example.net"));
+        assert!(unrelated("Org Admin", "billing@example.org"));
+        assert!(!unrelated("Example Commerce", "billing@example.com"));
+        // A domain without a registrable name keeps all its words.
+        assert!(!unrelated("Localhost Admin", "root@localhost"));
     }
 
     #[test]
@@ -1005,7 +1233,7 @@ pub(crate) mod tests {
                 "Do not reply to this email.",
                 "do not reply to this email",
             ),
-            (Cue::TooGoodToBeTrueOffer, "FREE", "freedom"),
+            (Cue::TooGoodToBeTrueOffer, "Enter the lottery", "lottery2"),
             (
                 Cue::ExclusiveOfferForYou,
                 "a special birthday coupon",
@@ -1053,6 +1281,209 @@ pub(crate) mod tests {
         assert!(!fires(Cue::GenericGreeting, &m, &[], false));
         let m = with(|m| m.subject = "Dear user,".into());
         assert!(!fires(Cue::GenericGreeting, &m, &[], false));
+    }
+
+    #[test]
+    fn lookalike_hosts_lists_the_sender_then_each_link_target_and_text_once() {
+        let m = with(|m| {
+            m.links = vec![
+                link("www.example.net", "https://a.example.org/"),
+                link(
+                    "Open",
+                    "https://eu1.linkcheck.example/?url=https%3A%2F%2Fb.example.org%2F",
+                ),
+                link("Open", "https://A.example.org/again"),
+                link("Open", "not a url"),
+            ]
+        });
+        let hosts = |p: &Policy| -> Vec<String> {
+            lookalike_hosts(&m, p).into_iter().map(|n| n.host).collect()
+        };
+        assert_eq!(
+            hosts(&wrapping()),
+            [
+                "example.com",
+                "a.example.org",
+                "www.example.net",
+                "b.example.org"
+            ]
+        );
+        assert_eq!(
+            hosts(&shipped()),
+            [
+                "example.com",
+                "a.example.org",
+                "www.example.net",
+                "eu1.linkcheck.example"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_host_cap_checks_the_sender_then_the_first_links() {
+        let mut p = shipped();
+        p.max_hosts = 3;
+        let known = &["amazon.com"];
+        let links = |hosts: &[&str]| {
+            with(|m| {
+                m.links = hosts
+                    .iter()
+                    .map(|h| link("Open", &format!("https://{h}/")))
+                    .collect()
+            })
+        };
+        let lookalike =
+            |m: &MailObservation| fires_with(&p, Cue::DomainLookalikeMisspelling, m, known, false);
+        let truncated =
+            |m: &MailObservation| fires_with(&p, Cue::ObservationTruncated, m, &[], false);
+
+        // The sender's example.com is candidate 1, which leaves room for two link hosts.
+        let inside = links(&["a.example.org", "amazan.com", "c.example.org"]);
+        assert!(lookalike(&inside));
+        assert!(truncated(&inside));
+        let beyond = links(&["a.example.org", "b.example.org", "amazan.com"]);
+        assert!(!lookalike(&beyond));
+        assert!(truncated(&beyond));
+
+        let mut sender = links(&["a.example.org", "b.example.org", "c.example.org"]);
+        sender.from_addr = "orders@amazan.com".into();
+        assert!(lookalike(&sender), "the sender is never dropped");
+        assert!(truncated(&sender));
+
+        let at_cap = links(&["a.example.org", "amazan.com"]);
+        assert!(lookalike(&at_cap));
+        assert!(!truncated(&at_cap));
+
+        let repeated = links(&[
+            "a.example.org",
+            "A.Example.org",
+            "a.example.org.",
+            "amazan.com",
+        ]);
+        assert!(lookalike(&repeated));
+        assert!(!truncated(&repeated));
+    }
+
+    // Link unwrapping. Every URL here is constructed; `linkcheck.example` is a made-up redirector.
+
+    #[test]
+    fn a_wrapped_link_is_judged_by_its_destination() {
+        let p = wrapping();
+        let lookalike = with(|m| {
+            m.links = vec![link(
+                "Sign in",
+                "https://eu1.linkcheck.example/?url=https%3A%2F%2Famazan.com%2Flogin&data=x",
+            )]
+        });
+        assert!(fires_with(
+            &p,
+            Cue::DomainLookalikeMisspelling,
+            &lookalike,
+            &["amazon.com"],
+            false
+        ));
+        assert!(!fires(
+            Cue::DomainLookalikeMisspelling,
+            &lookalike,
+            &["amazon.com"],
+            false
+        ));
+
+        let honest = with(|m| {
+            m.links = vec![link(
+                "www.example.com",
+                "https://eu1.linkcheck.example/?data=x&url=https%3A%2F%2Fwww.example.com%2Fa",
+            )]
+        });
+        assert!(!fires_with(
+            &p,
+            Cue::LinkTextTargetMismatch,
+            &honest,
+            &[],
+            false
+        ));
+        assert!(fires(Cue::LinkTextTargetMismatch, &honest, &[], false));
+        assert!(!fires_with(
+            &p,
+            Cue::LinkWrapperUnreadable,
+            &honest,
+            &[],
+            false
+        ));
+
+        let download = with(|m| {
+            m.links = vec![link(
+                "Get it",
+                "https://eu1.linkcheck.example/?url=https%3A%2F%2Fexample.com%2Fsetup.exe",
+            )]
+        });
+        assert!(fires_with(
+            &p,
+            Cue::LinkTargetHighRiskFile,
+            &download,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_wrapper_fires_its_cue_and_is_judged_as_it_stands() {
+        let p = wrapping();
+        for href in [
+            "https://eu1.linkcheck.example/?data=x",
+            "https://eu1.linkcheck.example/?url=not%20a%20url",
+            "https://eu1.linkcheck.example/?url=ftp%3A%2F%2Fexample.com%2Ff",
+            "https://eu1.linkcheck.example/?url=",
+        ] {
+            let m = with(|m| m.links = vec![link("www.example.com", href)]);
+            assert!(
+                fires_with(&p, Cue::LinkWrapperUnreadable, &m, &[], false),
+                "{href}"
+            );
+            assert!(
+                fires_with(&p, Cue::LinkTextTargetMismatch, &m, &[], false),
+                "{href}"
+            );
+            assert!(!fires(Cue::LinkWrapperUnreadable, &m, &[], false), "{href}");
+        }
+    }
+
+    #[test]
+    fn only_the_suffix_and_its_subdomains_are_wrappers() {
+        let p = wrapping();
+        let destination = "?url=https%3A%2F%2Fexample.org%2F";
+        for host in [
+            "linkcheck.example",
+            "a.b.linkcheck.example",
+            "eu1.linkcheck.example.",
+        ] {
+            let (target, unreadable) = link_target(&format!("https://{host}/{destination}"), &p);
+            assert_eq!(target.unwrap().host_str(), Some("example.org"), "{host}");
+            assert!(!unreadable);
+        }
+        let (target, unreadable) =
+            link_target(&format!("https://evillinkcheck.example/{destination}"), &p);
+        assert_eq!(target.unwrap().host_str(), Some("evillinkcheck.example"));
+        assert!(!unreadable);
+    }
+
+    #[test]
+    fn nested_wrapping_is_unwrapped_once() {
+        let p = wrapping();
+        let href = "https://eu1.linkcheck.example/?url=https%3A%2F%2Feu2.linkcheck.example%2F%3Furl%3Dhttps%253A%252F%252Famazan.com%252F";
+        let (target, unreadable) = link_target(href, &p);
+        let target = target.unwrap();
+        assert_eq!(target.host_str(), Some("eu2.linkcheck.example"));
+        assert_eq!(target.query(), Some("url=https%3A%2F%2Famazan.com%2F"));
+        assert!(!unreadable);
+        let m = with(|m| m.links = vec![link("Sign in", href)]);
+        assert!(!fires_with(
+            &p,
+            Cue::DomainLookalikeMisspelling,
+            &m,
+            &["amazon.com"],
+            false
+        ));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use riggs_types::phishing::{Level, MailObservation, PageObservation, Provider, R
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use crate::cues::{mail_cues, Cue};
+use crate::cues::{link_target, mail_cues_and_lookalikes, Cue, LookalikeHit};
 use crate::domain::{name, Name};
 use crate::lookalike::lookalike;
 use crate::policy::Policy;
@@ -53,8 +53,11 @@ pub struct Assessment {
     /// Registrable domain to log: the sender's for a mail, the page's for a page. Empty when the
     /// host has none (an IP literal, a single label).
     pub domain: String,
-    /// One banner reason per fired cue, in the same order as `cues`.
+    /// Banner reasons, in `cues` order, for what can raise the level only: hard cues, page rules
+    /// and soft cues whose weight is above 0. A lookalike reason names both domains of its hit.
     pub reasons: Vec<Reason>,
+    /// One hit per fired lookalike cue, in `cues` order, whatever its weight.
+    pub lookalikes: Vec<LookalikeHit>,
 }
 
 /// One local user's history. Pure state: time comes in as `now_ms`, and every persistent change is
@@ -115,7 +118,7 @@ impl User {
             .senders
             .get(&key)
             .is_none_or(|row| row.first_msg == msg);
-        let fired = mail_cues(mail, policy, &self.known(), never_seen);
+        let (fired, lookalikes) = mail_cues_and_lookalikes(mail, policy, &self.known(), never_seen);
         let score: f32 = fired
             .keys()
             .filter(|cue| cue.is_soft())
@@ -134,10 +137,19 @@ impl User {
             .and_then(|(_, d)| name(d))
             .map_or_else(String::new, |n| n.registrable);
 
-        let hosts = mail.links.iter().filter_map(|l| {
-            let url = Url::parse(l.href.trim()).ok()?;
-            host_key(url.host_str()?)
-        });
+        // A click enters the browser at the href's host and, through a redirector, ends at the
+        // destination's host: both count as reached from this mail.
+        let hosts = mail
+            .links
+            .iter()
+            .flat_map(|l| {
+                [
+                    Url::parse(l.href.trim()).ok(),
+                    link_target(&l.href, policy).0,
+                ]
+            })
+            .flatten()
+            .filter_map(|url| host_key(url.host_str()?));
         for host in hosts {
             remember(&mut self.mail_links, host, level, now_ms);
         }
@@ -153,7 +165,10 @@ impl User {
             self.senders.insert(key, row.clone());
             change = Some(Change::Sender(row));
         }
-        (assessment(level, fired, score, domain), change)
+        (
+            assessment(policy, level, fired, lookalikes, score, domain),
+            change,
+        )
     }
 
     /// Checks a page that holds a password field.
@@ -168,15 +183,22 @@ impl User {
             .as_ref()
             .map_or_else(String::new, |n| n.registrable.clone());
         if self.logins.contains_key(&domain) {
-            return assessment(Level::None, BTreeMap::new(), 0.0, domain);
+            return assessment(policy, Level::None, BTreeMap::new(), vec![], 0.0, domain);
         }
         let mut fired = BTreeMap::new();
+        let mut lookalikes = vec![];
         let hard = name
             .as_ref()
             .and_then(|n| lookalike(n, self.known(), &policy.guards))
             .filter(|(_, rule)| rule.is_hard());
         let level = if let Some((k, rule)) = hard {
-            fired.insert(Cue::from(rule), Some(k.registrable.clone()));
+            let cue = Cue::from(rule);
+            fired.insert(cue, Some(k.registrable.clone()));
+            lookalikes.push(LookalikeHit {
+                cue,
+                candidate: domain.clone(),
+                known: k.registrable.clone(),
+            });
             Level::Danger
         } else {
             let linked = [Some(page.host.as_str()), page.entry_host.as_deref()]
@@ -205,7 +227,7 @@ impl User {
             remember(&mut self.flagged, domain.clone(), level, now_ms);
             prune(&mut self.flagged, now_ms);
         }
-        assessment(level, fired, 0.0, domain)
+        assessment(policy, level, fired, lookalikes, 0.0, domain)
     }
 
     /// Records or refreshes a login. Refuses, recording nothing, a hard lookalike of a login-set
@@ -294,16 +316,22 @@ fn sender_key(policy: &Policy, from_addr: &str) -> String {
 }
 
 fn assessment(
+    policy: &Policy,
     level: Level,
     fired: BTreeMap<Cue, Option<String>>,
+    lookalikes: Vec<LookalikeHit>,
     score: f32,
     domain: String,
 ) -> Assessment {
     let reasons = fired
         .iter()
+        .filter(|(cue, _)| !cue.is_soft() || policy.weights[cue] > 0.0)
         .map(|(cue, known)| Reason {
             cue: cue.id().into(),
-            text: cue.reason(known.as_deref()),
+            text: match lookalikes.iter().find(|hit| hit.cue == *cue) {
+                Some(hit) => cue.lookalike_reason(&hit.candidate, &hit.known),
+                None => cue.reason(known.as_deref()),
+            },
         })
         .collect();
     Assessment {
@@ -312,6 +340,7 @@ fn assessment(
         score,
         domain,
         reasons,
+        lookalikes,
     }
 }
 
@@ -362,7 +391,7 @@ fn prune(map: &mut BTreeMap<String, (Level, u64)>, now_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cues::tests::{link, mail, shipped};
+    use crate::cues::tests::{link, mail, shipped, wrapping};
     use riggs_types::phishing::Level::{Caution, Danger, None as Clear};
 
     const MINUTE: u64 = 60 * 1000;
@@ -449,11 +478,69 @@ mod tests {
         assert_eq!(a.level, Danger);
         assert_eq!(a.domain, "amazan.com");
         assert_eq!(cues(&a)[0], "domain_lookalike_misspelling");
+        assert!(a.cues.contains(&Cue::SenderNeverSeen));
+        // Zero-weight soft cues are logged in `cues` but give no banner line.
         assert_eq!(
-            a.reasons[0].text,
-            "Looks like amazon.com, where you log in, but is a different site."
+            a.reasons,
+            [Reason {
+                cue: "domain_lookalike_misspelling".into(),
+                text:
+                    "amazan.com looks like amazon.com, where you log in, but is a different site."
+                        .into(),
+            }]
         );
-        assert_eq!(a.reasons.len(), a.cues.len());
+        assert_eq!(
+            a.lookalikes,
+            [LookalikeHit {
+                cue: Cue::DomainLookalikeMisspelling,
+                candidate: "amazan.com".into(),
+                known: "amazon.com".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn lookalike_hits_name_both_domains_one_per_cue_in_cue_order() {
+        let mut m = mail();
+        m.from_addr = "news@www.nist.com".into();
+        m.links = vec![
+            link("Shop", "https://amazongproducts.ru/"),
+            link("Sign in", "https://amazan.com/"),
+            link("Sign in", "https://amazan.org/"),
+        ];
+        let (a, _) = user_with(0, &["amazon.com", "nist.gov"]).check_mail(&shipped(), &m, 1);
+        let hits: Vec<(&str, &str, &str)> = a
+            .lookalikes
+            .iter()
+            .map(|h| (h.cue.id(), h.candidate.as_str(), h.known.as_str()))
+            .collect();
+        assert_eq!(
+            hits,
+            [
+                ("domain_lookalike_misspelling", "amazan.com", "amazon.com"),
+                (
+                    "domain_lookalike_brand_token",
+                    "amazongproducts.ru",
+                    "amazon.com"
+                ),
+                ("domain_lookalike_suffix_swap", "nist.com", "nist.gov"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reasons_hold_only_the_soft_cues_with_a_weight_above_zero() {
+        let mut p = shipped();
+        p.weights.insert(Cue::Urgency, 0.5);
+        p.weights.insert(Cue::AttachmentPresent, -0.5);
+        let mut m = mail();
+        m.subject = "URGENT".into();
+        m.attachments = vec!["file.pdf".into()];
+        let (a, _) = User::default().check_mail(&p, &m, 1);
+        assert!(a.cues.contains(&Cue::AttachmentPresent));
+        assert!(a.cues.contains(&Cue::SenderNeverSeen));
+        let shown: Vec<&str> = a.reasons.iter().map(|r| r.cue.as_str()).collect();
+        assert_eq!(shown, ["urgency"]);
     }
 
     #[test]
@@ -543,7 +630,19 @@ mod tests {
         assert_eq!(a.level, Danger);
         assert_eq!(a.domain, "bankofarnerica.com");
         assert_eq!(cues(&a), ["domain_lookalike_misspelling"]);
-        assert!(a.reasons[0].text.contains("bankofamerica.com"));
+        assert_eq!(
+            a.reasons[0].text,
+            "bankofarnerica.com looks like bankofamerica.com, where you log in, but is a different \
+             site."
+        );
+        assert_eq!(
+            a.lookalikes,
+            [LookalikeHit {
+                cue: Cue::DomainLookalikeMisspelling,
+                candidate: "bankofarnerica.com".into(),
+                known: "bankofamerica.com".into(),
+            }]
+        );
     }
 
     #[test]
@@ -580,6 +679,8 @@ mod tests {
             cues(&a),
             ["page_from_mail_unknown_login", "page_from_flagged_mail"]
         );
+        let shown: Vec<&str> = a.reasons.iter().map(|r| r.cue.as_str()).collect();
+        assert_eq!(shown, cues(&a));
     }
 
     #[test]
@@ -591,6 +692,27 @@ mod tests {
             (a.level, a.domain.as_str(), a.cues.len()),
             (Clear, "example.net", 0)
         );
+    }
+
+    #[test]
+    fn a_lookalike_behind_a_wrapper_is_danger_and_both_hosts_count_as_from_mail() {
+        let p = wrapping();
+        let wrapped = |destination: &str| {
+            let mut m = mail();
+            m.links = vec![link(
+                "Sign in",
+                &format!("https://eu1.linkcheck.example/?url=https%3A%2F%2F{destination}%2F"),
+            )];
+            m
+        };
+        let (a, _) = user_with(0, &["amazon.com"]).check_mail(&p, &wrapped("amazan.com"), 0);
+        assert_eq!(a.level, Danger);
+
+        let mut user = user_with(p.warmup_logins, &[]);
+        user.check_mail(&p, &wrapped("signin.example.org"), 0);
+        for host in ["eu1.linkcheck.example", "signin.example.org"] {
+            assert_eq!(user.check_page(&p, &page(host), 1).level, Caution, "{host}");
+        }
     }
 
     #[test]
@@ -708,5 +830,103 @@ mod tests {
         prune(&mut map, RECENT_CAP as u64);
         assert_eq!(map.len(), RECENT_CAP);
         assert!(!map.contains_key("h0.example.com"));
+    }
+
+    /// The heaviest mail `MailObservation::check_limits` admits, against a full login set. Run with
+    /// `cargo test --release -p riggs-phishing worst_case -- --ignored --nocapture`; it prints
+    /// timings and asserts none.
+    #[test]
+    #[ignore]
+    fn worst_case_check_mail_timing() {
+        let p = shipped();
+        // `first` followed by `n` written in base-26 letters, `len` characters in all.
+        let word = |first: u8, mut n: usize, len: usize| {
+            let mut s = String::from(first as char);
+            for _ in 1..len {
+                s.push((b'a' + (n % 26) as u8) as char);
+                n /= 26;
+            }
+            s
+        };
+        let users = |label: &dyn Fn(usize) -> String| {
+            let logins = (0..p.max_logins).map(|i| LoginRow {
+                domain: format!("{}.com", label(i)),
+                first_ms: 1,
+                last_ms: 1,
+                count: 1,
+            });
+            User::new(logins, []).unwrap()
+        };
+        // Dense: every login label is `len` characters starting with "a", like every candidate part,
+        // the shortest length at which both typo guards let a part be compared, so every
+        // comparison passes its cheap filters and runs the edit distance. Spread: first letters
+        // a-z and lengths 4-12, so about one login in 26 * 9 / 3 is that close.
+        let len = p.guards.typo_min_label.max(p.guards.typo_part_min_label);
+        let dense = users(&|i| word(b'a', i, len));
+        let spread = users(&|i| word(b'a' + (i % 26) as u8, i, 4 + (i / 26) % 9));
+        // As many `len`-character parts as fit a 63-character DNS label. Logins below 2,000 have
+        // "a" in the last two places; the offset puts other letters there in every part, so no
+        // part is within one edit of a login and nothing fires to cut a comparison short.
+        let parts = 64 / (len + 1);
+        let offset = 26usize.pow(len as u32 - 3) + 26usize.pow(len as u32 - 2);
+        let label = |first: usize| {
+            (first..first + parts)
+                .map(|n| word(b'a', n + offset, len))
+                .collect::<Vec<_>>()
+                .join("-")
+        };
+        let host = |first: usize| format!("{}.{}.com", label(first), label(first + parts));
+        let mut m = mail();
+        m.subject = "x".repeat(4096);
+        m.body_text = "a.co ".repeat(65536 / 5);
+        m.attachments = (0..100).map(|i| format!("file{i}.zip")).collect();
+        m.links = (0..500)
+            .map(|i| {
+                let first = i * 4 * parts;
+                let text = format!("https://{}/{}", host(first), "x".repeat(3900));
+                let href = format!(
+                    "https://{}/?q={}",
+                    host(first + 2 * parts),
+                    "x".repeat(7900)
+                );
+                link(&text, &href)
+            })
+            .collect();
+        assert_eq!(m.check_limits(), Ok(()));
+
+        let start = std::time::Instant::now();
+        crate::cues::link_only_body(&m);
+        println!("link_only_body: {:?}", start.elapsed());
+        for (shape, user) in [("dense", dense), ("spread", spread)] {
+            let mut times = Vec::new();
+            for _ in 0..5 {
+                let mut fresh = user.clone();
+                let start = std::time::Instant::now();
+                let (a, _) = fresh.check_mail(&p, &m, 1);
+                times.push(start.elapsed());
+                assert_eq!(a.level, Clear);
+                assert!(a.cues.contains(&Cue::ObservationTruncated));
+            }
+            times.sort();
+            let known = user.known();
+            let start = std::time::Instant::now();
+            let candidates = crate::cues::lookalike_hosts(&m, &p);
+            let checked = &candidates[..candidates.len().min(p.max_hosts)];
+            let lookalikes = checked
+                .iter()
+                .filter(|c| lookalike(c, known.iter().copied(), &p.guards).is_some())
+                .count();
+            println!(
+                "{shape} login set: check_mail min {:?}, median {:?}, max {:?}; lookalike pass \
+                 {:?} over {} of {} candidates ({} fired)",
+                times[0],
+                times[2],
+                times[4],
+                start.elapsed(),
+                checked.len(),
+                candidates.len(),
+                lookalikes,
+            );
+        }
     }
 }

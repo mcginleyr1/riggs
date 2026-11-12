@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use riggs_types::phishing::Mode;
 use serde::Deserialize;
+use url::{Host, Url};
 
 use crate::cues::{normalize, Cue};
 use crate::domain::name;
@@ -20,6 +21,7 @@ struct File {
     weights: BTreeMap<String, f32>,
     phrases: BTreeMap<String, Vec<String>>,
     extensions: Extensions,
+    links: Links,
     freemail: Freemail,
 }
 
@@ -28,6 +30,22 @@ struct File {
 struct Extensions {
     high_risk: Vec<String>,
     body_mention: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Links {
+    max_hosts: usize,
+    redirectors: Vec<Redirector>,
+}
+
+/// A link-checking gateway: a link whose host is `suffix` or a subdomain of it carries its
+/// destination in the query parameter `param`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Redirector {
+    pub(crate) suffix: String,
+    pub(crate) param: String,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +69,13 @@ pub struct Policy {
     pub(crate) phrases: BTreeMap<Cue, Vec<String>>,
     pub(crate) high_risk: Vec<String>,
     pub(crate) body_mention: Vec<String>,
+    /// Distinct hosts a mail's lookalike rules check: the sender's domain first, then link hosts
+    /// in link order. The rest are not checked and `observation_truncated` fires. A cap bounds
+    /// the cost of a mail any local user can send; what it can hide is a lookalike link placed
+    /// after that many distinct decoy hosts. Such a mail still fires the truncation cue, and the
+    /// page check is unaffected: it judges the one host the person lands on.
+    pub(crate) max_hosts: usize,
+    pub(crate) redirectors: Vec<Redirector>,
     /// SpamAssassin `freemail_domains` patterns: `*` matches any run of characters except `.`.
     pub(crate) freemail: Vec<String>,
 }
@@ -115,6 +140,20 @@ impl Policy {
             &file.lookalike.embedding_ignore,
             is_registrable,
         )?;
+        let malformed = file.links.redirectors.iter().position(|r| {
+            let host = matches!(Host::parse(&r.suffix), Ok(Host::Domain(d)) if d == r.suffix);
+            let param = r
+                .param
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+            !(host && r.suffix.contains('.') && !r.param.is_empty() && param)
+        });
+        if let Some(i) = malformed {
+            return Err(format!("links.redirectors: entry {} is malformed", i + 1));
+        }
+        if file.links.max_hosts == 0 {
+            return Err("links.max_hosts must be at least 1".into());
+        }
         Ok(Policy {
             mode: file.mode,
             caution_threshold: file.caution_threshold,
@@ -126,6 +165,8 @@ impl Policy {
             phrases,
             high_risk: file.extensions.high_risk,
             body_mention: file.extensions.body_mention,
+            max_hosts: file.links.max_hosts,
+            redirectors: file.links.redirectors,
             freemail: file.freemail.domains,
         })
     }
@@ -137,6 +178,24 @@ impl Policy {
 
     pub fn guards(&self) -> &Guards {
         &self.guards
+    }
+
+    /// The query parameter that carries the destination, when `url`'s host is a redirector's
+    /// suffix or a subdomain of it.
+    pub(crate) fn redirector_param(&self, url: &Url) -> Option<&str> {
+        let Some(Host::Domain(host)) = url.host() else {
+            return None;
+        };
+        let host = host.strip_suffix('.').unwrap_or(host);
+        self.redirectors
+            .iter()
+            .find(|r| {
+                host == r.suffix
+                    || host
+                        .strip_suffix(&r.suffix)
+                        .is_some_and(|sub| sub.ends_with('.'))
+            })
+            .map(|r| r.param.as_str())
     }
 
     /// `domain` is the lowercased domain of an address, matched whole as SpamAssassin does.
@@ -206,7 +265,9 @@ mod tests {
     fn the_shipped_policy_loads_in_monitor_mode_with_every_weight_at_zero() {
         let p = shipped();
         assert_eq!(p.mode(), Mode::Monitor);
-        assert_eq!(p.weights.len(), 31);
+        assert_eq!(p.weights.len(), 32);
+        assert!(p.redirectors.is_empty());
+        assert_eq!(p.max_hosts, 100);
         assert!(p.weights.values().all(|w| *w == 0.0));
         assert_eq!(p.phrases.len(), 16);
         assert!(p.phrases[&Cue::CompromisingPictureLure].is_empty());
@@ -219,6 +280,8 @@ mod tests {
     fn shipped_phrases_are_stored_normalized() {
         let p = shipped();
         assert!(p.phrases[&Cue::Urgency].contains(&"urgent".to_string()));
+        assert!(!p.phrases[&Cue::TooGoodToBeTrueOffer].contains(&"free".to_string()));
+        assert_eq!(p.guards().typo_part_min_label, 8);
         assert!(p.phrases[&Cue::GenericGreeting].contains(&"sir/ma'am".to_string()));
     }
 
@@ -297,10 +360,45 @@ mod tests {
         );
         let missing = Policy::from_toml(&text.replacen("urgency = 0.0\n", "", 1)).unwrap_err();
         assert_eq!(missing, "weights: missing urgency");
+        let no_cap = Policy::from_toml(&text.replacen("max_hosts = 100\n", "", 1)).unwrap_err();
+        assert!(no_cap.contains("missing field `max_hosts`"), "{no_cap}");
+        let zero_cap = text.replacen("max_hosts = 100", "max_hosts = 0", 1);
+        assert_eq!(
+            Policy::from_toml(&zero_cap).unwrap_err(),
+            "links.max_hosts must be at least 1"
+        );
         let extra = text.replacen("[weights]\n", "[weights]\nmade_up = 0.0\n", 1);
         assert_eq!(
             Policy::from_toml(&extra).unwrap_err(),
             "weights: made_up is not a soft cue id"
         );
+    }
+
+    #[test]
+    fn redirector_entries_are_checked() {
+        let text = shipped_text();
+        let with_entry = |entry: &str| {
+            let edited = text.replacen(
+                "redirectors = [\n",
+                &format!("redirectors = [\n{entry},\n"),
+                1,
+            );
+            assert!(edited != text, "the edit did not apply");
+            Policy::from_toml(&edited)
+        };
+        let valid = with_entry(r#"{ suffix = "linkcheck.example", param = "url" }"#).unwrap();
+        assert_eq!(valid.redirectors.len(), 1);
+        for entry in [
+            r#"{ suffix = "LinkCheck.example", param = "url" }"#,
+            r#"{ suffix = "linkcheck", param = "url" }"#,
+            r#"{ suffix = "https://linkcheck.example", param = "url" }"#,
+            r#"{ suffix = "linkcheck.example", param = "" }"#,
+            r#"{ suffix = "linkcheck.example", param = "u=rl" }"#,
+            r#"{ suffix = "linkcheck.example" }"#,
+            r#"{ suffix = "linkcheck.example", param = "url", depth = 2 }"#,
+        ] {
+            let error = with_entry(entry).unwrap_err();
+            assert!(!error.contains('\n'), "{entry}: {error}");
+        }
     }
 }

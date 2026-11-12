@@ -18,7 +18,9 @@ max_senders = 20000         # sender keys kept per user; past it new senders are
 # characters of the known (login-set) domain's label.
 [lookalike]
 homoglyph_min_label = 4     # homoglyph rule: known label at least this long
-typo_min_label = 6          # one-edit typo rule: known label at least this long
+typo_min_label = 6          # one-edit typo rule on the whole label: known label at least this long
+typo_part_min_label = 8     # the same rule on one hyphen part, which is often an ordinary word
+                            # (europe/europa, telecom/telekom, strip/stripe in measurement 2H)
 typo_same_first_char = true # typo rule: the candidate starts with the same character
 typo_trailing_s_exempt = true # typo rule: adding or dropping a final "s" is not a typo
 embedded_min_domain = 6     # embedded rule: known registrable domain at least this long
@@ -42,6 +44,7 @@ link_text_target_mismatch = 0.0
 link_text_hides_url = 0.0
 link_only_body = 0.0
 link_target_high_risk_file = 0.0
+link_wrapper_unreadable = 0.0
 attachment_present = 0.0
 attachment_high_risk_type = 0.0
 attachment_type_differs_from_body_mention = 0.0
@@ -115,7 +118,9 @@ security_indicator_text = [
     "digitally signed",                 # NIST B.3.4 (p. 32)
 ]
 too_good_to_be_true_offer = [
-    "FREE",                             # NIST Appendix B Figure 5 (p. 37)
+    # "FREE" (NIST Appendix B Figure 5, p. 37, the other half of the next line) was removed after
+    # measurement 2H: it caused about 97% of this cue's firings and fired as often in legitimate
+    # mail as in phishing (16.5% of phishing_pot, 14.4% of SpamAssassin ham; without it 0.4%, 0.5%).
     "Gift Certificate has arrived!",    # NIST Appendix B Figure 5 (p. 37)
     "contest",                          # NIST Table 2 (p. 9)
     "lottery",                          # NIST Table 2 (p. 9)
@@ -172,6 +177,26 @@ body_mention = [
     ".scr",                             # CISA-GUIDE p. 7
     ".pif",                             # CISA-GUIDE p. 7
     ".cpl",                             # CISA-GUIDE p. 7
+]
+
+# Link-checking gateways that rewrite links so a click passes their checker first. A link whose
+# host is `suffix` or a subdomain of it is judged by the http(s) URL in its query parameter
+# `param`; one level is unwrapped. When that parameter is missing or unreadable the link is judged
+# as it stands and link_wrapper_unreadable fires. An entry ships only on the vendor's own documentation.
+[links]
+# Distinct hosts a mail's lookalike rules check: the sender's domain first, then link hosts in
+# link order; past the cap the rest are not checked and observation_truncated fires. It bounds
+# the cost of a mail any local user can send (uncapped worst case measured at 1.56 s). What it
+# can hide is a lookalike placed after this many distinct decoy hosts; that mail still fires the
+# truncation cue, and the page check still judges the one host the person lands on.
+max_hosts = 100
+redirectors = [
+    # Microsoft Defender for Office 365 Safe Links: off until checked against one real wrapped link.
+    # Microsoft states the host form https://<DataCenterLocation>.safelinks.protection.outlook.com
+    # (https://learn.microsoft.com/en-us/defender-office-365/safe-links-about, updated 2026-10-29,
+    # read 2026-11-12) but does not show the query layout there or on the pages it links to. The
+    # "url" parameter below comes only from third-party descriptions.
+    # { suffix = "safelinks.protection.outlook.com", param = "url" },
 ]
 
 # Free-mail domains: a sender here is keyed by a hash of its address instead of its domain, and

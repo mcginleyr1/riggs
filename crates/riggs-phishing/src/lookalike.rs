@@ -27,7 +27,10 @@ impl Lookalike {
 #[serde(deny_unknown_fields)]
 pub struct Guards {
     pub homoglyph_min_label: usize,
+    /// The typo rule on the candidate's whole label.
     pub typo_min_label: usize,
+    /// The typo rule on one of the candidate's hyphen parts, which are often ordinary words.
+    pub typo_part_min_label: usize,
     pub typo_same_first_char: bool,
     pub typo_trailing_s_exempt: bool,
     pub embedded_min_domain: usize,
@@ -38,20 +41,40 @@ pub struct Guards {
 }
 
 /// The known domain `candidate` imitates, with the strongest rule that fires; ties go to the first
-/// known domain. A candidate whose registrable domain is itself known is never a lookalike.
+/// known domain. A candidate whose registrable domain is itself known is never a lookalike. A
+/// candidate whose label is itself a known label is never a misspelling of another known domain:
+/// it is that domain's name under another suffix. The embedded rule, which reads the rest of the
+/// host, still applies to it.
 pub fn lookalike<'a>(
     candidate: &Name,
     known: impl IntoIterator<Item = &'a Name>,
     guards: &Guards,
 ) -> Option<(&'a Name, Lookalike)> {
-    let mut forms = vec![(candidate.unicode.clone(), candidate.fold.clone())];
-    let parts: Vec<&str> = candidate
-        .unicode
-        .split('-')
-        .filter(|p| !p.is_empty())
-        .collect();
-    if parts.len() > 1 {
-        forms.extend(parts.iter().map(|p| (p.to_string(), fold(p))));
+    let known: Vec<&'a Name> = known.into_iter().collect();
+    if known.iter().any(|k| k.registrable == candidate.registrable) {
+        return None;
+    }
+    // What the misspelling rules compare, with the typo rule's guard for each: the whole label,
+    // then its hyphen parts.
+    let mut forms = Vec::new();
+    if !known.iter().any(|k| k.label == candidate.label) {
+        forms.push((
+            candidate.unicode.clone(),
+            candidate.fold.clone(),
+            guards.typo_min_label,
+        ));
+        let parts: Vec<&str> = candidate
+            .unicode
+            .split('-')
+            .filter(|p| !p.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            forms.extend(
+                parts
+                    .iter()
+                    .map(|p| (p.to_string(), fold(p), guards.typo_part_min_label)),
+            );
+        }
     }
     let rest = candidate
         .host
@@ -62,9 +85,6 @@ pub fn lookalike<'a>(
 
     let mut best: Option<(&'a Name, Lookalike)> = None;
     for k in known {
-        if k.registrable == candidate.registrable {
-            return None;
-        }
         let Some(rule) = rule(candidate, &forms, &tokens, k, guards) else {
             continue;
         };
@@ -77,23 +97,24 @@ pub fn lookalike<'a>(
 
 fn rule(
     candidate: &Name,
-    forms: &[(String, String)],
+    forms: &[(String, String, usize)],
     tokens: &[&str],
     k: &Name,
     g: &Guards,
 ) -> Option<Lookalike> {
     let k_len = k.unicode.chars().count();
-    let misspelled = forms.iter().any(|(raw, folded)| {
+    let misspelled = forms.iter().any(|(raw, folded, typo_min)| {
         (k_len >= g.homoglyph_min_label && *folded == k.fold && *raw != k.unicode)
-            || (k_len >= g.typo_min_label && typo(folded, &k.fold, g))
+            || (k_len >= *typo_min && typo(folded, &k.fold, g))
     });
     if misspelled {
         return Some(Lookalike::Misspelling);
     }
-    let k_labels: Vec<&str> = k.registrable.split('.').collect();
     if k.registrable.len() >= g.embedded_min_domain
         && !g.embedding_ignore.contains(&candidate.registrable)
-        && tokens.windows(k_labels.len()).any(|w| w == k_labels)
+        && tokens
+            .windows(k.registrable.split('.').count())
+            .any(|w| w.iter().copied().eq(k.registrable.split('.')))
     {
         return Some(Lookalike::Embedded);
     }
@@ -125,6 +146,7 @@ mod tests {
         Guards {
             homoglyph_min_label: 4,
             typo_min_label: 6,
+            typo_part_min_label: 8,
             typo_same_first_char: true,
             typo_trailing_s_exempt: true,
             embedded_min_domain: 6,
@@ -214,17 +236,115 @@ mod tests {
     }
 
     #[test]
-    fn the_strongest_rule_wins_and_ties_go_to_the_first_known() {
+    fn a_label_that_is_itself_known_is_a_suffix_swap_not_a_misspelling() {
+        // The shape measurement 2H found on Tranco: "mercadolibre" is one edit from "mercadolivre",
+        // but it is the label of a known domain under another suffix.
         let known = [
-            name("example.de").unwrap(),
-            name("examp1e.com").unwrap(),
-            name("exampie.com").unwrap(),
+            name("mercadolivre.com.br").unwrap(),
+            name("mercadolibre.com.ar").unwrap(),
         ];
-        let candidate = name("example.com").unwrap();
+        let candidate = name("mercadolibre.com.mx").unwrap();
         let (k, rule) = lookalike(&candidate, &known, &guards()).unwrap();
         assert_eq!(
             (k.registrable.as_str(), rule),
-            ("examp1e.com", Lookalike::Misspelling)
+            ("mercadolibre.com.ar", Lookalike::SuffixSwap)
+        );
+        // Without the exact label, the same candidate is a misspelling.
+        let (k, rule) = lookalike(&candidate, &known[..1], &guards()).unwrap();
+        assert_eq!(
+            (k.registrable.as_str(), rule),
+            ("mercadolivre.com.br", Lookalike::Misspelling)
+        );
+    }
+
+    #[test]
+    fn a_known_label_does_not_hide_an_embedded_domain() {
+        let known = [name("abcdef.com").unwrap(), name("secure.net").unwrap()];
+        let candidate = name("abcdef.com.secure.org").unwrap();
+        let (k, rule) = lookalike(&candidate, &known, &guards()).unwrap();
+        assert_eq!(
+            (k.registrable.as_str(), rule),
+            ("abcdef.com", Lookalike::Embedded)
+        );
+    }
+
+    #[test]
+    fn typo_part_guard() {
+        let g = guards();
+        // A hyphen part one edit from an 8-character label fires; from a 7-character one it does not.
+        assert_eq!(
+            check("abcdefgx-shop.com", "abcdefgh.com", &g),
+            Some(Lookalike::Misspelling)
+        );
+        assert_eq!(check("abcdefx-shop.com", "abcdefg.com", &g), None);
+        // The whole label keeps typo_min_label, and the homoglyph rule on parts keeps its own guard.
+        assert_eq!(
+            check("abcdefx.com", "abcdefg.com", &g),
+            Some(Lookalike::Misspelling)
+        );
+        assert_eq!(
+            check("abcrn-shop.com", "abcm.com", &g),
+            Some(Lookalike::Misspelling)
+        );
+    }
+
+    #[test]
+    fn the_sourced_examples_at_the_shipped_guards() {
+        let shipped = crate::cues::tests::shipped();
+        let g = shipped.guards();
+        let cases = [
+            (
+                "micorsoft-support.com",
+                "microsoft.com",
+                Some(Lookalike::Misspelling),
+            ),
+            (
+                "www.bankofarnerica.com",
+                "bankofamerica.com",
+                Some(Lookalike::Misspelling),
+            ),
+            ("amazan.com", "amazon.com", Some(Lookalike::Misspelling)),
+            ("www.niist.gov", "nist.gov", None),
+            ("www.ni-st.gov", "nist.gov", None),
+            ("www.nist.com", "nist.gov", Some(Lookalike::SuffixSwap)),
+            (
+                "google.com.rogueserver.biz",
+                "google.com",
+                Some(Lookalike::Embedded),
+            ),
+            (
+                "amazongproducts.ru",
+                "amazon.com",
+                Some(Lookalike::BrandToken),
+            ),
+        ];
+        for (candidate, known, rule) in cases {
+            assert_eq!(
+                check(candidate, known, g),
+                rule,
+                "{candidate} against {known}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_strongest_rule_wins_and_ties_go_to_the_first_known() {
+        // A brand-token prefix, then two one-edit typos of the candidate's label.
+        let known = [
+            name("abcdef.net").unwrap(),
+            name("abcdefgx.com").unwrap(),
+            name("abcdefxh.com").unwrap(),
+        ];
+        let candidate = name("abcdefgh.com").unwrap();
+        let (k, rule) = lookalike(&candidate, &known, &guards()).unwrap();
+        assert_eq!(
+            (k.registrable.as_str(), rule),
+            ("abcdefgx.com", Lookalike::Misspelling)
+        );
+        let (k, rule) = lookalike(&candidate, &known[..1], &guards()).unwrap();
+        assert_eq!(
+            (k.registrable.as_str(), rule),
+            ("abcdef.net", Lookalike::BrandToken)
         );
     }
 
