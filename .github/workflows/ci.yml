@@ -116,3 +116,25 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+  outlook-addin:
+    name: Outlook add-in (test, lint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/riggs-outlook
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npm run lint

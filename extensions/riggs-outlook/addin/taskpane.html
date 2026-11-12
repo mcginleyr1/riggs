@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Riggs</title>
+	<!-- Microsoft's documented address for Office.js, which must be referenced inside <head>:
+	     https://learn.microsoft.com/office/dev/add-ins/develop/referencing-the-javascript-api-for-office-library-from-its-cdn
+	     It is an evergreen build, so it cannot carry an integrity hash. -->
+	<script src="https://officeapis.public.onecdn.static.microsoft/1/office.js"></script>
+	<style>
+		:root { color-scheme: light dark; }
+		body { font: 13px/1.4 -apple-system, system-ui, sans-serif; margin: 12px; overflow-wrap: anywhere; }
+		h1 { font-size: 15px; margin: 0 0 8px; }
+		#state { border-left: 4px solid GrayText; margin: 0; padding: 6px 8px; }
+		#state.caution { border-left-color: #b26a00; font-weight: 600; }
+		#state.danger { border-left-color: #c62828; font-weight: 600; }
+		#reasons { margin: 8px 0 0; padding-left: 20px; }
+		#pin { margin-top: 16px; opacity: 0.7; }
+	</style>
+</head>
+<body>
+	<h1>Riggs</h1>
+	<p id="state" role="status">Riggs is waiting for Outlook. No message is checked until this line changes.</p>
+	<ul id="reasons"></ul>
+	<p id="pin">Keep this pane pinned. Outlook gives an add-in no way to start by itself, so Riggs checks a message only while this pane is open.</p>
+	<script src="taskpane.js"></script>
+</body>
+</html>

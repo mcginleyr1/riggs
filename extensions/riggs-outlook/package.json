@@ -1,0 +1,12 @@
+{
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"test": "node --test \"test/**/*.test.js\"",
+		"lint": "biome check addin test"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.6",
+		"jsdom": "29.1.1"
+	}
+}
