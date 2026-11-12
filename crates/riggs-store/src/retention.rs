@@ -4,7 +4,7 @@ use riggs_types::errors::RiggsError;
 use tracing::info;
 
 use crate::store::RiggsStore;
-use crate::tables::{EVENTS_TABLE, RESPONSE_LOG_TABLE, VERDICTS_TABLE};
+use crate::tables::{EVENTS_TABLE, PHISHING_VERDICTS_TABLE, RESPONSE_LOG_TABLE, VERDICTS_TABLE};
 
 pub struct RetentionPolicy {
     pub max_age_days: u32,
@@ -15,10 +15,11 @@ impl RetentionPolicy {
         Self { max_age_days }
     }
 
-    /// Delete events, verdicts, and response-log records older than the
-    /// retention window. All three tables are keyed by UUIDv7, whose first six
-    /// bytes are a big-endian millisecond timestamp, so byte-ordered keys are
-    /// chronological and we can prune by key without decompressing any value.
+    /// Delete events, verdicts, response-log records and phishing verdict-log
+    /// rows older than the retention window. All four tables' keys start with a
+    /// UUIDv7, whose first six bytes are a big-endian millisecond timestamp, so
+    /// byte-ordered keys are chronological and we can prune by key without
+    /// decompressing any value. Phishing logins and senders are never aged out.
     pub async fn run_cleanup(&self, store: &RiggsStore) -> Result<usize, RiggsError> {
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(self.max_age_days));
         let cutoff_key = uuid_v7_floor_key(cutoff);
@@ -28,6 +29,7 @@ impl RetentionPolicy {
         removed += prune_before(db, EVENTS_TABLE, &cutoff_key)?;
         removed += prune_before(db, VERDICTS_TABLE, &cutoff_key)?;
         removed += prune_before(db, RESPONSE_LOG_TABLE, &cutoff_key)?;
+        removed += prune_before(db, PHISHING_VERDICTS_TABLE, &cutoff_key)?;
 
         info!(
             removed,
@@ -115,6 +117,91 @@ mod tests {
         let floor = uuid_v7_floor_key(cutoff);
         let recent = *Uuid::now_v7().as_bytes();
         assert!(recent.as_slice() > floor.as_slice());
+    }
+
+    #[tokio::test]
+    async fn cleanup_prunes_old_phishing_verdicts_and_keeps_logins_and_senders() {
+        use crate::phishing::{PhishingWrite, SenderEntry, StoredVerdict};
+        use riggs_types::phishing::{Level, LoginEntry, ObservationKind, VerdictEntry};
+        use uuid::{NoContext, Timestamp};
+
+        let path = std::env::temp_dir().join(format!("riggs-retention-test-{}.db", Uuid::now_v7()));
+        let store = RiggsStore::new(&path).unwrap();
+        let entry = VerdictEntry {
+            time_ms: 1,
+            kind: ObservationKind::Mail,
+            domain: "example.com".into(),
+            cues: vec!["example_cue".into()],
+            score: 0.5,
+            level: Level::Caution,
+            shown: true,
+        };
+        store
+            .phishing_apply(&[
+                PhishingWrite::Login {
+                    uid: 501,
+                    entry: LoginEntry {
+                        domain: "example.com".into(),
+                        first_ms: 1,
+                        last_ms: 1,
+                        count: 1,
+                    },
+                },
+                PhishingWrite::Sender {
+                    uid: 501,
+                    entry: SenderEntry {
+                        key: "example.net".into(),
+                        first_ms: 1,
+                        first_msg: 1,
+                    },
+                },
+                PhishingWrite::Verdict {
+                    uid: 501,
+                    msg: 2,
+                    entry: entry.clone(),
+                },
+            ])
+            .unwrap();
+
+        let thirty_days_ago = (Utc::now() - chrono::Duration::days(30)).timestamp() as u64;
+        let mut old_key = Uuid::new_v7(Timestamp::from_unix(NoContext, thirty_days_ago, 0))
+            .as_bytes()
+            .to_vec();
+        old_key.extend_from_slice(&501u32.to_be_bytes());
+        let old_value = serde_json::to_vec(&StoredVerdict { msg: 1, entry }).unwrap();
+        let write_txn = store.db().begin_write().unwrap();
+        write_txn
+            .open_table(PHISHING_VERDICTS_TABLE)
+            .unwrap()
+            .insert(
+                old_key.as_slice(),
+                store.encode(&old_value).unwrap().as_slice(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+
+        let rows = store.phishing_load().unwrap();
+        assert_eq!((rows.logins.len(), rows.senders.len()), (1, 1));
+        let before: Vec<_> = store
+            .phishing_verdicts(501, 10)
+            .unwrap()
+            .iter()
+            .map(|v| v.msg)
+            .collect();
+        assert_eq!(before, vec![2, 1]);
+
+        let removed = RetentionPolicy::new(7).run_cleanup(&store).await.unwrap();
+
+        assert_eq!(removed, 1);
+        let after: Vec<_> = store
+            .phishing_verdicts(501, 10)
+            .unwrap()
+            .iter()
+            .map(|v| v.msg)
+            .collect();
+        assert_eq!(after, vec![2]);
+        assert_eq!(store.phishing_load().unwrap(), rows);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
