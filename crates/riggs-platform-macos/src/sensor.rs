@@ -208,6 +208,20 @@ impl PlatformSensor for MacOsSensor {
                                 .map(|p| build_process_context(p, ppid.as_u32()))
                         });
                         let event = RiggsEvent::new_process(ProcessAction::Exec, ctx, parent);
+                        // Only the sensor has the unjoined argv and the working
+                        // directory that `bash ./install.sh` needs resolved.
+                        #[cfg(target_os = "macos")]
+                        let event = {
+                            let mut event = event;
+                            if let RiggsEvent::Process(pe) = &mut event {
+                                pe.download = crate::quarantine::find(
+                                    process.exe(),
+                                    process.cmd(),
+                                    process.cwd(),
+                                );
+                            }
+                            event
+                        };
                         if proc_tx.send(event).await.is_err() {
                             return;
                         }

@@ -99,6 +99,12 @@ pub async fn threats(socket_path: &Path) -> Result<(), RiggsError> {
                     "  {:<38} {level_color}{:<12}{RESET} {:<10} {DIM}{:<14}{RESET}",
                     threat.event_id, threat.final_threat_level, sources_str, threat.storyline_id,
                 );
+                for verdict in &threat.verdicts {
+                    println!(
+                        "    {DIM}{}:{RESET} {}",
+                        verdict.source, verdict.description
+                    );
+                }
             }
 
             println!();

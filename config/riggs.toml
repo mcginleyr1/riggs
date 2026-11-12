@@ -86,6 +86,39 @@ persistence_paths = [
   "/etc/systemd/system", "/usr/lib/systemd/system", "/etc/init.d", "/etc/rc.local",
   "/.ssh/authorized_keys",   # also matches authorized_keys2
 ]
+# After-the-click rules (alert-only, see docs/DETECTION_PIPELINE.md). A missing
+# key takes the default below; an empty list turns off the rule it drives.
+download_recent_hours = 24               # macOS: a download mark younger than this counts (0 = off)
+# Executable basenames; "python3" also matches "python3.12". macOS runs python3 as "Python".
+interpreters = ["sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "python3", "Python", "perl", "ruby", "osascript"]
+downloaders = ["curl", "wget"]
+# Mail, browser and chat apps (executable basenames) whose shell or downloader children are flagged.
+lure_parents = [
+  "Safari", "Google Chrome", "chromium", "firefox", "firefox-esr",
+  "Mail", "Microsoft Outlook", "thunderbird",
+  "Slack", "Discord", "Signal", "Telegram",
+]
+# A program whose executable sits directly in one of these is flagged when run.
+temp_exec_dirs = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"]
+# Linux: opening one of these (a path substring; "*" matches any run) is flagged unless the
+# opener's executable starts with a credential_readers prefix (keep those root-owned).
+# Off by default: a browser or keyring whose install directory is not a reader alerts on
+# every open of its own store. To enable, add this host's browser and keyring install
+# directories to the readers, then use lists like these (Debian packages and the Firefox
+# snap; Google Chrome, Brave and Edge are not covered):
+# credential_paths = [
+#   "/.config/chromium/*/Cookies", "/.config/chromium/*/Login Data",
+#   "/.mozilla/firefox/*/cookies.sqlite", "/.mozilla/firefox/*/logins.json", "/.mozilla/firefox/*/key4.db",
+#   "/.local/share/keyrings/", "/.local/share/kwalletd/",
+#   "/.ssh/id_",
+# ]
+# credential_readers = [
+#   "/usr/lib/chromium/", "/usr/lib/firefox-esr/", "/snap/firefox/",
+#   "/usr/bin/ssh", "/usr/lib/openssh/",
+#   "/usr/bin/gnome-keyring", "/usr/bin/kwalletd", "/usr/bin/ksecretd",
+# ]
+credential_paths = []
+credential_readers = []
 
 [intel]
 enabled = true

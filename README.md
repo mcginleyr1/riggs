@@ -33,6 +33,9 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
   libproc on macOS); the egress policy logs would-block flows in monitor mode
 - **Static AI** — ONNX-based file classification for malware detection
 - **Behavioral AI** — sequence-based anomaly detection across event windows
+- **After-the-click alerts** — a freshly downloaded file being run (macOS), lure command shapes
+  such as a download piped into a shell or a program run from `/tmp`, and (opt-in, Linux)
+  credential stores opened by unexpected programs; alert-only, see `docs/DETECTION_PIPELINE.md`
 - **YARA rules** — YARA-X engine with hot-reload from rules directories
 - **IOC matching** — Aho-Corasick and bloom filter matching against threat feeds
 - **Threat intelligence** — VirusTotal, AbuseIPDB, MalwareBazaar, URLhaus, OSV feeds
@@ -208,7 +211,7 @@ Changes take effect immediately.
 
 ```
 riggs status             Daemon status and active threat count
-riggs threats            List detected threats with severity
+riggs threats            List detected threats with severity and what each detection matched
 riggs events             Query event log (--storyline, --limit)
 riggs config [<key> <value>]  View config, or save a change to riggs.toml (applies on restart)
 riggs scan <path>        Scan files through the detection pipeline (static AI, YARA, hash intel)

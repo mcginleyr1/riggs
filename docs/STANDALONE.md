@@ -83,6 +83,9 @@ behavioral_max_storylines = 4096     # memory bound
 exfil_outbound_threshold = 50
 threat_score_threshold = 0.5
 persistence_paths = [ "/etc/cron.d", "..." ]   # add your own
+# After-the-click rules (alert-only; docs/DETECTION_PIPELINE.md lists every key)
+lure_parents = [ "Microsoft Outlook", "..." ]  # mail, browser and chat apps
+credential_paths = []                # credential-store rule, off until your readers are listed
 
 [store]
 retention_days = 90                  # how long telemetry is kept

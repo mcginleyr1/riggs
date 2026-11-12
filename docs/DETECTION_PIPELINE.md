@@ -295,6 +295,154 @@ pub enum AttackStage {
 The behavioral model is evaluated periodically (every 5 seconds per active
 storyline) rather than on every event. This keeps CPU usage bounded.
 
+### After-the-click rules (alert-only)
+
+Phishing that gets past the mail view ends in a few acts on the machine: the
+person runs something they just downloaded, a lure page talks them into pasting
+a command that fetches and runs a script, or a stealer reads the browser's and
+keyring's stores. Five rules in `crates/riggs-behavioral-ai/src/lure.rs` look
+for these. Each looks at the current event only, so one act gives one verdict;
+the storyline patterns in `tracker.rs` re-fire on every later event of their
+storyline.
+
+| Rule | Fires on one event when | Platform |
+|---|---|---|
+| D1 executed download | An exec carries a download mark younger than `download_recent_hours`, and the marked file is the executable, or the process is an interpreter and the marked file its first non-flag argument (the script it runs). Once per mark value | macOS |
+| D2a lure child | The parent's executable basename is in `lure_parents`, and the child is a downloader, or an interpreter given inline code: `-c` for the shells and python3 (alone or in a cluster such as `-lc`), `-e` for perl, ruby and osascript | macOS, Linux |
+| D2b lure pipeline | An interpreter's command line names a downloader or `base64`, and the word after a pipe is an interpreter. A pipe is a `\|` outside single and double quotes that is not half of `\|\|` | macOS, Linux |
+| D2c temp exec | The executable sits directly in one of `temp_exec_dirs` | macOS, Linux |
+| D3 credential store | A file `Open` matches `credential_paths`, by an executable that starts with none of `credential_readers`. Off by default | Linux |
+
+D1 raises `DownloadExecuted`, D2a to D2c `LureCommand`, D3
+`CredentialStoreAccess`. The verdict's description says what matched: the
+file, the app that downloaded it and the process (D1); the parent app and the
+child (D2a); what is piped into what (D2b); the directory (D2c); the store that
+was opened and by whom (D3). `riggs threats` prints it under each threat.
+
+**Alert-only, and why.** All three patterns are `Severity::Low`: a Suspicious
+verdict at confidence 0.40, for which the default response policy has no
+action. Anything higher has side effects. A High pattern is Malicious and starts
+the response engine (quarantine, rollback). One Medium verdict makes the
+storyline a threat (its score, 0.62, crosses the 0.5 threshold), and on Linux the
+files a threat storyline opens are copied to the snapshot store: for D3 that is
+the credential file itself. Low verdicts add up too: the storyline score
+(`recalculate_threat_score` in `crates/riggs-storyline/src/correlator.rs`) is
+`0.4 × mean confidence + 0.6 × max confidence + ln(1 + n) / 30` over the
+storyline's `n` verdicts, and a storyline is a threat when that is above
+`threat_score_threshold` (0.5). With every verdict at 0.40 that is 0.423 for
+one verdict, 0.460 at 5, 0.4999 at 19 and 0.5015 at 20: the 20th Low verdict
+makes the storyline a threat. So these rules give at most **5 patterns per
+storyline**, all five rules together (D1 also fires only once per download
+mark); a stealer reading a hundred stores raises five alerts.
+
+That keeps these rules under the threat threshold only at the default
+`threat_score_threshold`: below 0.46 five Low verdicts make a threat, below
+0.423 one does. The per-storyline counts and the reported download marks are
+both kept in sets of 4096 that are cleared when full, so the cap bounds memory
+and ordinary noise. It is not a guarantee against a process that deliberately
+raises alerts in thousands of other storylines to reset its own count. Other
+things also break alert-only: `merge_malicious_threshold` at or below 0.5
+makes every Suspicious verdict Malicious, and another rule in the same
+storyline can (any `sudo` exec is a High `PrivilegeEscalation`, and one Medium
+verdict alone crosses 0.5).
+
+**What they miss.**
+
+- The process sensors poll once a second, so a process that starts and exits
+  between two polls is never seen: a `curl` fetching a small script, `xattr -c`,
+  `chmod +x`. A pipeline typed into a terminal (`curl ... | bash`) runs as
+  separate processes and none of them carries the pipeline, so its shape is
+  invisible; only its payload can be caught (D2c, D1). The
+  `bash -c "$(curl ...)"` shape is the Homebrew installer's and has no rule of
+  its own; D2b fires on it only when the fetched script itself pipes a download
+  into an interpreter.
+- D2b reads the first word after each pipe: `| sudo bash` and `| env bash` do
+  not fire. A command line nested in quotes (`sh -c "bash -c \"curl … | sh\""`)
+  hides its pipe from the outer shell; only the inner process, if a poll catches
+  it, fires.
+- D1 looks at the executable and the first non-flag argument only, because an
+  interpreter runs its first operand and treats the rest as data
+  (`python3 convert.py data.csv` runs no `data.csv`). A flag that takes a value
+  hides the script: `python3 -W ignore payload.py` is missed. That miss is
+  accepted: an alert that is wrong teaches people to ignore the rule.
+- D1 needs the `com.apple.quarantine` attribute. Setting it is up to the
+  downloading app: Safari, Chromium, Firefox and AirDrop set it;
+  `curl`, USB drives and network shares do not. Any process with write access
+  can strip it, and the cited lure scripts do (`xattr -c`). Whether a root
+  daemon may read it under a user's Downloads folder without Full Disk Access is
+  unverified: on a permission error the sensor logs one warning and D1 stays
+  blind to such files. Linux has no such mark (Chromium stopped writing
+  `user.xdg.*` attributes in 2019, Firefox never did), so D1 never fires there.
+- D2a rarely fires on macOS, where an opened download is started by launchd,
+  not by the browser or the mail app.
+- D2c matches the directory itself: a payload one level down
+  (`/tmp/x/payload`, anything under `mktemp -d`) does not fire. macOS reports
+  `/tmp` as `/private/tmp`; the per-user temporary directory under
+  `/var/folders` is not listed.
+- D3 needs `Open` events with the opening process, which only the Linux
+  fanotify sensor produces, and only under `/home` and `/tmp`. A stealer that
+  drives the browser through its remote-debugging port looks like the browser.
+  Readers are matched by executable path, so keep them in root-owned
+  directories; a path can probably be spoofed from a private mount namespace
+  (not tested).
+
+**Expected noise** (not measured yet): D1, one alert per downloaded app or
+script that is run; D2a, quiet; D2b, a few alerts a week on a developer host
+(installers such as rustup's `curl ... | sh` run inside `sh -c` by a Dockerfile
+or Makefile), constant on a build host; D2c, every ad-hoc binary run from
+`/tmp`; D3 (when enabled), backup tools, indexers and recursive greps over a
+home directory until they are listed as readers, and every start of a browser
+whose install directory is not in `credential_readers`. That last one is why D3
+ships off.
+
+**Config** (`[detection]` in `riggs.toml`; a missing key takes its default, a
+misspelled key stops startup):
+
+| Key | Default | Rules |
+|---|---|---|
+| `download_recent_hours` | `24` (0 turns D1 off) | D1 |
+| `interpreters` | `sh`, `bash`, `zsh`, `dash`, `ksh`, `csh`, `tcsh`, `python3`, `Python`, `perl`, `ruby`, `osascript` | D1, D2a, D2b |
+| `downloaders` | `curl`, `wget` | D2a, D2b |
+| `lure_parents` | `Safari`, `Google Chrome`, `chromium`, `firefox`, `firefox-esr`, `Mail`, `Microsoft Outlook`, `thunderbird`, `Slack`, `Discord`, `Signal`, `Telegram` | D2a |
+| `temp_exec_dirs` | `/tmp`, `/private/tmp`, `/var/tmp`, `/private/var/tmp` | D2c |
+| `credential_paths` | empty (D3 off) | D3 |
+| `credential_readers` | empty | D3 |
+
+Names in `interpreters`, `downloaders` and `lure_parents` are executable
+basenames; a name also matches its versioned build (`python3` matches
+`python3.12`), and macOS runs `/usr/bin/python3` as `Python`. An empty
+`lure_parents`, `temp_exec_dirs` or `credential_paths` turns its rule off, as
+does an empty `interpreters` for D2b.
+
+**Enabling D3.** First list as readers the install directory of every browser
+and keyring on the host, or each of them alerts on every open of its own store.
+Use root-owned directories only. Then list the stores. In `credential_paths`,
+`*` stands for any run of characters, so `/.config/chromium/*/Cookies` covers
+both `Default/Cookies` and `Default/Network/Cookies`. These lists are sourced
+for Debian's packages and the Firefox snap; `config/riggs.toml` carries them
+commented out:
+
+```toml
+credential_paths = [
+  "/.config/chromium/*/Cookies", "/.config/chromium/*/Login Data",
+  "/.mozilla/firefox/*/cookies.sqlite", "/.mozilla/firefox/*/logins.json", "/.mozilla/firefox/*/key4.db",
+  "/.local/share/keyrings/", "/.local/share/kwalletd/",
+  "/.ssh/id_",
+]
+credential_readers = [
+  "/usr/lib/chromium/", "/usr/lib/firefox-esr/", "/snap/firefox/",
+  "/usr/bin/ssh", "/usr/lib/openssh/",
+  "/usr/bin/gnome-keyring", "/usr/bin/kwalletd", "/usr/bin/ksecretd",
+]
+```
+
+They do not cover Firefox or Chromium installed any other way (Fedora's
+`/usr/lib64/…`, Arch, Mozilla's own repository), nor Google Chrome, Brave or
+Edge: no vendor source for their Linux install directories was found. Add a
+browser's profile files and its install directory together. Cloud credential
+files (`~/.aws`, `~/.config/gcloud`, `~/.azure`, `~/.kube/config`) are left out
+on purpose: any SDK program reads them.
+
 ## Stage 5: Verdict Merger
 
 The verdict merger combines outputs from all upstream stages into a single

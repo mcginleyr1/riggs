@@ -288,6 +288,7 @@ async fn report_to_console(console: &ConsoleSlot, report: &VulnReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use riggs_types::config::DetectionConfig;
 
     const CONFIG: &str = include_str!("../../../config/riggs.toml");
 
@@ -324,6 +325,93 @@ mod tests {
         assert!(set_config_value(CONFIG, "engine.rules_enabled", "true").is_ok());
         assert!(set_config_value(CONFIG, "engine.no_such_key", "1").is_err());
         assert!(set_config_value(CONFIG, "engine.rules_enabled", "sometimes").is_err());
+    }
+
+    #[test]
+    fn shipped_detection_table_equals_the_defaults() {
+        let shipped: RiggsConfig = toml::from_str(CONFIG).unwrap();
+        assert_eq!(shipped.detection, DetectionConfig::default());
+    }
+
+    #[test]
+    fn detection_table_with_one_key_takes_defaults_for_the_rest() {
+        let parsed: RiggsConfig = toml::from_str(&format!(
+            "{}\n[detection]\ndownload_recent_hours = 2\n",
+            CONFIG.split("\n[detection]").next().unwrap()
+        ))
+        .unwrap();
+
+        assert_eq!(
+            parsed.detection,
+            DetectionConfig {
+                download_recent_hours: 2,
+                ..DetectionConfig::default()
+            }
+        );
+    }
+
+    #[test]
+    fn detection_table_rejects_unknown_keys() {
+        assert!(toml::from_str::<DetectionConfig>("download_recent_hour = 2").is_err());
+    }
+
+    #[tokio::test]
+    async fn credential_store_reads_alert_without_a_response_action_or_a_threat_storyline() {
+        use riggs_types::verdict::ThreatLevel;
+
+        // D3 ships off; enable it as the commented example in riggs.toml does.
+        let detection = DetectionConfig {
+            credential_paths: vec!["/.mozilla/firefox/*/logins.json".into()],
+            credential_readers: vec!["/usr/lib/firefox-esr/".into()],
+            ..DetectionConfig::default()
+        };
+        let (tx, _rx) = mpsc::channel(1);
+        let mut pipeline = riggs_engine::DetectionPipeline::new(tx);
+        pipeline.add_stage(Box::new(
+            riggs_behavioral_ai::BehavioralAiStage::configured(512, 4096, &detection),
+        ));
+        let mut correlator = riggs_storyline::StorylineCorrelator::new()
+            .with_threat_threshold(DetectionConfig::default().threat_score_threshold);
+        let stealer = ProcessContext::new(
+            4242,
+            1,
+            "update",
+            "/tmp/update",
+            "/tmp/update",
+            "1000",
+            StorylineId::new(),
+        );
+        let logins = "/home/alice/.mozilla/firefox/x1y2z3.default-release/logins.json";
+
+        // As the daemon's loop does: correlate, detect, add the verdicts.
+        let mut merged = Vec::new();
+        for _ in 0..25 {
+            let mut event = RiggsEvent::new_file(FileAction::Open, stealer.clone(), logins, None);
+            let storyline = correlator.correlate(&event);
+            event.process_context_mut().storyline_id = storyline.clone();
+            let verdict = pipeline.run(event, std::time::Duration::from_secs(1)).await;
+            for v in &verdict.verdicts {
+                correlator.add_verdict(&storyline, v.clone());
+            }
+            merged.push(verdict);
+        }
+        let first = &merged[0];
+        let actions = riggs_response::ResponsePolicy::default().evaluate(
+            first,
+            4242,
+            Some(Path::new(logins)),
+            &first.storyline_id,
+        );
+        let alerts = merged
+            .iter()
+            .filter(|m| m.final_threat_level > ThreatLevel::Clean)
+            .count();
+
+        assert_eq!(first.final_threat_level, ThreatLevel::Suspicious);
+        assert!(first.verdicts[0].description.contains(logins));
+        assert!(actions.is_empty());
+        assert_eq!(alerts, 5);
+        assert!(!correlator.is_threat(&first.storyline_id));
     }
 
     #[test]

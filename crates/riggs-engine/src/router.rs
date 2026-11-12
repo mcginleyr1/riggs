@@ -65,6 +65,7 @@ mod tests {
             process_context: dummy_process_context(),
             action: ProcessAction::Exec,
             parent_context: None,
+            download: None,
         });
         assert_eq!(
             EventRouter::stages_for_event(&event),
