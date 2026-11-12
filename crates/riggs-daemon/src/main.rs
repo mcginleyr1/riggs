@@ -3,6 +3,7 @@ use tracing_subscriber::EnvFilter;
 
 mod control;
 mod daemon;
+mod phishing;
 mod supervisor;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
