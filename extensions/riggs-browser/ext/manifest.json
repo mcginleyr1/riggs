@@ -1,22 +1,25 @@
 {
-  "manifest_version": 3,
-  "name": "Riggs",
-  "version": "0.1.0",
-  "description": "Phishing sensor for the Riggs endpoint agent. Reports opened mail and password pages to the local daemon and shows its verdict.",
-  "minimum_chrome_version": "106",
-  "incognito": "not_allowed",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApLTj+jKKOE7/zNEOLAQQtXylRY25PCrRsE9ThPetV0U1e4mdaKZUWC1C6ToCTKoPICFlmKk2GuQgS6UamV+Z7AkTfUjXBIqTnjxioJqUAciACQCB3lZhDwg2ZyLaxmUmOf4xsjvbCt6EONdrM+Z6TwBHbKNYYUcVN3MfHAeQCsM2KhWRNm98D+ixtaQyMlI6MYMtcH4FVhzI8vbncHC8ly/zn5A4iVRCaeqJ89eC3w2rK3xw9fcT57i63f4zsxoz2sivSn3mgElqYWUezqbTVGJizrRu7MEVZNB129cNiSRQOoMw1WleIHQW+/KQy76ibVW2X82O4QFe3d/3iKOEFQIDAQAB",
-  "permissions": ["nativeMessaging", "storage", "webNavigation"],
-  "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_popup": "popup.html" },
-  "content_scripts": [
-    { "matches": ["https://mail.google.com/*"], "js": ["banner.js", "gmail.js"] },
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["banner.js", "page.js"],
-      "run_at": "document_start",
-      "all_frames": true,
-      "match_origin_as_fallback": true
-    }
-  ]
+	"manifest_version": 3,
+	"name": "Riggs",
+	"version": "0.1.0",
+	"description": "Phishing sensor for the Riggs endpoint agent. Reports opened mail and password pages to the local daemon and shows its verdict.",
+	"minimum_chrome_version": "106",
+	"incognito": "not_allowed",
+	"key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApLTj+jKKOE7/zNEOLAQQtXylRY25PCrRsE9ThPetV0U1e4mdaKZUWC1C6ToCTKoPICFlmKk2GuQgS6UamV+Z7AkTfUjXBIqTnjxioJqUAciACQCB3lZhDwg2ZyLaxmUmOf4xsjvbCt6EONdrM+Z6TwBHbKNYYUcVN3MfHAeQCsM2KhWRNm98D+ixtaQyMlI6MYMtcH4FVhzI8vbncHC8ly/zn5A4iVRCaeqJ89eC3w2rK3xw9fcT57i63f4zsxoz2sivSn3mgElqYWUezqbTVGJizrRu7MEVZNB129cNiSRQOoMw1WleIHQW+/KQy76ibVW2X82O4QFe3d/3iKOEFQIDAQAB",
+	"permissions": ["nativeMessaging", "storage", "webNavigation"],
+	"background": { "service_worker": "background.js", "type": "module" },
+	"action": { "default_popup": "popup.html" },
+	"content_scripts": [
+		{
+			"matches": ["https://mail.google.com/*"],
+			"js": ["banner.js", "gmail.js"]
+		},
+		{
+			"matches": ["http://*/*", "https://*/*"],
+			"js": ["banner.js", "page.js"],
+			"run_at": "document_start",
+			"all_frames": true,
+			"match_origin_as_fallback": true
+		}
+	]
 }
