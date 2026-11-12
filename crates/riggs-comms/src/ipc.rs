@@ -20,6 +20,7 @@ const DEFAULT_MAX_CONCURRENT_CLIENTS: usize = 32;
 const CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 use riggs_types::events::RiggsEvent;
+use riggs_types::phishing::{PhishingRequest, PhishingResponse};
 use riggs_types::verdict::MergedVerdict;
 
 use crate::messages::{ClientMessage, DaemonMessage, QuarantinedFile};
@@ -97,6 +98,12 @@ pub trait ControlOps: Send + Sync {
     fn quarantine_restore(&self, id: &str) -> std::result::Result<String, String>;
 }
 
+/// Answers phishing sensor and admin requests. `uid` is the socket peer's uid,
+/// never a value from the payload. Called on the async runtime, so it must not block.
+pub trait PhishingQuery: Send + Sync {
+    fn handle(&self, uid: u32, request: PhishingRequest) -> PhishingResponse;
+}
+
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("IO error: {0}")]
@@ -121,6 +128,7 @@ pub struct DaemonState {
     pub dlp: std::sync::RwLock<Option<Arc<dyn DlpQuery>>>,
     pub egress: std::sync::RwLock<Option<Arc<dyn EgressQuery>>>,
     pub control: std::sync::RwLock<Option<Arc<dyn ControlOps>>>,
+    pub phishing: std::sync::RwLock<Option<Arc<dyn PhishingQuery>>>,
 }
 
 impl DaemonState {
@@ -135,6 +143,7 @@ impl DaemonState {
             dlp: std::sync::RwLock::new(None),
             egress: std::sync::RwLock::new(None),
             control: std::sync::RwLock::new(None),
+            phishing: std::sync::RwLock::new(None),
         }
     }
 }
@@ -202,11 +211,20 @@ fn control(
     }
 }
 
-/// True when the connecting peer runs as the same user as the daemon.
-fn peer_is_owner(stream: &UnixStream) -> bool {
-    stream
-        .peer_cred()
-        .is_ok_and(|cred| cred.uid() == unsafe { libc::geteuid() })
+/// State-changing commands require the peer to run as the daemon owner. Read-only
+/// status/query/DLP commands and phishing sensor requests stay open to any local user.
+fn needs_privilege(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::UpdateConfig { .. }
+            | ClientMessage::TriggerScan { .. }
+            | ClientMessage::RefreshFeeds
+            | ClientMessage::VulnUpdate
+            | ClientMessage::QuarantineRestore { .. }
+            | ClientMessage::EgressAllow { .. }
+            | ClientMessage::EgressDeny { .. }
+            | ClientMessage::EgressSetMode { .. }
+    ) || matches!(msg, ClientMessage::Phishing(request) if request.is_admin())
 }
 
 pub struct IpcServer {
@@ -285,11 +303,12 @@ impl IpcServer {
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    if self.root_only && !stream.peer_cred().is_ok_and(|cred| cred.uid() == 0) {
+                    let peer_uid = stream.peer_cred().ok().map(|cred| cred.uid());
+                    if self.root_only && peer_uid != Some(0) {
                         warn!(socket = ?self.socket_path, "dropping non-root IPC peer");
                         continue;
                     }
-                    let is_owner = peer_is_owner(&stream);
+                    let is_owner = peer_uid == Some(unsafe { libc::geteuid() });
                     let limiter = if is_owner {
                         &owner_limiter
                     } else {
@@ -310,7 +329,13 @@ impl IpcServer {
                         let _permit = permit; // released when the handler finishes
                         let handled = tokio::time::timeout(
                             CLIENT_IO_TIMEOUT,
-                            Self::handle_client(stream, &state, max_message_bytes, is_owner),
+                            Self::handle_client(
+                                stream,
+                                &state,
+                                max_message_bytes,
+                                peer_uid,
+                                is_owner,
+                            ),
                         )
                         .await;
                         match handled {
@@ -331,25 +356,21 @@ impl IpcServer {
         mut stream: UnixStream,
         state: &DaemonState,
         max_message_bytes: usize,
+        peer_uid: Option<u32>,
         is_owner: bool,
     ) -> Result<()> {
         let raw = read_length_prefixed(&mut stream, max_message_bytes).await?;
-        let msg: ClientMessage = serde_json::from_slice(&raw)?;
+        // serde's message can quote the offending value, which may be mail content.
+        let msg: ClientMessage = serde_json::from_slice(&raw).map_err(|e| {
+            IpcError::Other(format!(
+                "malformed request ({:?} error at line {} column {})",
+                e.classify(),
+                e.line(),
+                e.column()
+            ))
+        })?;
 
-        // State-changing commands require the peer to run as the daemon owner.
-        // Read-only status/query/DLP commands stay open to the CLI and menubar.
-        let needs_privilege = matches!(
-            msg,
-            ClientMessage::UpdateConfig { .. }
-                | ClientMessage::TriggerScan { .. }
-                | ClientMessage::RefreshFeeds
-                | ClientMessage::VulnUpdate
-                | ClientMessage::QuarantineRestore { .. }
-                | ClientMessage::EgressAllow { .. }
-                | ClientMessage::EgressDeny { .. }
-                | ClientMessage::EgressSetMode { .. }
-        );
-        if needs_privilege && !is_owner {
+        if needs_privilege(&msg) && !is_owner {
             let denied = DaemonMessage::Error(
                 "permission denied: command requires daemon-owner privilege".into(),
             );
@@ -519,6 +540,14 @@ impl IpcServer {
                 egress_mutate(state, |eg| eg.deny_domain(&domain))
             }
             ClientMessage::EgressSetMode { mode } => egress_mutate(state, |eg| eg.set_mode(&mode)),
+            ClientMessage::Phishing(request) => {
+                let phishing = state.phishing.read().ok().and_then(|guard| guard.clone());
+                DaemonMessage::Phishing(match (phishing, peer_uid) {
+                    (Some(phishing), Some(uid)) => phishing.handle(uid, request),
+                    (None, _) => PhishingResponse::Error("phishing protection not running".into()),
+                    (_, None) => PhishingResponse::Error("peer credentials unreadable".into()),
+                })
+            }
         };
 
         let response_bytes = serde_json::to_vec(&response)?;
@@ -662,5 +691,174 @@ mod tests {
         assert!(matches!(before_init, DaemonMessage::Error(_)));
         assert!(matches!(config, DaemonMessage::Done(s) if s == "engine.rules_enabled=false"));
         assert!(matches!(scan, DaemonMessage::Error(e) if e == "/nope missing"));
+    }
+
+    #[test]
+    fn needs_privilege_gates_admin_requests_only() {
+        use serde_json::json;
+        let sensor: Vec<PhishingRequest> = serde_json::from_value(json!([
+            {"CheckMail": {"provider": "gmail", "message_id": "", "from_name": "",
+                           "from_addr": "", "subject": "", "body_text": ""}},
+            {"CheckPage": {"host": "example.com"}},
+            {"LoginSeen": {"host": "example.com", "evidence": "typed"}},
+            "Status",
+        ]))
+        .unwrap();
+        let admin: Vec<PhishingRequest> = serde_json::from_value(json!([
+            {"SetMode": {"mode": "warn"}},
+            {"Trust": {"uid": 501, "domain": "example.com"}},
+            {"Forget": {"uid": 501, "domain": "example.com"}},
+            {"Logins": {"uid": 501}},
+            {"Recent": {"uid": 501, "limit": 10}},
+            {"Stats": {"uid": 501}},
+        ]))
+        .unwrap();
+        let existing = [
+            (ClientMessage::GetStatus, false),
+            (
+                ClientMessage::QueryEvents {
+                    storyline_id: None,
+                    limit: 1,
+                },
+                false,
+            ),
+            (
+                ClientMessage::QueryThreats {
+                    min_severity: String::new(),
+                },
+                false,
+            ),
+            (ClientMessage::GetConfig, false),
+            (
+                ClientMessage::UpdateConfig {
+                    key: String::new(),
+                    value: String::new(),
+                },
+                true,
+            ),
+            (
+                ClientMessage::TriggerScan {
+                    path: String::new(),
+                },
+                true,
+            ),
+            (ClientMessage::RefreshFeeds, true),
+            (ClientMessage::QuarantineList, false),
+            (ClientMessage::QuarantineRestore { id: String::new() }, true),
+            (ClientMessage::VulnUpdate, true),
+            (ClientMessage::IntelStatus, false),
+            (
+                ClientMessage::DlpCheckFlow {
+                    pid: 1,
+                    remote_hostname: String::new(),
+                    remote_ip: String::new(),
+                    remote_port: 443,
+                },
+                false,
+            ),
+            (ClientMessage::DlpStatus, false),
+            (
+                ClientMessage::EgressCheckFlow {
+                    pid: 1,
+                    process_path: String::new(),
+                    remote_hostname: String::new(),
+                    remote_ip: String::new(),
+                    remote_port: 443,
+                },
+                false,
+            ),
+            (ClientMessage::EgressStatus, false),
+            (
+                ClientMessage::EgressAllow {
+                    domain: String::new(),
+                },
+                true,
+            ),
+            (
+                ClientMessage::EgressDeny {
+                    domain: String::new(),
+                },
+                true,
+            ),
+            (
+                ClientMessage::EgressSetMode {
+                    mode: String::new(),
+                },
+                true,
+            ),
+        ];
+        let phishing = sensor
+            .into_iter()
+            .map(|request| (request, false))
+            .chain(admin.into_iter().map(|request| (request, true)))
+            .map(|(request, privileged)| (ClientMessage::Phishing(request), privileged));
+        for (msg, privileged) in existing.into_iter().chain(phishing) {
+            assert_eq!(needs_privilege(&msg), privileged, "{msg:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_request_error_does_not_quote_the_payload() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let malformed = br#"{"Phishing":{"CheckMail":{"to":"quoted-recipient@example.com"}}}"#;
+        write_length_prefixed(&mut client, malformed).await.unwrap();
+        let state = DaemonState::new();
+        let error = IpcServer::handle_client(server, &state, DEFAULT_MAX_MSG_LEN, None, false)
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("quoted-recipient"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn phishing_requests_reach_the_slot_with_the_peer_uid() {
+        #[derive(Default)]
+        struct StubPhishing(std::sync::Mutex<Vec<(u32, PhishingRequest)>>);
+        impl PhishingQuery for StubPhishing {
+            fn handle(&self, uid: u32, request: PhishingRequest) -> PhishingResponse {
+                self.0.lock().unwrap().push((uid, request));
+                PhishingResponse::Ok
+            }
+        }
+
+        let state = Arc::new(DaemonState::new());
+        let path = start_server_with(Arc::clone(&state), "phishing", 4).await;
+        let send = |request: PhishingRequest| {
+            let path = path.clone();
+            async move {
+                let mut client = IpcClient::connect(&path).await.unwrap();
+                client
+                    .send(&ClientMessage::Phishing(request))
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let before_init = send(PhishingRequest::Status).await;
+        let stub = Arc::new(StubPhishing::default());
+        *state.phishing.write().unwrap() = Some(Arc::clone(&stub) as Arc<dyn PhishingQuery>);
+        let sensor = send(PhishingRequest::Status).await;
+        let admin = send(PhishingRequest::Stats { uid: 501 }).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(
+            before_init,
+            DaemonMessage::Phishing(PhishingResponse::Error(_))
+        ));
+        assert!(matches!(
+            sensor,
+            DaemonMessage::Phishing(PhishingResponse::Ok)
+        ));
+        assert!(matches!(
+            admin,
+            DaemonMessage::Phishing(PhishingResponse::Ok)
+        ));
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(
+            *stub.0.lock().unwrap(),
+            [
+                (uid, PhishingRequest::Status),
+                (uid, PhishingRequest::Stats { uid: 501 })
+            ]
+        );
     }
 }

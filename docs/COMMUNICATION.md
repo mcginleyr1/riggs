@@ -155,6 +155,49 @@ async fn handle_connection(
 Maximum concurrent IPC connections: 16 (configurable). Connections exceeding
 the limit are queued, not rejected.
 
+### Phishing Messages
+
+Phishing sensors (the browser extension through its native-messaging host,
+later the Outlook add-in through a local bridge) and the `riggs phishing` CLI
+use one message pair, defined in `riggs_types::phishing`:
+
+- `ClientMessage::Phishing(PhishingRequest)`
+- `DaemonMessage::Phishing(PhishingResponse)`
+
+```json
+{"Phishing": "Status"}
+{"Phishing": {"LoginSeen": {"host": "example.com", "evidence": "typed"}}}
+{"Phishing": {"Verdict": {"level": "danger", "reasons": [{"cue": "...", "text": "..."}], "show": true}}}
+```
+
+Chrome's `sendNativeMessage` accepts only an object, so the extension sends
+`Status` as `{"Status": null}`. The daemon accepts both
+`{"Phishing": "Status"}` and `{"Phishing": {"Status": null}}`.
+
+| Who may send | Requests |
+|--------------|----------|
+| any local user | `CheckMail`, `CheckPage`, `LoginSeen`, `Status` |
+| daemon owner only | `SetMode`, `Trust`, `Forget`, `Logins`, `Recent`, `Stats` |
+
+Sensor requests are keyed by the socket peer's uid, read from the socket's
+credentials; nothing in the payload names the user. Admin requests carry a
+`uid` naming the user whose state is meant. A non-owner sending an admin
+request gets `DaemonMessage::Error` (permission denied). When phishing
+protection is not running, or the peer's credentials cannot be read, the
+answer is `DaemonMessage::Phishing(PhishingResponse::Error(..))`.
+
+`MailObservation::check_limits` is the daemon's own cap on `CheckMail`, not
+the sender's: body 64 KiB, 500 links, 100 attachments, 500 recipients, 8 KiB
+per link target, 4 KiB for any other string (UTF-8 bytes).
+`PageObservation::check_limits` and `LoginObservation::check_limits` refuse a
+`host` or `entry_host` longer than 255 bytes.
+
+A sensor that trims a mail to fit its own size budget (cuts a string, cuts a
+list, or drops entries) must set `"truncated": true` on the `CheckMail`
+observation. It defaults to `false`. Trimming silently would be an evasion
+path: pad a mail with links until the bad one falls off the end. Observations accept unknown fields, so sensors
+and daemon can be updated independently.
+
 ## Cloud Reporting (Feature-Gated)
 
 Cloud connectivity is compiled only with `--features cloud`. Without this
