@@ -17,14 +17,26 @@ pub struct Name {
     pub fold: String,
 }
 
-/// `None` for an IP literal, a single label, a bare public suffix or anything that is not a host name.
+/// The longest host name DNS can carry, in dotted text without a trailing dot (RFC 1035 section
+/// 2.3.4: 255 octets in wire form).
+pub(crate) const MAX_HOST_BYTES: usize = 253;
+/// The longest label DNS can carry (RFC 1035 section 2.3.4). Without it one label of a 253-byte
+/// host could hold 27 hyphen parts for the lookalike rules to compare.
+pub(crate) const MAX_LABEL_BYTES: usize = 63;
+
+/// `None` for an IP literal, a single label, a bare public suffix, a host longer than DNS allows,
+/// or anything that is not a host name.
 pub fn name(host: &str) -> Option<Name> {
     let host = host.strip_suffix('.').unwrap_or(host);
     // url's host parser lowercases, applies IDNA and recognises every IPv4 and IPv6 form, so an IP
-    // literal never reaches psl, which would read `192.168.1.1` as the domain `1.1`.
+    // literal never reaches psl, which would read `192.168.1.1` as the domain `1.1`. It checks no
+    // length: it calls idna with `DnsLength::Ignore`.
     let Ok(Host::Domain(host)) = Host::parse(host) else {
         return None;
     };
+    if host.len() > MAX_HOST_BYTES || host.split('.').any(|l| l.len() > MAX_LABEL_BYTES) {
+        return None;
+    }
     let registrable = psl::domain_str(&host)?.to_owned();
     let suffix = psl::suffix_str(&host)?.to_owned();
     let label = registrable
@@ -80,6 +92,24 @@ mod tests {
         ] {
             assert_eq!(name(host), None, "{host}");
         }
+    }
+
+    #[test]
+    fn hosts_and_labels_longer_than_dns_allows_have_no_name() {
+        let host = |last: usize| {
+            format!(
+                "{}.{}.{}.{}.com",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(last)
+            )
+        };
+        assert_eq!(host(57).len(), 253);
+        assert!(name(&host(57)).is_some());
+        assert_eq!(name(&host(58)), None);
+        assert!(name(&format!("{}.com", "a".repeat(63))).is_some());
+        assert_eq!(name(&format!("{}.com", "a".repeat(64))), None);
     }
 
     #[test]

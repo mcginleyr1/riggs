@@ -16,6 +16,7 @@ struct File {
     caution_threshold: f32,
     warmup_logins: usize,
     max_logins: usize,
+    weak_login_confirm_hours: u64,
     max_senders: usize,
     lookalike: Guards,
     weights: BTreeMap<String, f32>,
@@ -61,6 +62,8 @@ pub struct Policy {
     pub(crate) caution_threshold: f32,
     pub(crate) warmup_logins: usize,
     pub(crate) max_logins: usize,
+    /// How long after its first sighting weak evidence can confirm a pending login.
+    pub(crate) weak_login_confirm_ms: u64,
     pub(crate) max_senders: usize,
     pub(crate) guards: Guards,
     /// One weight per soft cue.
@@ -96,6 +99,20 @@ impl Policy {
         })?;
         if !(file.caution_threshold.is_finite() && file.caution_threshold > 0.0) {
             return Err("caution_threshold must be a finite number above 0".into());
+        }
+        if file.max_logins == 0 {
+            return Err("max_logins must be at least 1".into());
+        }
+        if file.warmup_logins > file.max_logins {
+            return Err(
+                "warmup_logins must not exceed max_logins, or the page rule never fires".into(),
+            );
+        }
+        if file.weak_login_confirm_hours == 0 {
+            return Err(
+                "weak_login_confirm_hours must be at least 1, or two scripted clicks make a login"
+                    .into(),
+            );
         }
         let weights = by_cue("weights", "soft", file.weights, Cue::is_soft)?;
         if let Some((cue, _)) = weights.iter().find(|(_, w)| !w.is_finite()) {
@@ -159,6 +176,7 @@ impl Policy {
             caution_threshold: file.caution_threshold,
             warmup_logins: file.warmup_logins,
             max_logins: file.max_logins,
+            weak_login_confirm_ms: file.weak_login_confirm_hours.saturating_mul(3_600_000),
             max_senders: file.max_senders,
             guards: file.lookalike,
             weights,
@@ -342,6 +360,30 @@ mod tests {
                 text.replacen("caution_threshold = 1.0", "caution_threshold = 0.0", 1),
             ),
             ("bad extension", text.replacen("\".scr\"", "\"scr\"", 1)),
+            (
+                "zero login cap",
+                text.replacen("max_logins = 2000", "max_logins = 0", 1),
+            ),
+            (
+                "warm-up above the cap",
+                text.replacen("warmup_logins = 20", "warmup_logins = 2001", 1),
+            ),
+            (
+                "zero confirmation time",
+                text.replacen(
+                    "weak_login_confirm_hours = 12",
+                    "weak_login_confirm_hours = 0",
+                    1,
+                ),
+            ),
+            (
+                "missing confirmation time",
+                text.replacen(
+                    "weak_login_confirm_hours = 12",
+                    "# weak_login_confirm_hours = 12",
+                    1,
+                ),
+            ),
         ];
         for (what, edited) in cases {
             assert!(edited != text, "{what}: the edit did not apply");

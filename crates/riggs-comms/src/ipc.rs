@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{error, info, warn};
 
 /// Default max IPC frame size before allocating (untrusted length prefix).
@@ -14,6 +15,10 @@ const DEFAULT_MAX_MSG_LEN: usize = 8 * 1024 * 1024;
 /// Default cap on concurrent client handlers so a flood can't exhaust the daemon.
 /// Applied separately to owner and non-owner peers.
 const DEFAULT_MAX_CONCURRENT_CLIENTS: usize = 32;
+
+/// Share of the non-owner pool one uid may hold, so one local user cannot lock the others
+/// out. A browser's phishing sensor holds at most 9 connections at once.
+const MAX_CONNECTIONS_PER_UID: usize = 16;
 
 /// Deadline for reading a request and writing its response. A peer that
 /// connects and stalls would otherwise pin a handler slot forever.
@@ -227,6 +232,59 @@ fn needs_privilege(msg: &ClientMessage) -> bool {
     ) || matches!(msg, ClientMessage::Phishing(request) if request.is_admin())
 }
 
+/// A pool of concurrent connections of which each uid may hold at most `per_uid`. A uid is
+/// counted only while it holds a permit, so the counts never outnumber the pool.
+struct ConnectionLimiter {
+    pool: Arc<Semaphore>,
+    per_uid: usize,
+    held: Arc<Mutex<HashMap<Option<u32>, usize>>>,
+}
+
+/// Returns its share of the pool and of its uid's count when the connection ends.
+struct ConnectionPermit {
+    _pool: OwnedSemaphorePermit,
+    uid: Option<u32>,
+    held: Arc<Mutex<HashMap<Option<u32>, usize>>>,
+}
+
+impl ConnectionLimiter {
+    fn new(pool: usize, per_uid: usize) -> Self {
+        Self {
+            pool: Arc::new(Semaphore::new(pool)),
+            per_uid,
+            held: Arc::default(),
+        }
+    }
+
+    /// A peer whose credentials are unreadable counts under `None`, as one more uid.
+    fn try_acquire(&self, uid: Option<u32>) -> Option<ConnectionPermit> {
+        // Nothing below can panic while the lock is held, so a poisoned lock holds sound counts.
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.get(&uid).copied().unwrap_or(0) >= self.per_uid {
+            return None;
+        }
+        let pool = Arc::clone(&self.pool).try_acquire_owned().ok()?;
+        *held.entry(uid).or_default() += 1;
+        Some(ConnectionPermit {
+            _pool: pool,
+            uid,
+            held: Arc::clone(&self.held),
+        })
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = held.get_mut(&self.uid) {
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.uid);
+            }
+        }
+    }
+}
+
 pub struct IpcServer {
     socket_path: PathBuf,
     state: Arc<DaemonState>,
@@ -295,9 +353,10 @@ impl IpcServer {
         info!("IPC server listening on {:?}", self.socket_path);
 
         // Separate pools so unprivileged peers (the socket is 0666) can never
-        // starve the root NEFilter extension, which fails open on timeout.
-        let owner_limiter = Arc::new(Semaphore::new(self.max_connections));
-        let other_limiter = Arc::new(Semaphore::new(self.max_connections));
+        // starve the root NEFilter extension, which fails open on timeout. The
+        // owner is one uid, so its per-uid share is the whole pool.
+        let owner_limiter = ConnectionLimiter::new(self.max_connections, self.max_connections);
+        let other_limiter = ConnectionLimiter::new(self.max_connections, MAX_CONNECTIONS_PER_UID);
         let max_message_bytes = self.max_message_bytes;
 
         loop {
@@ -314,15 +373,13 @@ impl IpcServer {
                     } else {
                         &other_limiter
                     };
-                    let permit = match Arc::clone(limiter).try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            warn!(
-                                is_owner,
-                                "IPC connection limit reached, dropping connection"
-                            );
-                            continue;
-                        }
+                    let Some(permit) = limiter.try_acquire(peer_uid) else {
+                        warn!(
+                            is_owner,
+                            uid = ?peer_uid,
+                            "IPC connection limit reached, dropping connection"
+                        );
+                        continue;
                     };
                     let state = Arc::clone(&self.state);
                     tokio::spawn(async move {
@@ -597,6 +654,29 @@ mod tests {
             tokio::task::yield_now().await;
         }
         path
+    }
+
+    #[test]
+    fn one_uid_at_its_cap_leaves_the_rest_of_the_pool_to_other_uids() {
+        let limiter = ConnectionLimiter::new(32, 16);
+        let first: Vec<_> = (0..16)
+            .map(|_| limiter.try_acquire(Some(1000)).unwrap())
+            .collect();
+        assert!(limiter.try_acquire(Some(1000)).is_none());
+
+        let second: Vec<_> = (0..16)
+            .map(|_| limiter.try_acquire(Some(1001)).unwrap())
+            .collect();
+        // The pool keeps its total.
+        assert!(limiter.try_acquire(Some(1002)).is_none());
+        assert!(limiter.try_acquire(None).is_none());
+
+        drop(first);
+        assert!(limiter.try_acquire(Some(1002)).is_some());
+        drop(second);
+        // A uid is forgotten with its last connection, so the counts stay bounded.
+        assert!(limiter.held.lock().unwrap().is_empty());
+        assert_eq!(limiter.pool.available_permits(), 32);
     }
 
     #[tokio::test(start_paused = true)]

@@ -349,12 +349,33 @@ pub fn mail_cues_and_lookalikes(
     known: &[&Name],
     never_seen: bool,
 ) -> (BTreeMap<Cue, Option<String>>, Vec<LookalikeHit>) {
+    let from = sender_address(&mail.from_addr);
+    evaluate(mail, &from, policy, known, never_seen)
+}
+
+/// The sender's address as every check reads it: trimmed, lowercased, without a trailing dot.
+pub(crate) fn sender_address(from_addr: &str) -> String {
+    let addr = from_addr.trim().to_lowercase();
+    match addr.strip_suffix('.') {
+        Some(addr) => addr.to_string(),
+        None => addr,
+    }
+}
+
+/// [`mail_cues_and_lookalikes`] with the sender's address already through [`sender_address`].
+pub(crate) fn evaluate(
+    mail: &MailObservation,
+    from: &str,
+    policy: &Policy,
+    known: &[&Name],
+    never_seen: bool,
+) -> (BTreeMap<Cue, Option<String>>, Vec<LookalikeHit>) {
     let targets: Vec<(Option<Url>, bool)> = mail
         .links
         .iter()
         .map(|l| link_target(&l.href, policy))
         .collect();
-    let candidates = mail_names(mail, &targets);
+    let candidates = mail_names(from, mail, &targets);
     let capped = candidates.len() > policy.max_hosts;
     let mut hits = BTreeMap::new();
     for candidate in candidates.iter().take(policy.max_hosts) {
@@ -371,7 +392,7 @@ pub fn mail_cues_and_lookalikes(
         .values()
         .map(|hit| (hit.cue, Some(hit.known.clone())))
         .collect();
-    if let Some(k) = brand_name_in_freemail_sender(mail, policy, known) {
+    if let Some(k) = brand_name_in_freemail_sender(from, policy, known) {
         fired.insert(Cue::BrandNameInFreemailSender, Some(k));
     }
 
@@ -410,7 +431,7 @@ pub fn mail_cues_and_lookalikes(
         (Cue::AttachmentFromUnseenSender, never_seen && attached),
         (
             Cue::DisplayNameAddressMismatch,
-            display_name_address_mismatch(mail),
+            display_name_address_mismatch(mail, from),
         ),
         (
             Cue::LinkTextTargetMismatch,
@@ -481,13 +502,13 @@ pub fn lookalike_hosts(mail: &MailObservation, policy: &Policy) -> Vec<Name> {
         .iter()
         .map(|l| link_target(&l.href, policy))
         .collect();
-    mail_names(mail, &targets)
+    mail_names(&sender_address(&mail.from_addr), mail, &targets)
 }
 
 /// Every host name a lookalike rule checks, once each: the sender's domain, then each link's
 /// target and the domain its text names, in link order. `targets` are the links' [`link_target`]s.
-fn mail_names(mail: &MailObservation, targets: &[(Option<Url>, bool)]) -> Vec<Name> {
-    let sender = mail.from_addr.rsplit_once('@').map(|(_, d)| d.to_owned());
+fn mail_names(from: &str, mail: &MailObservation, targets: &[(Option<Url>, bool)]) -> Vec<Name> {
+    let sender = from.rsplit_once('@').map(|(_, d)| d.to_owned());
     let links = mail
         .links
         .iter()
@@ -600,10 +621,9 @@ fn attachment_type_differs_from_body_mention(mail: &MailObservation, policy: &Po
             .any(|e| !attached.contains(e) && names(e))
 }
 
-fn display_name_address_mismatch(mail: &MailObservation) -> bool {
+fn display_name_address_mismatch(mail: &MailObservation, from: &str) -> bool {
     let name_words = words(&mail.from_name);
-    let from_domain = mail
-        .from_addr
+    let from_domain = from
         .rsplit_once('@')
         .and_then(|(_, d)| name(d))
         .map(|n| n.registrable);
@@ -624,7 +644,7 @@ fn display_name_address_mismatch(mail: &MailObservation) -> bool {
     let display = mail.from_name.to_lowercase();
     let long = |w: &&String| w.chars().count() >= 3;
     let related = |addr: &str| {
-        let addr = addr.trim().to_lowercase();
+        let addr = sender_address(addr);
         let addr = match addr.rsplit_once('@').map(|(local, d)| (local, name(d))) {
             Some((local, Some(n))) => {
                 let rest = n.host.strip_suffix(&n.suffix).unwrap_or(&n.host);
@@ -643,9 +663,7 @@ fn display_name_address_mismatch(mail: &MailObservation) -> bool {
     };
     let reply_to = mail.reply_to.as_deref().filter(|r| !r.trim().is_empty());
     !name_words.is_empty()
-        && (names_other_domain
-            || !related(&mail.from_addr)
-            || reply_to.is_some_and(|r| !related(r)))
+        && (names_other_domain || !related(from) || reply_to.is_some_and(|r| !related(r)))
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -655,13 +673,8 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn brand_name_in_freemail_sender(
-    mail: &MailObservation,
-    policy: &Policy,
-    known: &[&Name],
-) -> Option<String> {
-    let addr = mail.from_addr.trim().to_lowercase();
-    let (local, domain) = addr.rsplit_once('@')?;
+fn brand_name_in_freemail_sender(from: &str, policy: &Policy, known: &[&Name]) -> Option<String> {
+    let (local, domain) = from.rsplit_once('@')?;
     if !policy.is_freemail(domain) {
         return None;
     }

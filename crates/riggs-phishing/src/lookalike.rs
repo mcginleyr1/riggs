@@ -112,20 +112,28 @@ fn rule(
     }
     if k.registrable.len() >= g.embedded_min_domain
         && !g.embedding_ignore.contains(&candidate.registrable)
-        && tokens
-            .windows(k.registrable.split('.').count())
-            .any(|w| w.iter().copied().eq(k.registrable.split('.')))
+        && appears(tokens, &k.registrable)
     {
         return Some(Lookalike::Embedded);
     }
     if candidate.label == k.label {
         return Some(Lookalike::SuffixSwap);
     }
-    let token = k_len >= g.brand_token_min_label && tokens.contains(&k.label.as_str());
+    let token = k_len >= g.brand_token_min_label && appears(tokens, &k.label);
     let prefix = k_len >= g.brand_prefix_min_label
         && candidate.label.len() > k.label.len()
         && candidate.label.starts_with(&k.label);
     (token || prefix).then_some(Lookalike::BrandToken)
+}
+
+/// `known`, split on `.` and `-` as the candidate's `tokens` are, occurs among them as consecutive
+/// tokens. Splitting both sides alike is what lets `t-mobile.com`, and every IDN domain (its ASCII
+/// form holds `--`), be found.
+fn appears(tokens: &[&str], known: &str) -> bool {
+    let pieces = || known.split(['.', '-']);
+    tokens
+        .windows(pieces().count())
+        .any(|w| w.iter().copied().eq(pieces()))
 }
 
 /// One insertion, deletion, substitution or adjacent transposition between two folds.
@@ -254,6 +262,45 @@ mod tests {
         assert_eq!(
             (k.registrable.as_str(), rule),
             ("mercadolivre.com.br", Lookalike::Misspelling)
+        );
+    }
+
+    #[test]
+    fn a_hyphenated_known_domain_is_found_embedded_and_as_a_token() {
+        let g = guards();
+        // Dotted and hyphenated forms of the embedded rule.
+        assert_eq!(
+            check("t-mobile.com.evil.biz", "t-mobile.com", &g),
+            Some(Lookalike::Embedded)
+        );
+        assert_eq!(
+            check("t-mobile-com.evil.biz", "t-mobile.com", &g),
+            Some(Lookalike::Embedded)
+        );
+        // The known label as a host label, and inside a hyphenated label.
+        assert_eq!(
+            check("t-mobile.evil.biz", "t-mobile.com", &g),
+            Some(Lookalike::BrandToken)
+        );
+        assert_eq!(
+            check("secure-t-mobile.biz", "t-mobile.com", &g),
+            Some(Lookalike::BrandToken)
+        );
+        // Pieces of the known label that are not consecutive are no match.
+        assert_eq!(check("t-shop-mobile.biz", "t-mobile.com", &g), None);
+    }
+
+    #[test]
+    fn an_idn_known_domain_is_found_embedded_and_as_a_token() {
+        // bücher.de is xn--bcher-kva.de in ASCII; the "--" used to defeat both rules.
+        let g = guards();
+        assert_eq!(
+            check("bücher.de.example.com", "bücher.de", &g),
+            Some(Lookalike::Embedded)
+        );
+        assert_eq!(
+            check("bücher.example.com", "bücher.de", &g),
+            Some(Lookalike::BrandToken)
         );
     }
 

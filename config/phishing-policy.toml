@@ -10,8 +10,11 @@
 
 mode = "monitor"            # off: no checks; monitor: check and log, never show; warn: show verdicts
 caution_threshold = 1.0     # summed soft-cue weight at which a mail is "caution"; no effect while every weight is 0
-warmup_logins = 20          # logins recorded before the page context rule fires (an unmeasured guess)
-max_logins = 2000           # login domains kept per user; past it new logins are refused
+warmup_logins = 20          # known logins before the page context rule fires (an unmeasured guess)
+max_logins = 2000           # login domains kept per user, pending ones included; at the cap a new
+                            # one replaces the oldest pending login, or is refused when none is pending
+weak_login_confirm_hours = 12 # a login seen only as "filled" (a page can fake that) stays pending,
+                            # listed with count 0, until seen again at least this many hours later
 max_senders = 20000         # sender keys kept per user; past it new senders are not recorded
 
 # Lookalike guards. Starting guesses, to be measured on a top-sites list. Label lengths count the

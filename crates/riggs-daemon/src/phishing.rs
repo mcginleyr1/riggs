@@ -2,7 +2,8 @@
 //! persistence handed to one writer task.
 //!
 //! `handle` runs on the async runtime for any local user, so it never waits on the store's
-//! writer: it queues writes with `try_send` and drops them when the queue is full. A verdict is
+//! writer: a sensor's write is dropped and counted when the queue is full, and an admin change
+//! that finds no room is refused before memory changes. A verdict is
 //! advice shown to a person; nothing here reaches the detection pipeline, the response engine
 //! or the threat counters.
 
@@ -13,7 +14,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use riggs_comms::PhishingQuery;
-use riggs_phishing::engine::{message_fingerprint, Assessment, Change, LoginRow, SenderRow, User};
+use riggs_phishing::engine::{
+    message_fingerprint, Assessment, Change, LoginEvidence, LoginRow, SenderRow, User,
+};
 use riggs_phishing::policy::Policy;
 use riggs_store::{PhishingWrite, RiggsStore, SenderEntry};
 use riggs_types::errors::RiggsError;
@@ -23,6 +26,7 @@ use riggs_types::phishing::{
 };
 use sha2::{Digest, Sha256};
 use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -42,6 +46,8 @@ pub struct PhishingAdapter {
     logged: Mutex<HashMap<u32, (u64, u32)>>,
     policy: Arc<watch::Sender<Arc<Policy>>>,
     policy_path: PathBuf,
+    /// Held for a whole `SetMode`: read, edit, write and rename share one temporary file.
+    editing: Mutex<()>,
     /// Only read here; every write goes through `writes`.
     store: Arc<RiggsStore>,
     writes: mpsc::Sender<PhishingWrite>,
@@ -100,6 +106,7 @@ impl PhishingAdapter {
             logged: Mutex::default(),
             policy,
             policy_path,
+            editing: Mutex::default(),
             store,
             writes,
             dropped: AtomicU64::new(0),
@@ -156,8 +163,12 @@ impl PhishingAdapter {
                 if mode != Mode::Off {
                     let user = self.user(uid)?;
                     let mut user = lock(&user)?;
-                    match user.login_seen(&policy, &login.host, now_ms, false) {
-                        Ok(change) => self.queue(write(uid, change)),
+                    match user.login_seen(&policy, &login.host, now_ms, login.evidence.into()) {
+                        Ok(changes) => {
+                            for change in changes {
+                                self.queue(write(uid, change));
+                            }
+                        }
                         // The reason can name one of the user's logins; the caller may be a
                         // page-controlled context, so it learns nothing either way.
                         Err(reason) => debug!(uid, %reason, "login not recorded"),
@@ -167,26 +178,38 @@ impl PhishingAdapter {
             }
             PhishingRequest::Status => {
                 let user = self.user(uid)?;
-                let logins = lock(&user)?.logins().count() as u32;
+                // A pending login (count 0) is not a known one.
+                let logins = lock(&user)?.logins().filter(|row| row.count > 0).count() as u32;
                 Ok(PhishingResponse::Status(PhishingStatus { mode, logins }))
             }
             PhishingRequest::SetMode { mode } => self.set_mode(mode),
             PhishingRequest::Trust { uid, domain } => {
+                let slot = self.reserve()?;
                 let user = self.user(uid)?;
                 let mut user = lock(&user)?;
-                let change = user
-                    .login_seen(&policy, &domain, now_ms, true)
+                // At the login cap a trust also drops the oldest pending login: two writes. It is
+                // worked out on a copy, so both have a place in the queue before memory changes.
+                let mut trusted = user.clone();
+                let changes = trusted
+                    .login_seen(&policy, &domain, now_ms, LoginEvidence::Trusted)
                     .map_err(|reason| format!("cannot trust {domain}: {reason}"))?;
-                self.queue(write(uid, change));
+                let slots = std::iter::once(Ok(slot))
+                    .chain(changes.iter().skip(1).map(|_| self.reserve()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                *user = trusted;
+                for (slot, change) in slots.into_iter().zip(changes) {
+                    slot.send(write(uid, change));
+                }
                 Ok(PhishingResponse::Ok)
             }
             PhishingRequest::Forget { uid, domain } => {
+                let slot = self.reserve()?;
                 let user = self.user(uid)?;
                 let mut user = lock(&user)?;
                 let change = user
                     .forget(&domain)
                     .ok_or_else(|| format!("{domain} is not a login of uid {uid}"))?;
-                self.queue(write(uid, change));
+                slot.send(write(uid, change));
                 Ok(PhishingResponse::Ok)
             }
             PhishingRequest::Logins { uid } => {
@@ -269,6 +292,7 @@ impl PhishingAdapter {
     /// Rewrites only the `mode` value in the policy file, keeping every comment and every other
     /// byte, and applies the file as rewritten. A file that would not load is left alone.
     fn set_mode(&self, mode: Mode) -> Result<PhishingResponse, String> {
+        let _editing = lock(&self.editing)?;
         let path = &self.policy_path;
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -314,6 +338,16 @@ impl PhishingAdapter {
             .collect())
     }
 
+    /// A place in the queue for an admin change, taken before memory changes, so the admin is
+    /// never told `Ok` for a change the store will not get. Dropping it frees the place.
+    fn reserve(&self) -> Result<mpsc::Permit<'_, PhishingWrite>, String> {
+        self.writes.try_reserve().map_err(|e| match e {
+            TrySendError::Full(()) => "the phishing store is busy; try again".to_string(),
+            TrySendError::Closed(()) => "the phishing store writer has stopped".to_string(),
+        })
+    }
+
+    /// For sensor writes: a full queue drops the write and counts it.
     fn queue(&self, write: PhishingWrite) {
         if let Err(e) = self.writes.try_send(write) {
             let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
@@ -500,10 +534,10 @@ mod tests {
         })
     }
 
-    fn login(host: &str) -> PhishingRequest {
+    fn login(host: &str, evidence: Evidence) -> PhishingRequest {
         PhishingRequest::LoginSeen(LoginObservation {
             host: host.into(),
-            evidence: Evidence::Typed,
+            evidence,
         })
     }
 
@@ -551,7 +585,7 @@ mod tests {
         let (dir, adapter, queue) = setup("monitor", QUEUE_CAPACITY);
         let writer = tokio::spawn(write_batches(Arc::clone(&adapter.store), queue));
         assert_eq!(
-            ask(&adapter, UID, login("www.example.com"), T0),
+            ask(&adapter, UID, login("www.example.com", Evidence::Typed), T0),
             PhishingResponse::Ok
         );
         ask(
@@ -650,7 +684,7 @@ mod tests {
         assert_eq!(ask(&adapter, UID, checked, T0), quiet);
         assert_eq!(ask(&adapter, UID, page("amazan.com", true), T0), quiet);
         assert_eq!(
-            ask(&adapter, UID, login("amazan.com"), T0),
+            ask(&adapter, UID, login("amazan.com", Evidence::Typed), T0),
             PhishingResponse::Ok
         );
 
@@ -668,7 +702,11 @@ mod tests {
         if let PhishingRequest::CheckMail(m) = &mut long_mail {
             m.subject = long.clone();
         }
-        let requests = [long_mail, page(&long[..256], false), login(&long[..256])];
+        let requests = [
+            long_mail,
+            page(&long[..256], false),
+            login(&long[..256], Evidence::Typed),
+        ];
         for request in requests {
             let PhishingResponse::Error(error) = ask(&adapter, UID, request, T0) else {
                 panic!("an oversized observation was answered");
@@ -684,8 +722,8 @@ mod tests {
     #[test]
     fn two_uids_see_only_their_own_logins_verdicts_and_stats() {
         let (dir, adapter, mut queue) = setup("monitor", 64);
-        ask(&adapter, 501, login("www.example.com"), T0);
-        ask(&adapter, 502, login("www.example.org"), T0);
+        ask(&adapter, 501, login("www.example.com", Evidence::Typed), T0);
+        ask(&adapter, 502, login("www.example.org", Evidence::Typed), T0);
         ask(
             &adapter,
             501,
@@ -763,15 +801,162 @@ mod tests {
     }
 
     #[test]
+    fn trust_and_forget_without_room_in_the_queue_change_nothing_and_say_so() {
+        let (dir, adapter, mut queue) = setup("monitor", 1);
+        let forget = |domain: &str| PhishingRequest::Forget {
+            uid: UID,
+            domain: domain.into(),
+        };
+        let refused = |request| match ask(&adapter, UID, request, T0) {
+            PhishingResponse::Error(error) => error,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            ask(&adapter, UID, trust(UID, "example.com"), T0),
+            PhishingResponse::Ok
+        );
+        // That login's write now fills the queue.
+        let busy = "the phishing store is busy; try again";
+        assert_eq!(refused(trust(UID, "example.org")), busy);
+        assert_eq!(refused(forget("example.com")), busy);
+        assert_eq!(logins(&adapter, UID), ["example.com"]);
+        assert_eq!(adapter.dropped.load(Ordering::Relaxed), 0);
+
+        assert!(matches!(queue.try_recv(), Ok(PhishingWrite::Login { .. })));
+        assert_eq!(
+            ask(&adapter, UID, forget("example.com"), T0),
+            PhishingResponse::Ok
+        );
+        assert!(matches!(
+            queue.try_recv(),
+            Ok(PhishingWrite::ForgetLogin { .. })
+        ));
+        assert_eq!(
+            ask(&adapter, UID, trust(UID, "example.org"), T0),
+            PhishingResponse::Ok
+        );
+        assert!(matches!(queue.try_recv(), Ok(PhishingWrite::Login { .. })));
+        assert_eq!(logins(&adapter, UID), ["example.org"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_set_modes_leave_a_whole_file_holding_one_of_them() {
+        let (dir, adapter, _queue) = setup("monitor", 8);
+        let path = dir.join("phishing-policy.toml");
+        let (warn, off) = (policy_text("warn"), policy_text("off"));
+        for _ in 0..20 {
+            let start = Barrier::new(2);
+            let set = |mode| {
+                start.wait();
+                ask(&adapter, UID, PhishingRequest::SetMode { mode }, T0)
+            };
+            let answers = std::thread::scope(|scope| {
+                let first = scope.spawn(|| set(Mode::Warn));
+                let second = scope.spawn(|| set(Mode::Off));
+                [first.join().unwrap(), second.join().unwrap()]
+            });
+            assert_eq!(answers, [PhishingResponse::Ok, PhishingResponse::Ok]);
+
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(written == warn || written == off, "the policy file is torn");
+            let on_disk = riggs_phishing::reload::load_policy_file(&path)
+                .unwrap()
+                .mode();
+            assert_eq!(mode(&adapter), on_disk);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_login_on_weak_evidence_is_listed_pending_and_not_counted_by_status() {
+        let (dir, adapter, mut queue) = setup("monitor", 8);
+        let status_logins = |a: &PhishingAdapter| match ask(a, UID, PhishingRequest::Status, T0) {
+            PhishingResponse::Status(status) => status.logins,
+            other => panic!("{other:?}"),
+        };
+        let counts =
+            |a: &PhishingAdapter| match ask(a, UID, PhishingRequest::Logins { uid: UID }, T0) {
+                PhishingResponse::Logins(logins) => logins
+                    .into_iter()
+                    .map(|l| (l.domain, l.count))
+                    .collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            };
+        ask(
+            &adapter,
+            UID,
+            login("www.example.com", Evidence::Filled),
+            T0,
+        );
+        assert_eq!(status_logins(&adapter), 0);
+        assert_eq!(counts(&adapter), [("example.com".to_string(), 0)]);
+        assert!(matches!(
+            queue.try_recv(),
+            Ok(PhishingWrite::Login { entry, .. }) if entry.count == 0
+        ));
+        ask(
+            &adapter,
+            UID,
+            login("www.example.com", Evidence::Autofill),
+            T0 + 1,
+        );
+        assert_eq!(status_logins(&adapter), 1);
+        assert_eq!(counts(&adapter), [("example.com".to_string(), 1)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trust_at_the_login_cap_queues_both_writes_or_changes_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("riggs-phishing-adapter-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let capped = policy_text("monitor")
+            .replacen("max_logins = 2000", "max_logins = 2", 1)
+            .replacen("warmup_logins = 20", "warmup_logins = 1", 1);
+        std::fs::write(dir.join("phishing-policy.toml"), capped).unwrap();
+        let (adapter, mut queue) = adapter_in(&dir, 2);
+        ask(&adapter, UID, login("www.example.com", Evidence::Typed), T0);
+        ask(
+            &adapter,
+            UID,
+            login("www.example.net", Evidence::Filled),
+            T0,
+        );
+        queue.try_recv().unwrap();
+        // One slot free: the trust needs two (drop the pending login, add the trusted one).
+        assert_eq!(
+            ask(&adapter, UID, trust(UID, "example.org"), T0),
+            PhishingResponse::Error("the phishing store is busy; try again".into())
+        );
+        assert_eq!(logins(&adapter, UID), ["example.com", "example.net"]);
+        queue.try_recv().unwrap();
+        assert_eq!(
+            ask(&adapter, UID, trust(UID, "example.org"), T0),
+            PhishingResponse::Ok
+        );
+        assert!(matches!(
+            queue.try_recv(),
+            Ok(PhishingWrite::ForgetLogin { domain, .. }) if domain == "example.net"
+        ));
+        assert!(matches!(
+            queue.try_recv(),
+            Ok(PhishingWrite::Login { entry, .. }) if entry.domain == "example.org" && entry.count == 1
+        ));
+        assert_eq!(logins(&adapter, UID), ["example.com", "example.org"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_full_queue_drops_and_counts_without_waiting() {
         let (dir, adapter, mut queue) = setup("monitor", 1);
         let started = Instant::now();
         assert_eq!(
-            adapter.handle(UID, login("www.example.com")),
+            adapter.handle(UID, login("www.example.com", Evidence::Typed)),
             PhishingResponse::Ok
         );
         assert_eq!(
-            adapter.handle(UID, login("www.example.org")),
+            adapter.handle(UID, login("www.example.org", Evidence::Typed)),
             PhishingResponse::Ok
         );
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -782,7 +967,7 @@ mod tests {
         };
         assert_eq!(domain(queue.try_recv()), "example.com");
 
-        adapter.handle(UID, login("www.example.net"));
+        adapter.handle(UID, login("www.example.net", Evidence::Typed));
         assert_eq!(domain(queue.try_recv()), "example.net");
         assert_eq!(adapter.dropped.load(Ordering::Relaxed), 1);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -913,7 +1098,10 @@ mod tests {
         };
         assert_eq!((verdict.level, verdict.show), (Level::Danger, true));
 
-        assert_eq!(send(login("login.example.org")).await, PhishingResponse::Ok);
+        assert_eq!(
+            send(login("login.example.org", Evidence::Typed)).await,
+            PhishingResponse::Ok
+        );
         let PhishingResponse::Verdict(verdict) = send(page("login.example.org", true)).await else {
             panic!("no verdict for the page");
         };

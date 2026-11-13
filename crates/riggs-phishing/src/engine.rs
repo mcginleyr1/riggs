@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use riggs_types::phishing::{Level, MailObservation, PageObservation, Provider, Reason};
+use riggs_types::phishing::{Evidence, Level, MailObservation, PageObservation, Provider, Reason};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use crate::cues::{link_target, mail_cues_and_lookalikes, Cue, LookalikeHit};
+use crate::cues::{evaluate, link_target, sender_address, Cue, LookalikeHit};
 use crate::domain::{name, Name};
 use crate::lookalike::lookalike;
 use crate::policy::Policy;
@@ -20,7 +20,29 @@ pub struct LoginRow {
     pub domain: String,
     pub first_ms: u64,
     pub last_ms: u64,
+    /// Sightings since the login became known; 0 while it is pending (seen on weak evidence only).
     pub count: u32,
+}
+
+/// How strongly a login was seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginEvidence {
+    /// The password field merely held a value (the sensor's `filled`). A page can arrange that by
+    /// itself, so such a login stays pending until it is seen again later.
+    Weak,
+    /// The person typed or pasted the password, or the browser's own password manager filled it.
+    Strong,
+    /// The admin's `trust`: known at once, past the lookalike and flagged refusals.
+    Trusted,
+}
+
+impl From<Evidence> for LoginEvidence {
+    fn from(evidence: Evidence) -> Self {
+        match evidence {
+            Evidence::Filled => LoginEvidence::Weak,
+            Evidence::Typed | Evidence::Autofill => LoginEvidence::Strong,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,13 +117,18 @@ impl User {
         Ok(user)
     }
 
-    /// In domain order.
+    /// Every login row, pending ones (count 0) included, in domain order.
     pub fn logins(&self) -> impl Iterator<Item = &LoginRow> {
         self.logins.values().map(|(row, _)| row)
     }
 
+    /// The known logins: what the rules compare against and exempt. A pending login is not one.
     fn known(&self) -> Vec<&Name> {
-        self.logins.values().map(|(_, n)| n).collect()
+        self.logins
+            .values()
+            .filter(|(row, _)| row.count > 0)
+            .map(|(_, n)| n)
+            .collect()
     }
 
     /// Checks an opened mail. Re-opening the first mail seen from a sender gives the verdict it
@@ -112,13 +139,14 @@ impl User {
         mail: &MailObservation,
         now_ms: u64,
     ) -> (Assessment, Option<Change>) {
-        let key = sender_key(policy, &mail.from_addr);
+        let from = sender_address(&mail.from_addr);
+        let key = sender_key(policy, &from);
         let msg = message_fingerprint(mail.provider, &mail.message_id);
         let never_seen = self
             .senders
             .get(&key)
             .is_none_or(|row| row.first_msg == msg);
-        let (fired, lookalikes) = mail_cues_and_lookalikes(mail, policy, &self.known(), never_seen);
+        let (fired, lookalikes) = evaluate(mail, &from, policy, &self.known(), never_seen);
         let score: f32 = fired
             .keys()
             .filter(|cue| cue.is_soft())
@@ -131,8 +159,7 @@ impl User {
         } else {
             Level::None
         };
-        let domain = mail
-            .from_addr
+        let domain = from
             .rsplit_once('@')
             .and_then(|(_, d)| name(d))
             .map_or_else(String::new, |n| n.registrable);
@@ -182,14 +209,15 @@ impl User {
         let domain = name
             .as_ref()
             .map_or_else(String::new, |n| n.registrable.clone());
-        if self.logins.contains_key(&domain) {
+        let known = self.known();
+        if known.iter().any(|k| k.registrable == domain) {
             return assessment(policy, Level::None, BTreeMap::new(), vec![], 0.0, domain);
         }
         let mut fired = BTreeMap::new();
         let mut lookalikes = vec![];
         let hard = name
             .as_ref()
-            .and_then(|n| lookalike(n, self.known(), &policy.guards))
+            .and_then(|n| lookalike(n, known.iter().copied(), &policy.guards))
             .filter(|(_, rule)| rule.is_hard());
         let level = if let Some((k, rule)) = hard {
             let cue = Cue::from(rule);
@@ -212,7 +240,7 @@ impl User {
                 page.mail_level.unwrap_or(Level::None),
                 linked.unwrap_or(Level::None),
             );
-            if !from_mail || self.logins.len() < policy.warmup_logins {
+            if !from_mail || known.len() < policy.warmup_logins {
                 Level::None
             } else if mail_level == Level::None {
                 fired.insert(Cue::PageFromMailUnknownLogin, None);
@@ -230,43 +258,73 @@ impl User {
         assessment(policy, level, fired, lookalikes, 0.0, domain)
     }
 
-    /// Records or refreshes a login. Refuses, recording nothing, a hard lookalike of a login-set
-    /// domain or a domain a page check flagged in the last 30 minutes (both skipped when
-    /// `trusted`), and a new domain once the login cap is reached.
+    /// Records a login and returns the changes to store, in this order: a pending login dropped to
+    /// make room, then the login's own row.
+    ///
+    /// A known login is refreshed. A new domain is known at once on strong evidence or a trust,
+    /// and pending (count 0) on weak evidence. A pending login becomes known on strong evidence,
+    /// a trust, or weak evidence again at least `weak_login_confirm_hours` after its first
+    /// sighting; weak evidence sooner only refreshes it. Creating or confirming a login is
+    /// refused, recording nothing, for a hard lookalike of a known login or a domain a page check
+    /// flagged in the last 30 minutes (neither applies to a trust), and for a new domain at the
+    /// login cap when there is no pending login to drop.
     pub fn login_seen(
         &mut self,
         policy: &Policy,
         host: &str,
         now_ms: u64,
-        trusted: bool,
-    ) -> Result<Change, String> {
+        evidence: LoginEvidence,
+    ) -> Result<Vec<Change>, String> {
         let name = name(host).ok_or("not a registrable domain")?;
-        if let Some((row, _)) = self.logins.get_mut(&name.registrable) {
-            row.last_ms = now_ms;
-            row.count = row.count.saturating_add(1);
-            return Ok(Change::Login(row.clone()));
+        let domain = name.registrable.clone();
+        if let Some((row, _)) = self.logins.get_mut(&domain) {
+            let known = row.count > 0;
+            let early = evidence == LoginEvidence::Weak
+                && now_ms < row.first_ms.saturating_add(policy.weak_login_confirm_ms);
+            if known || early {
+                row.last_ms = now_ms;
+                if known {
+                    row.count = row.count.saturating_add(1);
+                }
+                return Ok(vec![Change::Login(row.clone())]);
+            }
         }
-        if !trusted {
+        if evidence != LoginEvidence::Trusted {
             let hard = lookalike(&name, self.known(), &policy.guards).filter(|(_, r)| r.is_hard());
             if let Some((k, _)) = hard {
                 return Err(format!("looks like {}, a login domain", k.registrable));
             }
-            if recent(&self.flagged, &name.registrable, now_ms).is_some() {
+            if recent(&self.flagged, &domain, now_ms).is_some() {
                 return Err("a page check flagged it in the last 30 minutes".into());
             }
         }
+        if let Some((row, _)) = self.logins.get_mut(&domain) {
+            row.last_ms = now_ms;
+            row.count = 1;
+            return Ok(vec![Change::Login(row.clone())]);
+        }
+        let mut changes = Vec::new();
         if self.logins.len() >= policy.max_logins {
-            return Err("the login cap is reached".into());
+            // A flood of pending logins must not lock real ones out: the oldest pending one goes.
+            let oldest = self
+                .logins
+                .values()
+                .filter(|(row, _)| row.count == 0)
+                .min_by_key(|(row, _)| row.first_ms)
+                .map(|(row, _)| row.domain.clone())
+                .ok_or("the login cap is reached")?;
+            self.logins.remove(&oldest);
+            changes.push(Change::LoginRemoved(oldest));
         }
         let row = LoginRow {
-            domain: name.registrable.clone(),
+            domain: domain.clone(),
             first_ms: now_ms,
             last_ms: now_ms,
-            count: 1,
+            count: u32::from(evidence != LoginEvidence::Weak),
         };
-        self.logins
-            .insert(name.registrable.clone(), (row.clone(), name));
-        Ok(Change::Login(row))
+        self.logins.insert(domain, (row.clone(), name));
+        changes.push(Change::Login(row));
+        Ok(changes)
     }
 
     /// Drops a login, for the admin's `forget`.
@@ -296,17 +354,16 @@ pub fn message_fingerprint(provider: Provider, message_id: &str) -> u64 {
     u64::from_be_bytes(first)
 }
 
-/// The registrable domain of the address, or a hex SHA-256 of the lowercased address when the
-/// domain is free mail or has no registrable domain.
-fn sender_key(policy: &Policy, from_addr: &str) -> String {
-    let addr = from_addr.trim().to_lowercase();
-    addr.rsplit_once('@')
+/// The registrable domain of `from` (a [`sender_address`]), or a hex SHA-256 of it when its domain
+/// is free mail or has no registrable domain.
+fn sender_key(policy: &Policy, from: &str) -> String {
+    from.rsplit_once('@')
         .map(|(_, d)| d)
         .filter(|d| !policy.is_freemail(d))
         .and_then(name)
         .map_or_else(
             || {
-                Sha256::digest(addr.as_bytes())
+                Sha256::digest(from.as_bytes())
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect()
@@ -393,6 +450,7 @@ mod tests {
     use super::*;
     use crate::cues::tests::{link, mail, shipped, wrapping};
     use riggs_types::phishing::Level::{Caution, Danger, None as Clear};
+    use LoginEvidence::{Strong, Trusted, Weak};
 
     const MINUTE: u64 = 60 * 1000;
 
@@ -582,6 +640,41 @@ mod tests {
     }
 
     #[test]
+    fn the_sender_address_is_normalised_once_for_every_check() {
+        let p = shipped();
+        let user = user_with(0, &["amazon.com"]);
+        for from in [
+            "orders@amazan.com\n",
+            " ORDERS@Amazan.COM",
+            "orders@amazan.com.",
+        ] {
+            let mut m = mail();
+            m.from_addr = from.into();
+            let (a, change) = user.clone().check_mail(&p, &m, 1);
+            assert_eq!(a.level, Danger, "{from:?}");
+            assert_eq!(a.domain, "amazan.com", "{from:?}");
+            let Some(Change::Sender(row)) = change else {
+                panic!("expected a sender row for {from:?}");
+            };
+            assert_eq!(row.key, "amazan.com", "{from:?}");
+        }
+        // A free-mail sender keeps one hashed key, whatever its case, whitespace or trailing dot.
+        for from in [
+            "someone@gmail.com",
+            "Someone@GMAIL.com ",
+            "someone@gmail.com.",
+        ] {
+            let mut m = mail();
+            m.from_addr = from.into();
+            let (_, change) = User::default().check_mail(&p, &m, 1);
+            let Some(Change::Sender(row)) = change else {
+                panic!("expected a sender row for {from:?}");
+            };
+            assert_eq!(row.key, sender_key(&p, "someone@gmail.com"), "{from:?}");
+        }
+    }
+
+    #[test]
     fn at_the_sender_cap_senders_are_not_recorded_and_still_answered() {
         let mut p = shipped();
         p.max_senders = 1;
@@ -740,36 +833,198 @@ mod tests {
 
     // Logins.
 
+    const HOUR: u64 = 60 * MINUTE;
+
+    fn row(domain: &str, first_ms: u64, last_ms: u64, count: u32) -> LoginRow {
+        LoginRow {
+            domain: domain.into(),
+            first_ms,
+            last_ms,
+            count,
+        }
+    }
+
+    fn count_of(user: &User, domain: &str) -> Option<u32> {
+        user.logins().find(|r| r.domain == domain).map(|r| r.count)
+    }
+
     #[test]
     fn login_seen_records_then_refreshes() {
         let p = shipped();
         let mut user = User::default();
-        let first = user.login_seen(&p, "www.example.com", 10, false).unwrap();
-        let expected = LoginRow {
-            domain: "example.com".into(),
-            first_ms: 10,
-            last_ms: 10,
-            count: 1,
-        };
-        assert_eq!(first, Change::Login(expected.clone()));
-        let again = user.login_seen(&p, "login.example.com", 20, false).unwrap();
-        let refreshed = LoginRow {
-            last_ms: 20,
-            count: 2,
-            ..expected
-        };
-        assert_eq!(again, Change::Login(refreshed.clone()));
-        assert_eq!(user.logins().collect::<Vec<_>>(), [&refreshed]);
-        assert!(user.login_seen(&p, "192.168.1.1", 30, false).is_err());
+        let first = user.login_seen(&p, "www.example.com", 10, Strong).unwrap();
+        assert_eq!(first, [Change::Login(row("example.com", 10, 10, 1))]);
+        // Any evidence refreshes a known login.
+        let again = user.login_seen(&p, "login.example.com", 20, Weak).unwrap();
+        assert_eq!(again, [Change::Login(row("example.com", 10, 20, 2))]);
+        assert_eq!(
+            user.logins().collect::<Vec<_>>(),
+            [&row("example.com", 10, 20, 2)]
+        );
+        assert!(user.login_seen(&p, "192.168.1.1", 30, Strong).is_err());
+    }
+
+    #[test]
+    fn a_new_domain_is_known_on_strong_evidence_or_a_trust_and_pending_on_weak() {
+        let p = shipped();
+        for (evidence, count) in [(Weak, 0), (Strong, 1), (Trusted, 1)] {
+            let mut user = User::default();
+            let changes = user.login_seen(&p, "example.com", 10, evidence).unwrap();
+            let expected = [Change::Login(row("example.com", 10, 10, count))];
+            assert_eq!(changes, expected, "{evidence:?}");
+        }
+        assert_eq!(LoginEvidence::from(Evidence::Filled), Weak);
+        assert_eq!(LoginEvidence::from(Evidence::Typed), Strong);
+        assert_eq!(LoginEvidence::from(Evidence::Autofill), Strong);
+    }
+
+    #[test]
+    fn weak_evidence_confirms_a_pending_login_only_after_the_confirmation_time() {
+        let p = shipped();
+        let confirm = p.weak_login_confirm_ms;
+        assert_eq!(confirm, 12 * HOUR);
+        let mut user = User::default();
+        user.login_seen(&p, "example.com", 0, Weak).unwrap();
+        let early = user
+            .login_seen(&p, "example.com", confirm - 1, Weak)
+            .unwrap();
+        assert_eq!(
+            early,
+            [Change::Login(row("example.com", 0, confirm - 1, 0))]
+        );
+        let late = user.login_seen(&p, "example.com", confirm, Weak).unwrap();
+        assert_eq!(late, [Change::Login(row("example.com", 0, confirm, 1))]);
+    }
+
+    #[test]
+    fn strong_evidence_or_a_trust_confirms_a_pending_login_at_once() {
+        let p = shipped();
+        for evidence in [Strong, Trusted] {
+            let mut user = User::default();
+            user.login_seen(&p, "example.com", 0, Weak).unwrap();
+            let changes = user
+                .login_seen(&p, "example.com", MINUTE, evidence)
+                .unwrap();
+            let expected = [Change::Login(row("example.com", 0, MINUTE, 1))];
+            assert_eq!(changes, expected, "{evidence:?}");
+        }
+    }
+
+    #[test]
+    fn a_pending_login_is_still_judged_and_is_no_lookalike_target() {
+        let p = shipped();
+        // Not exempt from the page rule.
+        let mut user = user_with(p.warmup_logins, &[]);
+        user.login_seen(&p, "example.net", 0, Weak).unwrap();
+        let a = user.check_page(&p, &from_mail("example.net", None), 1);
+        assert_eq!(a.level, Caution);
+        // Not counted towards the warm-up.
+        let mut user = user_with(p.warmup_logins - 1, &[]);
+        user.login_seen(&p, "example.org", 0, Weak).unwrap();
+        let a = user.check_page(&p, &from_mail("signup.example.net", None), 1);
+        assert_eq!(a.level, Clear);
+        // Still a candidate: a pending amazan.com is a lookalike of amazon.com once that is known.
+        let mut user = User::default();
+        user.login_seen(&p, "amazan.com", 0, Weak).unwrap();
+        user.login_seen(&p, "amazon.com", 1, Strong).unwrap();
+        assert_eq!(user.check_page(&p, &page("amazan.com"), 2).level, Danger);
+        // No target: with amazon.com only pending, amazan.com resembles no known login.
+        let mut user = User::default();
+        user.login_seen(&p, "amazon.com", 0, Weak).unwrap();
+        assert_eq!(user.check_page(&p, &page("amazan.com"), 1).level, Clear);
+        let mut m = mail();
+        m.from_addr = "orders@amazan.com".into();
+        assert_eq!(user.check_mail(&p, &m, 2).0.level, Clear);
+        assert!(user.login_seen(&p, "amazan.com", 3, Strong).is_ok());
+    }
+
+    #[test]
+    fn creating_or_confirming_a_pending_login_meets_the_refusals_of_a_new_one() {
+        let p = shipped();
+        // A hard lookalike of a known login: refused at creation...
+        let mut user = user_with(0, &["amazon.com"]);
+        assert!(user.login_seen(&p, "amazan.com", 0, Weak).is_err());
+        assert_eq!(count_of(&user, "amazan.com"), None);
+        // ...and at confirmation, when the known login arrived after the pending one.
+        let mut user = User::default();
+        user.login_seen(&p, "amazan.com", 0, Weak).unwrap();
+        user.login_seen(&p, "amazon.com", 1, Strong).unwrap();
+        assert!(user.login_seen(&p, "amazan.com", 2, Strong).is_err());
+        assert!(user.login_seen(&p, "amazan.com", 12 * HOUR, Weak).is_err());
+        assert_eq!(count_of(&user, "amazan.com"), Some(0));
+        assert!(user
+            .login_seen(&p, "amazan.com", 13 * HOUR, Trusted)
+            .is_ok());
+
+        // A domain a page check just flagged: refused at creation...
+        let mut user = user_with(p.warmup_logins, &[]);
+        user.check_page(&p, &from_mail("signup.example.org", None), 0);
+        assert!(user.login_seen(&p, "example.org", MINUTE, Weak).is_err());
+        assert_eq!(count_of(&user, "example.org"), None);
+        // ...and at confirmation.
+        user.login_seen(&p, "example.net", 0, Weak).unwrap();
+        user.check_page(&p, &from_mail("signup.example.net", None), MINUTE);
+        assert!(user
+            .login_seen(&p, "example.net", 2 * MINUTE, Strong)
+            .is_err());
+        assert_eq!(count_of(&user, "example.net"), Some(0));
+        assert!(user
+            .login_seen(&p, "example.net", 3 * MINUTE, Trusted)
+            .is_ok());
+        assert!(user
+            .login_seen(&p, "example.org", 4 * MINUTE, Trusted)
+            .is_ok());
+    }
+
+    #[test]
+    fn pending_logins_survive_a_rebuild_as_pending() {
+        let p = shipped();
+        let warm = user_with(p.warmup_logins, &[]);
+        let pending = row("example.net", 5, 6, 0);
+        let rows = warm.logins().cloned().chain([pending.clone()]);
+        let mut user = User::new(rows, []).unwrap();
+        assert!(user.logins().any(|r| *r == pending));
+        let a = user.check_page(&p, &from_mail("example.net", None), 7);
+        assert_eq!(a.level, Caution);
+    }
+
+    #[test]
+    fn at_the_cap_the_oldest_pending_login_makes_room_and_a_known_one_never_does() {
+        let mut p = shipped();
+        p.max_logins = 3;
+        let mut user = user_with(0, &["example.com"]);
+        user.login_seen(&p, "example.net", 10, Weak).unwrap();
+        user.login_seen(&p, "example.org", 20, Weak).unwrap();
+        let changes = user.login_seen(&p, "example.de", 30, Strong).unwrap();
+        let expected = [
+            Change::LoginRemoved("example.net".into()),
+            Change::Login(row("example.de", 30, 30, 1)),
+        ];
+        assert_eq!(changes, expected);
+        let changes = user.login_seen(&p, "example.fr", 40, Weak).unwrap();
+        let expected = [
+            Change::LoginRemoved("example.org".into()),
+            Change::Login(row("example.fr", 40, 40, 0)),
+        ];
+        assert_eq!(changes, expected);
+        let changes = user.login_seen(&p, "example.it", 50, Trusted).unwrap();
+        assert_eq!(changes[0], Change::LoginRemoved("example.fr".into()));
+        // No pending login is left: a new one is refused, and the known ones stay.
+        assert!(user.login_seen(&p, "example.es", 60, Strong).is_err());
+        assert!(user.login_seen(&p, "example.es", 60, Trusted).is_err());
+        let domains: Vec<&str> = user.logins().map(|r| r.domain.as_str()).collect();
+        assert_eq!(domains, ["example.com", "example.de", "example.it"]);
+        // A known login is still refreshed at the cap.
+        assert!(user.login_seen(&p, "example.com", 70, Weak).is_ok());
     }
 
     #[test]
     fn login_seen_refuses_a_lookalike_unless_trusted() {
         let p = shipped();
         let mut user = user_with(0, &["amazon.com"]);
-        assert!(user.login_seen(&p, "amazan.com", 1, false).is_err());
+        assert!(user.login_seen(&p, "amazan.com", 1, Strong).is_err());
         assert_eq!(user.logins().count(), 1);
-        assert!(user.login_seen(&p, "amazan.com", 2, true).is_ok());
+        assert!(user.login_seen(&p, "amazan.com", 2, Trusted).is_ok());
         assert_eq!(user.logins().count(), 2);
     }
 
@@ -780,26 +1035,17 @@ mod tests {
         let flagged = user.check_page(&p, &from_mail("signup.example.net", None), 0);
         assert_eq!(flagged.level, Caution);
         assert!(user
-            .login_seen(&p, "signup.example.net", MINUTE, false)
+            .login_seen(&p, "signup.example.net", MINUTE, Strong)
             .is_err());
         assert!(user
-            .login_seen(&p, "example.net", 30 * MINUTE, false)
+            .login_seen(&p, "example.net", 30 * MINUTE, Strong)
             .is_ok());
 
         let mut user = user_with(p.warmup_logins, &[]);
         user.check_page(&p, &from_mail("signup.example.net", None), 0);
         assert!(user
-            .login_seen(&p, "signup.example.net", MINUTE, true)
+            .login_seen(&p, "signup.example.net", MINUTE, Trusted)
             .is_ok());
-    }
-
-    #[test]
-    fn login_seen_refuses_a_new_domain_at_the_cap() {
-        let mut p = shipped();
-        p.max_logins = 1;
-        let mut user = user_with(0, &["example.com"]);
-        assert!(user.login_seen(&p, "example.org", 1, true).is_err());
-        assert!(user.login_seen(&p, "example.com", 1, false).is_ok());
     }
 
     #[test]
@@ -838,6 +1084,7 @@ mod tests {
     #[test]
     #[ignore]
     fn worst_case_check_mail_timing() {
+        use crate::domain::{MAX_HOST_BYTES, MAX_LABEL_BYTES};
         let p = shipped();
         // `first` followed by `n` written in base-26 letters, `len` characters in all.
         let word = |first: u8, mut n: usize, len: usize| {
@@ -864,35 +1111,51 @@ mod tests {
         let len = p.guards.typo_min_label.max(p.guards.typo_part_min_label);
         let dense = users(&|i| word(b'a', i, len));
         let spread = users(&|i| word(b'a' + (i % 26) as u8, i, 4 + (i / 26) % 9));
-        // As many `len`-character parts as fit a 63-character DNS label. Logins below 2,000 have
-        // "a" in the last two places; the offset puts other letters there in every part, so no
-        // part is within one edit of a login and nothing fires to cut a comparison short.
-        let parts = 64 / (len + 1);
+        // The longest hosts `name()` accepts, made of `len`-character parts: the registrable label
+        // takes as many parts as a label holds, then subdomain labels go in front while the host
+        // fits. Logins below 2,000 have "a" in the last two places; the offset puts other letters
+        // there in every part, so no part is within one edit of a login and nothing fires to cut
+        // a comparison short.
+        let label_max = MAX_LABEL_BYTES;
         let offset = 26usize.pow(len as u32 - 3) + 26usize.pow(len as u32 - 2);
-        let label = |first: usize| {
-            (first..first + parts)
+        let label = |from: usize, count: usize| {
+            (from..from + count)
                 .map(|n| word(b'a', n + offset, len))
                 .collect::<Vec<_>>()
                 .join("-")
         };
-        let host = |first: usize| format!("{}.{}.com", label(first), label(first + parts));
+        let fits = |room: usize| ((room + 1) / (len + 1)).min((label_max + 1) / (len + 1));
+        let host = |first: usize| {
+            let count = fits(MAX_HOST_BYTES - ".com".len());
+            let mut host = format!("{}.com", label(first, count));
+            let mut next = first + count;
+            loop {
+                let count = fits(MAX_HOST_BYTES.saturating_sub(host.len() + 1));
+                if count == 0 {
+                    break host;
+                }
+                host = format!("{}.{host}", label(next, count));
+                next += count;
+            }
+        };
         let mut m = mail();
         m.subject = "x".repeat(4096);
         m.body_text = "a.co ".repeat(65536 / 5);
         m.attachments = (0..100).map(|i| format!("file{i}.zip")).collect();
         m.links = (0..500)
             .map(|i| {
-                let first = i * 4 * parts;
-                let text = format!("https://{}/{}", host(first), "x".repeat(3900));
-                let href = format!(
-                    "https://{}/?q={}",
-                    host(first + 2 * parts),
-                    "x".repeat(7900)
-                );
+                let text = format!("https://{}/{}", host(i * 64), "x".repeat(3800));
+                let href = format!("https://{}/?q={}", host(i * 64 + 32), "x".repeat(7900));
                 link(&text, &href)
             })
             .collect();
         assert_eq!(m.check_limits(), Ok(()));
+        let first = host(0);
+        let longest_label = first.split('.').map(str::len).max().unwrap();
+        println!(
+            "hosts of {} bytes, longest label {longest_label}",
+            first.len()
+        );
 
         let start = std::time::Instant::now();
         crate::cues::link_only_body(&m);
