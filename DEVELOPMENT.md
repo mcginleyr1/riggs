@@ -158,12 +158,83 @@ target/release/riggs dlp status
 target/release/riggs dlp policy
 ```
 
+### 5. Browser extension (phishing protection)
+
+The extension is plain JavaScript with no build step; `package.json` holds only
+its test and lint tooling (Node's built-in test runner, jsdom, Biome). Install
+the tooling once, then:
+
+```sh
+npm --prefix extensions/riggs-browser ci
+npm --prefix extensions/riggs-browser test      # node --test over test/**/*.test.js
+npm --prefix extensions/riggs-browser run lint  # biome check ext test
+```
+
+CI runs both on Node 25, the version this was developed with. Every test runs
+in Node against stand-ins for the browser's interfaces (jsdom and a fake
+`chrome` object); nothing runs in a real browser. `docs/PHISHING.md` holds the
+contract between the extension's files, the native-messaging host and the
+daemon, and lists what is unverified.
+
+#### A development daemon with phishing protection, as an unprivileged user
+
+An ordinary user can run the daemon (the macOS sensor started without root in
+the one run this was tried). It reads `/etc/riggs/riggs.toml`, and failing
+that `config/riggs.toml` relative to its working directory. Its default paths
+(`/var/lib/riggs`, `/var/run/riggs.sock`) are not writable by you, so run it in
+a scratch directory with its own `config/`:
+
+```sh
+mkdir -p /tmp/riggs-dev/config
+cp config/riggs.toml config/phishing-policy.toml /tmp/riggs-dev/config/
+```
+
+Keep the directory path short: a Unix socket path is limited to 104 bytes on
+macOS. In `/tmp/riggs-dev/config/riggs.toml`, point every path at that
+directory: `[store] db_path`, `[comms] socket_path` and `filter_socket_path`,
+`[response] quarantine_path`, `pf_conf_path` and `snapshot_path`, and `[intel]
+cache_path`. To keep the daemon from doing anything else, as the run that
+tested this did, also switch off `[engine] static_ai_enabled`,
+`behavioral_ai_enabled` and `rules_enabled`, `[intel] enabled` and the
+`*_enabled` switches under `[intel.feeds]`, `[dlp] enabled`, and `[response] auto_respond`, `kill_on_critical`,
+`quarantine_on_malicious` and `preemptive_snapshots`. Then:
+
+```sh
+cargo build -p riggs-daemon -p riggs-cli
+cd /tmp/riggs-dev && /path/to/riggs/target/debug/riggs-daemon
+```
+
+The daemon finds `config/phishing-policy.toml` in the same directory and logs
+`phishing protection initialized`, with the mode. In another shell, use the
+CLI with `--socket` (it goes before the command). Because you run the daemon,
+you are its owner: the owner-only commands need no `sudo`.
+
+```sh
+target/debug/riggs --socket /tmp/riggs-dev/riggs.sock phishing status
+target/debug/riggs --socket /tmp/riggs-dev/riggs.sock phishing mode warn
+target/debug/riggs --socket /tmp/riggs-dev/riggs.sock phishing recent
+```
+
+To put a browser in front of it: load `extensions/riggs-browser/ext` unpacked
+at `chrome://extensions` (its manifest `key` gives it the ID the host manifest
+allows), and register a host manifest for your own user, a copy of
+`install/native-messaging/com.riggs.browser.json` with `path` set to the
+absolute path of `target/debug/riggs-browser-host`, in
+`~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` on macOS
+or `~/.config/google-chrome/NativeMessagingHosts/` on Linux (Chrome's
+documented per-user directories). The host reads `RIGGS_SOCKET` for the socket,
+so start the browser from a shell in which it is exported. That Chrome passes
+its environment on to the host, and which of two manifests wins when the
+installer's system-wide one also exists, are both unverified. The daemon
+rereads the policy file when it changes, so editing the mode in
+`/tmp/riggs-dev/config/phishing-policy.toml` takes effect without a restart.
+
 ## Project Layout
 
 ```
 riggs/
 ├── Cargo.toml                 # Rust workspace root
-├── crates/                    # 23 Rust crates (agent)
+├── crates/                    # 26 Rust crates (agent)
 │   ├── riggs-daemon/          #   Daemon binary
 │   ├── riggs-cli/             #   CLI binary
 │   ├── riggs-dlp/             #   DLP module
@@ -175,10 +246,12 @@ riggs/
 │   ├── priv/repo/migrations/  #   Meta DB migrations
 │   ├── priv/tenant_repo/      #   Tenant DB migrations
 │   └── proto/                 #   gRPC protobuf definitions
-├── extensions/                # macOS System Extension (Swift)
-│   └── riggs-filter/          #   NEFilterDataProvider (egress + DLP), host app, build.sh
+├── extensions/
+│   ├── riggs-filter/          #   macOS System Extension (Swift): NEFilterDataProvider (egress + DLP), host app, build.sh
+│   └── riggs-browser/         #   Chromium extension for phishing protection (JavaScript): ext/ is what a browser loads
 ├── config/                    # Agent configuration
 │   ├── riggs.toml             #   Main agent config
+│   ├── phishing-policy.toml   #   Phishing policy (mode, thresholds, weights, phrases)
 │   ├── dlp-policy.toml        #   Default DLP policy
 │   └── policies/              #   Example DLP policies
 ├── docker-compose.yml         # Full local dev stack
@@ -193,7 +266,7 @@ riggs/
 │   ├── COLD_STORAGE.md        #   Archive/retention design
 │   └── ARCHITECTURE_NOTES.md  #   Tech stack + process architecture
 ├── docs/                      # Agent design docs
-├── install/                   # macOS installer scripts
+├── install/                   # macOS installer scripts, launchd plists, native-messaging host manifest
 └── rules/                     # Detection rules (YARA, TOML)
 ```
 
@@ -302,5 +375,8 @@ See `murtaugh/proto/README.md` for protoc installation and details.
 
 | Variable | Default | Description |
 |---|---|---|
-| `RIGGS_SOCKET` | /var/run/riggs.sock | IPC socket path |
-| `RIGGS_CONFIG` | /etc/riggs/riggs.toml | Config file path |
+| `RIGGS_SOCKET` | /var/run/riggs.sock | IPC socket path for the clients: `riggs` (the `--socket` option overrides it), the menubar app and `riggs-browser-host`. The daemon takes its socket from `[comms] socket_path` |
+
+The daemon has no variable for the config file: it reads `/etc/riggs/riggs.toml`,
+and failing that `config/riggs.toml` relative to its working directory. It finds
+`phishing-policy.toml` the same way.

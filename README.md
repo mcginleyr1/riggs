@@ -47,6 +47,10 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
 - **Network discovery** — passive and active local network mapping
 - **Remote shell** — authenticated, encrypted investigation terminal
 - **Menubar app** — macOS status bar with live threat status
+- **Phishing protection (browser)** — a Chromium extension reports the mail opened in Gmail and
+  the pages that ask for a password; the daemon judges them against where this user logs in and
+  either records what it would flag (monitor mode, the default) or shows a warning (warn mode).
+  Not yet run in a real browser; what it stores and what it cannot see are in `docs/PHISHING.md`
 
 ## Quick Start
 
@@ -89,6 +93,14 @@ extensions/riggs-filter/build.sh --app-profile App.provisionprofile \
     --extension-profile Extension.provisionprofile
 ```
 
+Phishing protection also needs a browser extension. `install.sh` installs
+everything around it (the native-messaging host, its manifests for Chrome,
+Chromium and Edge, and for Brave when that browser has been run by your user,
+and `/etc/riggs/phishing-policy.toml`) and copies the
+extension to `/usr/local/share/riggs/browser-extension`, but a browser only
+takes an unpacked extension by hand: load that directory at `chrome://extensions`
+once per browser profile. See "Enabling it" in `docs/PHISHING.md`.
+
 ### Verify
 
 ```
@@ -115,6 +127,8 @@ crates/
   riggs-behavioral-ai/    Behavioral sequence analysis via ONNX
   riggs-rules/            YARA-X, IOC matching, custom TOML rules, hot-reload
   riggs-dlp/              Data loss prevention correlator and policy engine
+  riggs-phishing/         Phishing decision engine (domains, lookalike rules, cues, policy);
+                          examples/ holds the offline measurement tools
   riggs-intel/            Threat feeds, bloom filters, verdict caching
   riggs-storyline/        Process-tree correlation
   riggs-response/         Kill, quarantine, network containment
@@ -124,15 +138,19 @@ crates/
   riggs-device-control/   USB/Bluetooth policy enforcement
   riggs-vuln/             CVE scanning via OSV feeds
   riggs-shell/            Authenticated remote investigation terminal
-  riggs-cli/              `riggs` command-line tool
+  riggs-cli/              `riggs` command-line tool, and `riggs-browser-host`, the
+                          native-messaging host a browser starts to reach the daemon
   riggs-daemon/           `riggs-daemon` binary, supervisor, lifecycle
   riggs-menubar/          macOS menu bar status app
 extensions/
   riggs-filter/           macOS Network Extension for egress/DLP flow blocking (Swift)
                           and its host app "Riggs Filter.app"; build.sh builds both
+  riggs-browser/          Chromium extension for phishing protection (plain JavaScript, no
+                          build step): ext/ is the directory a browser loads, test/ its tests
 config/
   riggs.toml              Main daemon configuration
   dlp-policy.toml         Default DLP policy (hot-reloadable)
+  phishing-policy.toml    Phishing policy: mode, thresholds, cue weights, phrase lists (hot-reloadable)
   policies/               Example DLP policies for common scenarios
 rules/
   default/                Shipped YARA rules, IOC lists and custom rules (install.sh copies to /etc/riggs/rules)
@@ -140,6 +158,7 @@ install/
   install.sh              macOS installer
   uninstall.sh            macOS uninstaller
   launchd/                launchd plist files
+  native-messaging/       Native-messaging host manifest (install.sh copies it for each browser)
 docs/                     Architecture and design documents
 ```
 
@@ -217,6 +236,7 @@ riggs intel [status|update]   Threat intelligence feeds (update = refresh now)
 riggs dlp [status|policy]     DLP module status and active policy
 riggs egress [status|allow|deny|mode]  Egress allowlist status, edits, and off/monitor/enforce
 riggs vuln update             Scan installed packages against OSV.dev, report to console
+riggs phishing [status|recent|stats|logins|trust|forget|mode]  Phishing protection: mode, logged checks, known logins
 ```
 
 ## Detection Pipeline
@@ -269,12 +289,14 @@ make clippy              # clippy, warnings are errors
 make test                # run all tests
 cargo test -p riggs-dlp  # test a specific crate
 swift test --package-path extensions/riggs-filter   # filter SNI/domain logic
+npm --prefix extensions/riggs-browser test          # browser extension (after one `npm ci`)
+npm --prefix extensions/riggs-browser run lint
 ```
 
 CI runs the same checks on Linux, plus `mix format --check-formatted`,
 `mix credo` and `mix test` for Murtaugh (see `DEVELOPMENT.md`).
 
-The workspace has 25 crates. Each crate is independently testable. See
+The workspace has 26 crates. Each crate is independently testable. See
 `docs/DEVELOPMENT_PHASES.md` for the implementation roadmap.
 
 ## Documentation
@@ -293,6 +315,8 @@ The workspace has 25 crates. Each crate is independently testable. See
 | `docs/FEATURES.md` | Network discovery, device control, vuln scanning, shell |
 | `docs/DLP_IMPLEMENTATION_PLAN.md` | DLP module architecture and phased plan |
 | `docs/DEVELOPMENT_PHASES.md` | Five-phase development roadmap |
+| `docs/PHISHING.md` | Phishing protection: enabling it, what it stores, limits, and the extension's contract |
+| `docs/PHISHING_CUES.md` | The cues behind the phishing verdict, each with its source |
 
 ## License
 

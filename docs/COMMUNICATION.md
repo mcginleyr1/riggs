@@ -152,8 +152,10 @@ async fn handle_connection(
 }
 ```
 
-Maximum concurrent IPC connections: 16 (configurable). Connections exceeding
-the limit are queued, not rejected.
+Maximum concurrent IPC connections: 32 per pool (`[comms] ipc_max_connections`).
+The daemon's owner has a pool of its own, and every other local user shares
+one, in which a single user may hold at most 16. A connection over a limit is
+dropped with a warning in the daemon's log, not queued.
 
 ### Phishing Messages
 

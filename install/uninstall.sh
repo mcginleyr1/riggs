@@ -52,6 +52,14 @@ info "Removing binaries..."
 rm -f /usr/local/bin/riggs
 rm -f /usr/local/bin/riggs-daemon
 rm -f /usr/local/bin/riggs-menubar
+rm -f /usr/local/bin/riggs-browser-host
+
+info "Removing the browser extension and native-messaging manifests..."
+rm -rf /usr/local/share/riggs
+rm -f "/Library/Google/Chrome/NativeMessagingHosts/com.riggs.browser.json"
+rm -f "/Library/Application Support/Chromium/NativeMessagingHosts/com.riggs.browser.json"
+rm -f "/Library/Microsoft/Edge/NativeMessagingHosts/com.riggs.browser.json"
+rm -f "$REAL_HOME/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.riggs.browser.json"
 
 info "Removing log files..."
 rm -rf /var/log/riggs
@@ -84,6 +92,7 @@ echo "  Summary:"
 echo "    - Network filter:  deactivated and removed (if it was installed)"
 echo "    - Launchd plists:  removed"
 echo "    - Binaries:        removed"
+echo "    - Browser:         extension files and native-messaging manifests removed"
 echo "    - Logs:            removed"
 if [[ "$remove_data" =~ ^[Yy]$ ]]; then
     echo "    - Data:            removed"
@@ -95,3 +104,6 @@ if [[ "$remove_config" =~ ^[Yy]$ ]]; then
 else
     echo "    - Config:          kept (/etc/riggs)"
 fi
+echo ""
+echo "  A browser keeps its entry for the Riggs extension until you remove it there:"
+echo "  open chrome://extensions in each profile it was loaded into."

@@ -259,3 +259,95 @@ content filter when asked. Check it any time with:
 (`BUILD_NUMBER`) because macOS only replaces an active extension whose
 version changed.
 
+## Phishing protection (browser)
+
+The feature is described in `docs/PHISHING.md`: a Chromium extension reports
+the Gmail messages you open and the password pages you visit, and the daemon
+judges them. Standalone, nothing changes about where the data goes: it stays on
+the host. The daemon decides, and no console is involved.
+
+It is off until the daemon finds `phishing-policy.toml` at startup
+(`/etc/riggs/phishing-policy.toml`, then `config/phishing-policy.toml` relative
+to the daemon's working directory). The shipped file starts in `monitor` mode:
+it records what it would flag and shows nothing. Switch with
+`sudo riggs phishing mode warn` once you have read `riggs phishing recent`.
+
+### macOS
+
+`sudo install/install.sh` does all of it except one step: it installs
+`riggs-browser-host`, the native-messaging manifest for Chrome, Chromium and
+Edge (and for Brave, when `~/Library/Application Support/BraveSoftware/Brave-Browser`
+exists), the policy file and the extension (to
+`/usr/local/share/riggs/browser-extension`). Then, once per browser profile,
+open `chrome://extensions`, turn on "Developer mode", choose "Load unpacked"
+and select that directory. `docs/PHISHING.md`, "Enabling it", has the details.
+
+### Linux
+
+There is no installer. The Rust side (engine, store, daemon, CLI, native host)
+builds, lints clean and passes its tests on Linux (the format, clippy and test
+gate, run in a `rust:1.99` container). The steps below have not been carried out
+by anyone: no host was installed, no manifest placed, no browser talked to the
+host. The paths are the ones Chrome's and Edge's documentation give.
+
+1. Build and install the host and the policy, as root:
+
+   ```
+   cargo build --release
+   install -m 755 target/release/riggs-browser-host /usr/local/bin/riggs-browser-host
+   install -d -m 755 /etc/riggs
+   install -m 644 config/phishing-policy.toml /etc/riggs/phishing-policy.toml
+   ```
+
+   If `/etc/riggs/phishing-policy.toml` exists, keep it: an owner may have
+   changed the mode. Start (or restart) the daemon after the policy is in
+   place; it reads the file once at startup, and watches it afterwards.
+
+2. Install the extension where only root can change it, so that a process
+   running as you cannot alter what the browser loads:
+
+   ```
+   install -d -m 755 /usr/local/share/riggs
+   cp -R extensions/riggs-browser/ext /usr/local/share/riggs/browser-extension
+   chown -R root:root /usr/local/share/riggs/browser-extension
+   chmod -R u=rwX,go=rX /usr/local/share/riggs/browser-extension
+   ```
+
+3. Install the native-messaging manifest, `install/native-messaging/com.riggs.browser.json`
+   (its `path` is `/usr/local/bin/riggs-browser-host`), in the system-wide
+   directory of each browser you use, owned by root, mode 644:
+
+   | Browser | Directory |
+   |---|---|
+   | Google Chrome | `/etc/opt/chrome/native-messaging-hosts/` |
+   | Chromium | `/etc/chromium/native-messaging-hosts/` |
+   | Microsoft Edge | `/etc/opt/edge/native-messaging-hosts/` |
+
+   ```
+   install -d -m 755 /etc/opt/chrome/native-messaging-hosts
+   install -m 644 install/native-messaging/com.riggs.browser.json /etc/opt/chrome/native-messaging-hosts/com.riggs.browser.json
+   ```
+
+   Brave documents no system-wide directory. Its per-user directory is
+   commonly given as `~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/`
+   (owned by you, not root); that path comes from third-party descriptions and
+   is unverified. Browsers installed as snap or flatpak packages are
+   sandboxed, and whether they read these directories or can start a host in
+   `/usr/local/bin` was not checked.
+
+4. In each browser profile, open `chrome://extensions` (`edge://extensions` in
+   Edge), turn on "Developer mode", choose "Load unpacked" and select
+   `/usr/local/share/riggs/browser-extension`. A browser takes an unpacked
+   extension only by hand. The extension's ID is fixed by the `key` in its
+   manifest, and the native-messaging manifest allows only that ID.
+
+5. Open the extension's popup. "Monitor mode" means the browser, the host and
+   the daemon are all connected. `riggs phishing status` shows the same mode
+   and the number of known logins.
+
+The host reaches the daemon on `/var/run/riggs.sock`, or on the socket named by
+the `RIGGS_SOCKET` environment variable if the browser was started with it set.
+The daemon limits each local user to 16 simultaneous connections in a pool of
+32 (`[comms] ipc_max_connections`), because the socket is open to every local
+user.
+
