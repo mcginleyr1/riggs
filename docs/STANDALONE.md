@@ -282,6 +282,18 @@ exists), the policy file and the extension (to
 open `chrome://extensions`, turn on "Developer mode", choose "Load unpacked"
 and select that directory. `docs/PHISHING.md`, "Enabling it", has the details.
 
+### Outlook for Mac (opt-in)
+
+`sudo install/install.sh --outlook` also installs `riggs-mailbridge`, the
+add-in's files (root-owned, in `/usr/local/share/riggs/outlook-addin`) and a
+per-user LaunchAgent, and sets up the bridge's state as you. Without the option
+none of it is installed. The installer never trusts a certificate and never adds
+the add-in to a mailbox: it prints those two steps for you to take. The sensor
+reaches the daemon over the same local socket and checks mail only while its
+pane is open; nobody has run it in Outlook. Steps, storage, renewal and removal
+are in `docs/PHISHING.md`, "Outlook for Mac". `sudo install/uninstall.sh`
+removes it whether or not it was installed with the option.
+
 ### Linux
 
 There is no installer. The Rust side (engine, store, daemon, CLI, native host)
