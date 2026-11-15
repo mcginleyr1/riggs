@@ -3,14 +3,17 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use riggs_platform::{NetworkContainment, ProcessControl};
+use riggs_types::config::{ResponseMode, ResponseOutcome};
 use riggs_types::errors::RiggsError;
-use riggs_types::events::EventId;
+use riggs_types::events::ProcessContext;
+use riggs_types::verdict::MergedVerdict;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::actions::{ResponseAction, ResponseRecord};
+use crate::policy::ResponsePolicy;
 use crate::snapshots::SnapshotStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,11 +229,55 @@ impl ResponseExecutor {
         self
     }
 
-    pub async fn execute(&self, action: ResponseAction) -> Result<ResponseRecord, RiggsError> {
-        let id = Uuid::now_v7();
-        let event_id = EventId::new();
+    /// Apply the policy's actions for a detection as `mode` allows, returning
+    /// one record per action. `Off` evaluates nothing.
+    pub async fn respond(
+        &self,
+        policy: &ResponsePolicy,
+        mode: ResponseMode,
+        verdict: &MergedVerdict,
+        process: &ProcessContext,
+        target_path: Option<&Path>,
+    ) -> Vec<ResponseRecord> {
+        if mode == ResponseMode::Off {
+            return Vec::new();
+        }
+        let protected = policy.protects(process);
+        let actions = policy.evaluate(verdict, process.pid, target_path, &verdict.storyline_id);
+        let mut records = Vec::with_capacity(actions.len());
+        for action in actions {
+            let (outcome, detail) = match &action {
+                ResponseAction::KillProcess { .. } | ResponseAction::SuspendProcess { .. }
+                    if protected =>
+                {
+                    (ResponseOutcome::Refused, "protected process".to_string())
+                }
+                _ if mode == ResponseMode::Record => {
+                    (ResponseOutcome::Recorded, "mode is record".to_string())
+                }
+                _ => match self.run(&action).await {
+                    Ok(()) => (ResponseOutcome::Executed, "ok".to_string()),
+                    Err(e) => {
+                        error!(%e, "response action failed");
+                        (ResponseOutcome::Failed, e.to_string())
+                    }
+                },
+            };
+            records.push(ResponseRecord {
+                id: Uuid::now_v7(),
+                action,
+                event_id: verdict.event_id.clone(),
+                storyline_id: Some(verdict.storyline_id.clone()),
+                executed_at: Utc::now(),
+                outcome,
+                detail,
+            });
+        }
+        records
+    }
 
-        let result = match &action {
+    async fn run(&self, action: &ResponseAction) -> Result<(), RiggsError> {
+        match action {
             ResponseAction::KillProcess { pid } => {
                 info!(pid, "killing process");
                 self.process_ctl.kill_process(*pid).await
@@ -271,38 +318,7 @@ impl ResponseExecutor {
                     "rollback needs [response] preemptive_snapshots = true".into(),
                 )),
             },
-        };
-
-        let (success, detail) = match result {
-            Ok(()) => (true, "ok".to_string()),
-            Err(e) => {
-                error!(%e, "response action failed");
-                (false, e.to_string())
-            }
-        };
-
-        Ok(ResponseRecord {
-            id,
-            action,
-            event_id,
-            storyline_id: None,
-            executed_at: Utc::now(),
-            success,
-            detail,
-        })
-    }
-
-    pub async fn execute_all(&self, actions: Vec<ResponseAction>) -> Vec<ResponseRecord> {
-        let mut records = Vec::with_capacity(actions.len());
-        for action in actions {
-            match self.execute(action).await {
-                Ok(record) => records.push(record),
-                Err(e) => {
-                    error!(%e, "failed to build response record");
-                }
-            }
         }
-        records
     }
 
     pub fn vault(&self) -> &QuarantineVault {
@@ -314,6 +330,7 @@ impl ResponseExecutor {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use riggs_types::config::ResponseConfig;
     use riggs_types::events::StorylineId;
 
     struct Inert;
@@ -392,22 +409,173 @@ mod tests {
         let with = executor(&dir, Some(store));
         let without = executor(&dir, None);
         let restored = with
-            .execute(ResponseAction::Rollback {
+            .run(&ResponseAction::Rollback {
                 storyline_id: storyline.clone(),
             })
-            .await
-            .unwrap();
+            .await;
         let disabled = without
-            .execute(ResponseAction::Rollback {
+            .run(&ResponseAction::Rollback {
                 storyline_id: storyline,
             })
-            .await
-            .unwrap();
+            .await;
         let content = std::fs::read(&file).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
-        assert!(restored.success);
+        assert!(restored.is_ok());
         assert_eq!(content, b"original");
-        assert!(!disabled.success);
+        assert!(disabled.is_err());
+    }
+
+    /// Records every pid it is asked to kill.
+    struct Killer(Arc<std::sync::Mutex<Vec<u32>>>);
+
+    #[async_trait]
+    impl ProcessControl for Killer {
+        async fn kill_process(&self, pid: u32) -> Result<(), RiggsError> {
+            self.0.lock().unwrap().push(pid);
+            Ok(())
+        }
+        async fn suspend_process(&self, _pid: u32) -> Result<(), RiggsError> {
+            Ok(())
+        }
+        async fn resume_process(&self, _pid: u32) -> Result<(), RiggsError> {
+            Ok(())
+        }
+    }
+
+    fn malicious_critical() -> MergedVerdict {
+        use riggs_types::events::{EventId, StorylineId};
+        use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
+        let event_id = EventId::new();
+        let verdict = Verdict::new(
+            event_id.clone(),
+            ThreatLevel::Malicious,
+            0.99,
+            DetectionSource::StaticAI,
+            "sample",
+        );
+        MergedVerdict::from_verdicts(event_id, StorylineId::new(), vec![verdict])
+    }
+
+    fn process(path: &str) -> ProcessContext {
+        ProcessContext {
+            pid: 4321,
+            ppid: 1,
+            name: path.rsplit('/').next().unwrap().into(),
+            path: path.into(),
+            cmdline: path.into(),
+            user: "501".into(),
+            storyline_id: riggs_types::events::StorylineId::new(),
+        }
+    }
+
+    /// What `respond` records and which pids it kills, for a critical verdict on
+    /// `process_path` with a real file to quarantine.
+    async fn respond_to_critical(
+        mode: ResponseMode,
+        process_path: &str,
+        config: &ResponseConfig,
+    ) -> (Vec<(String, ResponseOutcome)>, Vec<u32>, bool) {
+        let dir = std::env::temp_dir().join(format!("riggs-respond-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("dropper");
+        std::fs::write(&file, b"x").unwrap();
+        let killed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let exec = ResponseExecutor::new(
+            Box::new(Killer(Arc::clone(&killed))),
+            Box::new(Inert),
+            QuarantineVault::new(dir.join("vault")),
+        );
+        let records = exec
+            .respond(
+                &ResponsePolicy::from_config(config),
+                mode,
+                &malicious_critical(),
+                &process(process_path),
+                Some(&file),
+            )
+            .await;
+        let still_there = file.exists();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let outcomes = records
+            .into_iter()
+            .map(|r| (r.action.to_string(), r.outcome))
+            .collect();
+        let killed = killed.lock().unwrap().clone();
+        (outcomes, killed, still_there)
+    }
+
+    fn kinds(outcomes: &[(String, ResponseOutcome)]) -> Vec<(&str, ResponseOutcome)> {
+        outcomes
+            .iter()
+            .map(|(action, outcome)| (action.split(' ').next().unwrap(), *outcome))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn record_mode_runs_nothing_and_reports_every_action() {
+        let (outcomes, killed, file_kept) = respond_to_critical(
+            ResponseMode::Record,
+            "/tmp/evil",
+            &ResponseConfig::default(),
+        )
+        .await;
+
+        assert_eq!(
+            kinds(&outcomes),
+            vec![
+                ("Kill", ResponseOutcome::Recorded),
+                ("Quarantine", ResponseOutcome::Recorded),
+                ("Rollback", ResponseOutcome::Recorded),
+            ]
+        );
+        assert!(killed.is_empty());
+        assert!(file_kept);
+    }
+
+    #[tokio::test]
+    async fn act_mode_runs_the_actions() {
+        let (outcomes, killed, file_kept) =
+            respond_to_critical(ResponseMode::Act, "/tmp/evil", &ResponseConfig::default()).await;
+
+        assert_eq!(
+            kinds(&outcomes),
+            vec![
+                ("Kill", ResponseOutcome::Executed),
+                ("Quarantine", ResponseOutcome::Executed),
+                // No snapshot store in this executor.
+                ("Rollback", ResponseOutcome::Failed),
+            ]
+        );
+        assert_eq!(killed, vec![4321]);
+        assert!(!file_kept);
+    }
+
+    #[tokio::test]
+    async fn off_mode_records_nothing() {
+        let (outcomes, killed, file_kept) =
+            respond_to_critical(ResponseMode::Off, "/tmp/evil", &ResponseConfig::default()).await;
+
+        assert!(outcomes.is_empty());
+        assert!(killed.is_empty());
+        assert!(file_kept);
+    }
+
+    #[tokio::test]
+    async fn a_protected_process_is_not_killed() {
+        let config = ResponseConfig::default();
+        let launchd = config.protected_processes[0].clone();
+        let (outcomes, killed, _) = respond_to_critical(ResponseMode::Act, &launchd, &config).await;
+
+        assert_eq!(kinds(&outcomes)[0], ("Kill", ResponseOutcome::Refused));
+        assert!(killed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_process_only_named_like_a_protected_path_is_killed() {
+        let config = ResponseConfig::default();
+        let (_, killed, _) = respond_to_critical(ResponseMode::Act, "/tmp/launchd", &config).await;
+
+        assert_eq!(killed, vec![4321]);
     }
 }

@@ -323,6 +323,35 @@ impl RiggsStore {
         Ok(())
     }
 
+    /// The newest `limit` response records, oldest first (UUIDv7 keys are time-ordered).
+    pub fn get_recent_responses(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<riggs_response_record::ResponseRecordData>, RiggsError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let table = read_txn
+            .open_table(RESPONSE_LOG_TABLE)
+            .map_err(|e| RiggsError::Store(e.to_string()))?;
+        let mut records = Vec::new();
+        for entry in table
+            .iter()
+            .map_err(|e| RiggsError::Store(e.to_string()))?
+            .rev()
+            .take(limit)
+        {
+            let (_, value) = entry.map_err(|e| RiggsError::Store(e.to_string()))?;
+            records.push(
+                serde_json::from_slice(&decode(value.value()))
+                    .map_err(|e| RiggsError::Store(e.to_string()))?,
+            );
+        }
+        records.reverse();
+        Ok(records)
+    }
+
     pub(crate) fn db(&self) -> &Database {
         &self.db
     }
@@ -356,6 +385,7 @@ fn event_storyline_id(event: &RiggsEvent) -> Option<&StorylineId> {
 /// (riggs-store cannot depend on riggs-response).
 pub mod riggs_response_record {
     use chrono::{DateTime, Utc};
+    use riggs_types::config::ResponseOutcome;
     use riggs_types::events::EventId;
     use serde::{Deserialize, Serialize};
     use uuid::Uuid;
@@ -363,10 +393,12 @@ pub mod riggs_response_record {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ResponseRecordData {
         pub id: Uuid,
+        /// The action and its target, e.g. "Kill process (PID 42)".
         pub action_description: String,
+        /// The detection this action answers.
         pub event_id: EventId,
         pub executed_at: DateTime<Utc>,
-        pub success: bool,
+        pub outcome: ResponseOutcome,
         pub detail: String,
     }
 }
@@ -420,6 +452,32 @@ mod tests {
 
         assert!(store.get_event(e1.event_id()).unwrap().is_some());
         assert!(store.get_event(e2.event_id()).unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn response_records_round_trip_newest_window_oldest_first() {
+        let path = tmp_db();
+        let store = RiggsStore::new(&path).unwrap();
+        for detail in ["a", "b", "c"] {
+            store
+                .store_response_record(&riggs_response_record::ResponseRecordData {
+                    id: uuid::Uuid::now_v7(),
+                    action_description: "Kill process (PID 42)".into(),
+                    event_id: EventId::new(),
+                    executed_at: chrono::Utc::now(),
+                    outcome: riggs_types::config::ResponseOutcome::Recorded,
+                    detail: detail.into(),
+                })
+                .unwrap();
+        }
+        let details: Vec<_> = store
+            .get_recent_responses(2)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.detail)
+            .collect();
+        assert_eq!(details, ["b", "c"]);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use riggs_types::config::ResponseOutcome;
 use riggs_types::events::RiggsEvent;
 use riggs_types::phishing::{PhishingRequest, PhishingResponse};
 use riggs_types::verdict::MergedVerdict;
@@ -14,6 +15,7 @@ pub enum ClientMessage {
     QueryThreats {
         min_severity: String,
     },
+    QueryResponses,
     GetConfig,
     UpdateConfig {
         key: String,
@@ -65,6 +67,7 @@ pub enum DaemonMessage {
     },
     Events(Vec<RiggsEvent>),
     Threats(Vec<MergedVerdict>),
+    Responses(Vec<ResponseEntry>),
     Quarantine(Vec<QuarantinedFile>),
     Config(String),
     IntelStatus {
@@ -98,6 +101,18 @@ pub enum DaemonMessage {
         process_rules: usize,
     },
     Phishing(PhishingResponse),
+}
+
+/// What the response engine did, or would have done, for one detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseEntry {
+    /// The detection (a threat's event id) the action answers.
+    pub event_id: String,
+    pub at: String,
+    /// The action and its target.
+    pub action: String,
+    pub outcome: ResponseOutcome,
+    pub detail: String,
 }
 
 /// A file held in the daemon's quarantine vault.

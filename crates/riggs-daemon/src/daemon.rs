@@ -14,7 +14,7 @@ use riggs_rules::{CustomRuleEngine, Ioc, IocMatcher, IocType, RulesStage, YaraEn
 use riggs_static_ai::StaticAiStage;
 use riggs_store::RiggsStore;
 use riggs_storyline::StorylineCorrelator;
-use riggs_types::config::RiggsConfig;
+use riggs_types::config::{ResponseMode, RiggsConfig};
 use riggs_types::errors::RiggsError;
 use riggs_types::events::{FileAction, NetworkDirection, RiggsEvent};
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
@@ -33,6 +33,21 @@ impl riggs_comms::StoreQuery for StoreAdapter {
 
     fn threats_above_clean(&self, limit: usize) -> Vec<MergedVerdict> {
         self.0.get_verdicts_above_clean(limit).unwrap_or_default()
+    }
+
+    fn recent_responses(&self, limit: usize) -> Vec<riggs_comms::ResponseEntry> {
+        self.0
+            .get_recent_responses(limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| riggs_comms::ResponseEntry {
+                event_id: r.event_id.to_string(),
+                at: r.executed_at.to_rfc3339(),
+                action: r.action_description,
+                outcome: r.outcome,
+                detail: r.detail,
+            })
+            .collect()
     }
 }
 
@@ -777,7 +792,9 @@ impl RiggsDaemon {
         });
 
         // -- Response executor --
-        let policy = riggs_response::ResponsePolicy::default();
+        let policy = Arc::new(riggs_response::ResponsePolicy::from_config(
+            &self.config.response,
+        ));
         let vault = riggs_response::QuarantineVault::new(PathBuf::from(
             &self.config.response.quarantine_path,
         ));
@@ -1006,8 +1023,8 @@ impl RiggsDaemon {
             drop(dlp_rx);
         }
 
-        // -- Config for auto-respond, captured before entering the loop --
-        let auto_respond = self.config.response.auto_respond;
+        let response_mode = self.config.response.mode;
+        info!(?response_mode, "response mode");
         let supervisor_check_interval =
             Duration::from_secs(self.config.engine.health_check_secs.max(1));
 
@@ -1153,31 +1170,52 @@ impl RiggsDaemon {
                             "threat detected"
                         );
 
-                        if auto_respond {
-                            let target_pid = event.process_context().pid;
+                        if response_mode != ResponseMode::Off {
+                            let (exec, policy, store) =
+                                (Arc::clone(&executor), Arc::clone(&policy), Arc::clone(&store));
+                            let (merged, process) =
+                                (merged.clone(), event.process_context().clone());
                             let target_path = match &event {
-                                RiggsEvent::File(fe) => Some(std::path::Path::new(fe.path.as_str())),
+                                RiggsEvent::File(fe) => Some(PathBuf::from(&fe.path)),
                                 _ => None,
                             };
-                            let actions =
-                                policy.evaluate(&merged, target_pid, target_path, &storyline_id);
-                            if !actions.is_empty() {
-                                let exec = Arc::clone(&executor);
-                                tokio::spawn(async move {
-                                    let records = exec.execute_all(actions).await;
-                                    for record in &records {
-                                        if record.success {
-                                            info!(action = %record.action, "response action executed");
-                                        } else {
-                                            warn!(
-                                                action = %record.action,
-                                                detail = %record.detail,
-                                                "response action failed"
-                                            );
-                                        }
+                            tokio::spawn(async move {
+                                let records = exec
+                                    .respond(
+                                        &policy,
+                                        response_mode,
+                                        &merged,
+                                        &process,
+                                        target_path.as_deref(),
+                                    )
+                                    .await;
+                                for record in records {
+                                    info!(
+                                        action = %record.action,
+                                        outcome = %record.outcome,
+                                        detail = %record.detail,
+                                        "response action"
+                                    );
+                                    let stored = riggs_store::riggs_response_record::ResponseRecordData {
+                                        id: record.id,
+                                        action_description: record.action.to_string(),
+                                        event_id: record.event_id,
+                                        executed_at: record.executed_at,
+                                        outcome: record.outcome,
+                                        detail: record.detail,
+                                    };
+                                    let store = Arc::clone(&store);
+                                    match tokio::task::spawn_blocking(move || {
+                                        store.store_response_record(&stored)
+                                    })
+                                    .await
+                                    {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(e)) => error!(error = %e, "response record not stored"),
+                                        Err(e) => error!(error = %e, "response record task failed"),
                                     }
-                                });
-                            }
+                                }
+                            });
                         }
                     }
 

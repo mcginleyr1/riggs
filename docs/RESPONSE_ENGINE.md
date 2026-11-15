@@ -255,141 +255,80 @@ sensor (Endpoint Security, fanotify) lands.
 
 ## Policy Engine
 
-Response actions are governed by policies defined in TOML files.
+The policy is built into the daemon (`ResponsePolicy` in
+`crates/riggs-response/src/policy.rs`). There are no policy files and no
+approval queue: an action either runs, is recorded as not run, or is refused.
+The `[response]` table of `riggs.toml` shapes the policy.
 
-### Policy File Location
+### Rules
 
-```
-config/policies/default.toml   # shipped defaults
-config/policies/custom.toml    # operator overrides
-```
+The first rule whose threat level and conditions match the verdict selects
+the actions; the rest are not consulted.
 
-Custom policies override defaults. Policies are merged at load time.
+| Verdict | Condition | Actions |
+|---|---|---|
+| Malicious | a verdict with confidence 0.95 or more | kill the acting process, quarantine the file, roll back the storyline |
+| Malicious | none | quarantine the file, roll back the storyline |
+| Suspicious | none | none |
 
-### Policy Schema
+An action whose target cannot be resolved is dropped: no kill without a pid
+above 1 (and never the daemon's own), no quarantine without a file path.
+
+### Configuration
 
 ```toml
 [response]
-# Global response settings
-enabled = true
-dry_run = false  # if true, log actions but don't execute
-auto_respond = true  # if false, queue actions for manual approval
-
-[response.thresholds]
-# Minimum storyline score to trigger each action
-process_kill = 0.9
-process_suspend = 0.7
-file_quarantine = 0.8
-file_delete = 0.95
-network_contain = 0.95
-rollback = 0.85
-
-[response.process]
-kill_children = true
-graceful_first = true
-graceful_timeout_secs = 5
-
-[response.quarantine]
-vault_path = "/var/lib/riggs/quarantine"
-retention_days = 30
-encrypt = true
-max_file_size_mb = 500  # skip quarantine for files larger than this
-
-[response.containment]
-mode = "full"
-allowed_endpoints = ["10.0.0.1:443"]
-
-[response.rollback]
-preemptive_snapshots = true
-snapshot_path = "/var/lib/riggs/snapshots"
-max_snapshot_size_mb = 1000
-
-# Per-severity action mapping
-[[response.rules]]
-severity = "critical"
-actions = ["process_kill", "file_quarantine", "network_contain"]
-
-[[response.rules]]
-severity = "high"
-actions = ["process_suspend", "file_quarantine"]
-
-[[response.rules]]
-severity = "medium"
-actions = ["file_quarantine"]
-
-# Process allowlist - never kill these
-[response.allowlist]
-process_paths = [
-    "/usr/sbin/sshd",
-    "/usr/libexec/sshd-keygen-wrapper",
-    "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
-]
+mode = "record"                # "off", "record" or "act"
+kill_on_critical = true        # false removes the kill action from the rules
+quarantine_on_malicious = true # false removes the quarantine action from the rules
+protected_processes = ["/sbin/launchd", "..."]
 ```
 
-### Policy Evaluation
+`mode` has three values:
 
-When the engine dispatches a response action:
+- `off`: detections are not evaluated and nothing is recorded.
+- `record`: the rules are evaluated and each action they select is stored
+  with the outcome `recorded only`. Nothing runs. This is the shipped value,
+  for judging what the rules would do before letting them act.
+- `act`: the actions run, and each is stored with its result.
 
-1. Look up the storyline's severity in the policy rules.
-2. Determine the allowed actions for that severity.
-3. Check if the target process/file is in the allowlist.
-4. If `dry_run` is true, log the intended action and skip execution.
-5. If `auto_respond` is false, write the action to a pending queue in the
-   store. An operator must approve via CLI.
-6. Otherwise, execute the action.
+`auto_respond` no longer exists. A file that still contains it fails to load,
+and so does any other unknown key in `[response]`.
 
-### Policy Hot-Reload
+`kill_on_critical` and `quarantine_on_malicious` each remove one action from
+the rules. They do not change the other action or the verdict.
 
-Policy files are monitored by the same `notify` watcher as rules. When a
-policy file changes:
+### Protected processes
 
-1. The new policy is parsed and validated.
-2. If valid, it replaces the active policy.
-3. If invalid, the old policy remains active and an error is logged.
+`protected_processes` lists executable paths that kill and suspend never
+target. An entry starting with `/` must equal the acting process's path. An
+entry without one matches any process with that name or executable file
+name, which a malicious process can claim for itself, so prefer full paths.
+The shipped list is the three macOS processes whose death ends the session or
+the machine: launchd, WindowServer and loginwindow; the comments in
+`config/riggs.toml` say why. A kill or suspend the list stops is stored with
+the outcome `refused`.
 
-## Audit Trail
+Protection concerns the acting process only. A file in a protected
+executable's path is still quarantined.
 
-Every response action, whether executed, skipped, or failed, is recorded in
-the audit trail.
+## Response records
 
-```rust
-pub struct ResponseAuditEntry {
-    pub audit_id: Uuid,
-    pub timestamp: DateTime<Utc>,
-    pub action: ResponseActionType,
-    pub target: ResponseTarget,
-    pub storyline_id: Uuid,
-    pub verdict_id: Uuid,
-    pub policy_rule: String,
-    pub outcome: ResponseOutcome,
-    pub duration_ms: u64,
-    pub details: serde_json::Value,
-}
+Every action the rules select is stored in the `response_log` table in redb
+(`RiggsStore::store_response_record`), pruned with the rest of the telemetry:
 
-pub enum ResponseOutcome {
-    Success,
-    Failed { error: String },
-    Skipped { reason: String },  // allowlist, dry_run, etc.
-    Pending,                     // awaiting manual approval
-    Approved,
-    Denied,
-}
+| Field | Meaning |
+|---|---|
+| `executed_at` | when the action was decided |
+| `event_id` | the detection the action answers (the id `riggs threats` shows) |
+| `action_description` | the action and its target, e.g. `Kill process (PID 42)` |
+| `outcome` | `executed`, `recorded only`, `refused` or `failed` |
+| `detail` | `ok`, the reason for a refusal, or the error of a failure |
 
-pub enum ResponseTarget {
-    Process { pid: u32, path: PathBuf },
-    File { path: PathBuf, hash: FileHash },
-    Network { mode: ContainmentMode },
-    Filesystem { paths: Vec<PathBuf> },
-}
-```
-
-The audit trail is stored in the `response_audit` table in redb and is
-queryable via the CLI:
-
-```
-riggs audit list --since "2h ago"
-riggs audit show <audit_id>
-```
+`riggs threats` prints the records under the threat they answer, so after a
+trial in `record` mode it shows what the daemon would have done to each
+detection. A threat with no record had no action selected, or was detected in
+`off` mode.
 
 ## Concurrency and Ordering
 
@@ -426,4 +365,3 @@ supervisor, which may trigger escalation policies.
 - `riggs_quarantine_vault_size_bytes` — gauge
 - `riggs_quarantine_file_count` — gauge
 - `riggs_containment_active` — boolean gauge
-- `riggs_pending_approvals` — gauge (for manual-approve mode)

@@ -64,9 +64,17 @@ ipc_max_connections = 32
 # domain_name      = "murtaugh.example.com"   # if cert CN/SAN differs from dial host
 
 [response]
-auto_respond = true
-kill_on_critical = true
-quarantine_on_malicious = true
+# "off": nothing is evaluated. "record": the policy runs and each action it would take is
+# stored as not executed (see `riggs threats`). "act": actions run and are stored.
+mode = "record"
+kill_on_critical = true                  # false removes KillProcess from the policy
+quarantine_on_malicious = true           # false removes QuarantineFile from the policy
+# Kill and suspend never target these (full paths; a bare name matches any process using it).
+protected_processes = [
+  "/sbin/launchd",                       # PID 1: its death panics the kernel
+  "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",   # draws every window
+  "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",       # owns the login session
+]
 quarantine_path = "/var/lib/riggs/quarantine"
 pf_conf_path = "/var/lib/riggs/pf-containment.conf"   # macOS containment ruleset (off /tmp)
 preemptive_snapshots = true              # copy files a threat storyline opens, for Rollback

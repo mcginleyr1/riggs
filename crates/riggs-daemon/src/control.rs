@@ -334,6 +334,29 @@ mod tests {
     }
 
     #[test]
+    fn shipped_response_table_is_record_mode_with_the_default_protected_list() {
+        use riggs_types::config::{ResponseConfig, ResponseMode};
+        let shipped: RiggsConfig = toml::from_str(CONFIG).unwrap();
+
+        assert_eq!(shipped.response.mode, ResponseMode::Record);
+        assert_eq!(
+            shipped.response.protected_processes,
+            ResponseConfig::default().protected_processes
+        );
+    }
+
+    #[test]
+    fn response_table_refuses_the_replaced_auto_respond_key_and_unknown_keys() {
+        let with = |line: &str| CONFIG.replace("mode = \"record\"", line);
+
+        let old = toml::from_str::<RiggsConfig>(&with("auto_respond = true")).unwrap_err();
+        assert!(old.to_string().contains("`mode`"), "{old}");
+        assert!(toml::from_str::<RiggsConfig>(&with("mode = \"act\"")).is_ok());
+        assert!(toml::from_str::<RiggsConfig>(&with("mode = \"sometimes\"")).is_err());
+        assert!(toml::from_str::<RiggsConfig>(&with("kill_on_critcal = false")).is_err());
+    }
+
+    #[test]
     fn detection_table_with_one_key_takes_defaults_for_the_rest() {
         let parsed: RiggsConfig = toml::from_str(&format!(
             "{}\n[detection]\ndownload_recent_hours = 2\n",
