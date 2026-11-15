@@ -343,8 +343,36 @@ and ordinary noise. It is not a guarantee against a process that deliberately
 raises alerts in thousands of other storylines to reset its own count. Other
 things also break alert-only: `merge_malicious_threshold` at or below 0.5
 makes every Suspicious verdict Malicious, and another rule in the same
-storyline can (any `sudo` exec is a High `PrivilegeEscalation`, and one Medium
-verdict alone crosses 0.5).
+storyline can (one Medium verdict alone crosses 0.5, and a `PrivilegeEscalation`
+that reaches three signals is High).
+
+### One ordinary action is never Malicious
+
+A Malicious verdict starts the response engine, so the storyline patterns in
+`tracker.rs` need two independent signals of the same attack for it. Each pattern
+below gives the level with one signal and with two.
+
+| Pattern | Signal | Alone | With a second |
+|---|---|---|---|
+| Privilege escalation | Root gained: an exec of `sudo`, `su`, `pkexec`, `doas` or `runuser`, a root exec under a non-root parent, or an OS-reported `Escalation` auth event (the same sudo seen twice, so together they count once) | nothing | |
+| | Distrusted asker: the storyline has an exec for which `LureRules::distrusts` holds (a fresh download run, a lure parent, a download piped into an interpreter, a program run from a temporary directory) | nothing | Suspicious with root gained or the auth signal |
+| | Auth: `Failed` then `Login` of one user within 60 s. No sensor produces auth events yet, so this never holds today | nothing | Malicious only with root gained **and** a distrusted asker, three signals |
+| Crypto mining | A miner's name as the program that runs (process name, basename of its path or of the command's first token), or xmrig's `--donate-level` option under any name. A miner's name in another program's arguments (`git clone .../xmrig`, `grep randomx`) is not a signal | Suspicious | Malicious |
+| | Mining-pool domain in a DNS query or answer (no sensor produces DNS events on macOS) | Suspicious | Malicious |
+| | Connection to a pool port (3333, 4444, 5555, 7777, 8333, 8888, 9999 and others): shared with everyday tools, never a detection by itself | nothing | Malicious |
+| | A burst of execs: removed, every build makes one | not a signal | |
+| Lateral movement | Three internal hosts on 22, 135, 445, 3389, 5985 or 5986 in one tree | Suspicious | Malicious |
+| | A DNS query for an address followed by a connection to it within 30 s | Suspicious | Malicious |
+| | An auth event and an internal connection by one pid within 60 s | Suspicious | Malicious |
+
+**Lateral movement cannot be Malicious today.** Its second and third signals
+need DNS and auth events, which no sensor produces, and the DNS check compares
+a query name with a destination IP string, so it holds only when the "query" is
+an IP address. A real sweep with credentials is therefore Suspicious until a DNS
+sensor reports the address a name resolved to and an auth sensor exists.
+
+Process injection, rapid file encryption and data exfiltration are unchanged;
+exfiltration already needs staging plus a corroborating signal.
 
 **What they miss.**
 

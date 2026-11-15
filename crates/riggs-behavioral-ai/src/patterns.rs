@@ -4,8 +4,17 @@ use riggs_types::events::Severity;
 pub enum BehaviorPattern {
     RapidFileEncryption,
     ProcessInjection,
-    PrivilegeEscalation,
-    LateralMovement,
+    /// `signals`: root gained (an exec or the OS's report of it, counted once),
+    /// a reason to distrust the process that asked, and an independent failed
+    /// then successful login (2 = Suspicious, 3 = Malicious).
+    PrivilegeEscalation {
+        signals: u8,
+    },
+    /// `signals`: internal-host sweep, DNS then connect, auth then connect
+    /// (1 = Suspicious, 2+ = Malicious).
+    LateralMovement {
+        signals: u8,
+    },
     /// `signals`: independent corroborating signals (1 = Suspicious, 2+ = Malicious).
     DataExfiltration {
         signals: u8,
@@ -37,9 +46,16 @@ impl BehaviorPattern {
             | Self::CredentialStoreAccess { .. } => Severity::Low,
             Self::RapidFileEncryption => Severity::Critical,
             Self::ProcessInjection => Severity::Critical,
-            Self::PrivilegeEscalation => Severity::High,
-            Self::LateralMovement => Severity::High,
-            Self::DataExfiltration { signals } | Self::CryptoMining { signals } => {
+            Self::PrivilegeEscalation { signals } => {
+                if *signals >= 3 {
+                    Severity::High
+                } else {
+                    Severity::Medium
+                }
+            }
+            Self::LateralMovement { signals }
+            | Self::DataExfiltration { signals }
+            | Self::CryptoMining { signals } => {
                 if *signals >= 2 {
                     Severity::High
                 } else {
@@ -55,12 +71,12 @@ impl BehaviorPattern {
         match self {
             Self::RapidFileEncryption => "Rapid sequential file encryption detected, consistent with ransomware behavior",
             Self::ProcessInjection => "Process memory injection detected, code injected into remote process",
-            Self::PrivilegeEscalation => "Unexpected privilege escalation detected",
-            Self::LateralMovement => "Network-based lateral movement pattern detected across hosts",
+            Self::PrivilegeEscalation { .. } => "Unexpected privilege escalation detected",
+            Self::LateralMovement { .. } => "Network-based lateral movement pattern detected across hosts",
             Self::DataExfiltration { .. } => "Archive staged then sent out of the host, possible data exfiltration",
             Self::PersistenceMechanism => "Persistence mechanism installed (LaunchDaemon, crontab, systemd, SSH authorized_keys, or registry)",
             Self::SuspiciousChildProcess => "Suspicious child process spawned from unexpected parent (e.g., shell from Office app)",
-            Self::CryptoMining { .. } => "High CPU usage combined with mining pool network connections",
+            Self::CryptoMining { .. } => "Cryptocurrency miner: miner program, mining pool domain or mining pool port",
             Self::DownloadExecuted { detail }
             | Self::LureCommand { detail }
             | Self::CredentialStoreAccess { detail } => detail,
@@ -71,8 +87,8 @@ impl BehaviorPattern {
         match self {
             Self::RapidFileEncryption => "T1486",
             Self::ProcessInjection => "T1055",
-            Self::PrivilegeEscalation => "T1548",
-            Self::LateralMovement => "T1021",
+            Self::PrivilegeEscalation { .. } => "T1548",
+            Self::LateralMovement { .. } => "T1021",
             Self::DataExfiltration { .. } => "T1041",
             Self::PersistenceMechanism => "T1543",
             Self::SuspiciousChildProcess => "T1059",
@@ -93,11 +109,19 @@ mod tests {
         for pattern in [
             |signals| BehaviorPattern::DataExfiltration { signals },
             |signals| BehaviorPattern::CryptoMining { signals },
+            |signals| BehaviorPattern::LateralMovement { signals },
         ] {
             assert_eq!(pattern(1).severity(), Severity::Medium);
             assert_eq!(pattern(2).severity(), Severity::High);
             assert_eq!(pattern(4).severity(), Severity::High);
         }
+    }
+
+    #[test]
+    fn privilege_escalation_needs_three_signals_for_high() {
+        let pattern = |signals| BehaviorPattern::PrivilegeEscalation { signals };
+        assert_eq!(pattern(2).severity(), Severity::Medium);
+        assert_eq!(pattern(3).severity(), Severity::High);
     }
 
     #[test]

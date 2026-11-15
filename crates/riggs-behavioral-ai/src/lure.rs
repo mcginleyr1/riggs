@@ -10,7 +10,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use riggs_types::config::DetectionConfig;
 use riggs_types::events::{
-    DownloadMark, FileAction, ProcessAction, ProcessContext, RiggsEvent, StorylineId,
+    DownloadMark, FileAction, ProcessAction, ProcessContext, ProcessEvent, RiggsEvent, StorylineId,
 };
 
 use crate::patterns::BehaviorPattern;
@@ -89,13 +89,32 @@ impl LureRules {
         kept
     }
 
-    /// D1: a recent download run as the executable, or handed to an interpreter.
-    fn executed_download(
-        &mut self,
+    /// Whether this exec gives a reason to distrust the process that asked for
+    /// it: a fresh download being run, a mail, browser or chat parent, a
+    /// download piped into an interpreter, or a program run from a temporary
+    /// directory. Unlike `check` it keeps no state, so a storyline can be asked
+    /// again on every event.
+    pub fn distrusts(&self, pe: &ProcessEvent) -> bool {
+        let ctx = &pe.process_context;
+        pe.download
+            .as_ref()
+            .is_some_and(|mark| self.fresh_download_run(ctx, mark, pe.timestamp).is_some())
+            || pe
+                .parent_context
+                .as_ref()
+                .is_some_and(|parent| listed(&self.config.lure_parents, &parent.path))
+            || self.lure_pipeline(ctx).is_some()
+            || self.temp_exec(ctx).is_some()
+    }
+
+    /// The download time and agent of a download younger than
+    /// `download_recent_hours` that this exec runs or hands to an interpreter.
+    fn fresh_download_run<'a>(
+        &self,
         ctx: &ProcessContext,
-        mark: &DownloadMark,
+        mark: &'a DownloadMark,
         at: DateTime<Utc>,
-    ) -> Option<BehaviorPattern> {
+    ) -> Option<(DateTime<Utc>, &'a str)> {
         let mut fields = mark.quarantine.split(';');
         let downloaded = fields
             .nth(1)
@@ -108,9 +127,17 @@ impl LureRules {
         let recent = u64::try_from(at.signed_duration_since(downloaded).num_seconds())
             .is_ok_and(|age| age < self.config.download_recent_hours.saturating_mul(3600));
         let runs_it = mark.path == ctx.path || listed(&self.config.interpreters, &ctx.path);
-        if !recent || !runs_it {
-            return None;
-        }
+        (recent && runs_it).then_some((downloaded, agent))
+    }
+
+    /// D1: a recent download run as the executable, or handed to an interpreter.
+    fn executed_download(
+        &mut self,
+        ctx: &ProcessContext,
+        mark: &DownloadMark,
+        at: DateTime<Utc>,
+    ) -> Option<BehaviorPattern> {
+        let (downloaded, agent) = self.fresh_download_run(ctx, mark, at)?;
         if self.seen_marks.len() >= MAX_SEEN_MARKS {
             self.seen_marks.clear();
         }
