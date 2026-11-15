@@ -303,6 +303,10 @@ impl RiggsDaemon {
         let (verdict_tx, verdict_rx) = mpsc::channel::<MergedVerdict>(10_000);
         let (dlp_tx, dlp_rx) = mpsc::channel::<DlpDetection>(1_000);
 
+        let export = crate::export::Export::start(&self.config.export).map_err(|e| {
+            RiggsError::Config(format!("[export] jsonl_path cannot be written: {e}"))
+        })?;
+
         // -- Shared daemon state (used by IPC server + feed dispatcher) --
         let daemon_state = Arc::new(riggs_comms::DaemonState::new());
 
@@ -472,11 +476,13 @@ impl RiggsDaemon {
             let policy_path = policy_file.unwrap_or_else(riggs_dlp::default_policy_path);
             if policy_path.parent().is_some_and(std::path::Path::exists) {
                 let watch_correlator = Arc::clone(&dlp_correlator);
+                let report = crate::export::policy_reporter(&export, "dlp");
                 self.supervisor.spawn("dlp-policy-watcher", move || {
                     let correlator = Arc::clone(&watch_correlator);
                     let path = policy_path.clone();
+                    let report = Arc::clone(&report);
                     Box::pin(async move {
-                        if let Err(e) = riggs_dlp::watch_policy(path, correlator).await {
+                        if let Err(e) = riggs_dlp::watch_policy(path, correlator, report).await {
                             tracing::error!(error = %e, "DLP policy watcher error");
                         }
                     })
@@ -533,11 +539,15 @@ impl RiggsDaemon {
             {
                 let path = egress_policy_path;
                 let watch_engine = Arc::clone(&engine);
+                let report = crate::export::policy_reporter(&export, "egress");
                 self.supervisor.spawn("egress-policy-watcher", move || {
                     let engine = Arc::clone(&watch_engine);
                     let path = path.clone();
+                    let report = Arc::clone(&report);
                     Box::pin(async move {
-                        if let Err(e) = riggs_egress::reload::watch_policy(path, engine).await {
+                        if let Err(e) =
+                            riggs_egress::reload::watch_policy(path, engine, report).await
+                        {
                             tracing::error!(error = %e, "egress policy watcher error");
                         }
                     })
@@ -739,6 +749,7 @@ impl RiggsDaemon {
         // Advice shown to a person: nothing here reaches the detection pipeline,
         // the response engine or the threat counters. The policy file is its only
         // switch; one that does not load stops startup, as a bad egress policy does.
+        let mut phishing_mode = "off".to_string();
         let phishing_writer = match riggs_phishing::reload::find_policy_file() {
             None => {
                 info!("no phishing policy file; phishing protection is off");
@@ -746,6 +757,7 @@ impl RiggsDaemon {
             }
             Some(path) => {
                 let policy = riggs_phishing::reload::load_policy_file(&path)?;
+                phishing_mode = format!("{:?}", policy.mode()).to_lowercase();
                 info!(path = %path.display(), mode = ?policy.mode(), "phishing protection initialized");
                 let policy = Arc::new(tokio::sync::watch::Sender::new(Arc::new(policy)));
                 let (adapter, writes) = crate::phishing::PhishingAdapter::new(
@@ -757,11 +769,15 @@ impl RiggsDaemon {
                 if let Ok(mut guard) = daemon_state.phishing.write() {
                     *guard = Some(Arc::new(adapter));
                 }
+                let report = crate::export::policy_reporter(&export, "phishing");
                 self.supervisor.spawn("phishing-policy-watcher", move || {
                     let policy = Arc::clone(&policy);
                     let path = path.clone();
+                    let report = Arc::clone(&report);
                     Box::pin(async move {
-                        if let Err(e) = riggs_phishing::reload::watch_policy(path, policy).await {
+                        if let Err(e) =
+                            riggs_phishing::reload::watch_policy(path, policy, report).await
+                        {
                             tracing::error!(error = %e, "phishing policy watcher error");
                         }
                     })
@@ -910,13 +926,16 @@ impl RiggsDaemon {
 
         // -- Rule hot-reload watcher --
         if yara.is_some() || local_ioc.is_some() || custom_rules.is_some() {
+            let rules_report = crate::export::policy_reporter(&export, "rules");
             self.supervisor.spawn("rule-watcher", move || {
                 let dir = rules_dir.clone();
                 let yara = yara.clone();
                 let local_ioc = local_ioc.clone();
                 let custom = custom_rules.clone();
+                let report = Arc::clone(&rules_report);
                 Box::pin(async move {
-                    let loader = riggs_rules::RuleLoader::new(dir, yara, local_ioc, custom);
+                    let loader = riggs_rules::RuleLoader::new(dir, yara, local_ioc, custom)
+                        .with_report(report);
                     if let Err(e) = loader.watch().await {
                         tracing::error!(error = %e, "rule watcher error");
                     }
@@ -1076,6 +1095,47 @@ impl RiggsDaemon {
 
         info!("riggs daemon running");
 
+        if let Some(export) = &export {
+            export.emit(
+                "daemon",
+                serde_json::json!({
+                    "state": "started",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "modes": {
+                        "response": response_mode,
+                        "egress": egress_engine.mode().as_str(),
+                        "dlp": self.config.dlp.enabled,
+                        "phishing": phishing_mode,
+                    },
+                }),
+            );
+            let (export, started) = (Arc::clone(export), std::time::Instant::now());
+            let (events, threats) = (Arc::clone(&events_processed), Arc::clone(&threats_detected));
+            let every = Duration::from_secs(self.config.export.heartbeat_secs.get());
+            self.supervisor.spawn("export-heartbeat", move || {
+                let (export, events, threats) = (
+                    Arc::clone(&export),
+                    Arc::clone(&events),
+                    Arc::clone(&threats),
+                );
+                Box::pin(async move {
+                    let mut interval = tokio::time::interval(every);
+                    loop {
+                        interval.tick().await;
+                        export.emit(
+                            "daemon",
+                            serde_json::json!({
+                                "state": "heartbeat",
+                                "uptime_secs": started.elapsed().as_secs(),
+                                "events_processed": events.load(Ordering::Relaxed),
+                                "threats_detected": threats.load(Ordering::Relaxed),
+                            }),
+                        );
+                    }
+                })
+            });
+        }
+
         // -- Main event processing loop --
         let stage_timeout = Duration::from_millis(self.config.engine.stage_timeout_ms);
         let mut egress_warned = std::collections::HashSet::new();
@@ -1169,10 +1229,14 @@ impl RiggsDaemon {
                             threat = %merged.final_threat_level,
                             "threat detected"
                         );
+                        if let Some(export) = &export {
+                            export.threat(&merged, &event);
+                        }
 
                         if response_mode != ResponseMode::Off {
                             let (exec, policy, store) =
                                 (Arc::clone(&executor), Arc::clone(&policy), Arc::clone(&store));
+                            let export = export.clone();
                             let (merged, process) =
                                 (merged.clone(), event.process_context().clone());
                             let target_path = match &event {
@@ -1190,6 +1254,9 @@ impl RiggsDaemon {
                                     )
                                     .await;
                                 for record in records {
+                                    if let Some(export) = &export {
+                                        export.response(&record);
+                                    }
                                     info!(
                                         action = %record.action,
                                         outcome = %record.outcome,
@@ -1238,6 +1305,9 @@ impl RiggsDaemon {
             } => {}
             _ = shutdown_signal() => {
                 info!("shutdown signal received");
+                if let Some(export) = &export {
+                    export.emit("daemon", serde_json::json!({ "state": "stopping", "reason": "signal" }));
+                }
             }
             _ = async {
                 // Restart any supervised task that has died.
@@ -1276,6 +1346,10 @@ impl RiggsDaemon {
             if let Err(e) = tokio::time::timeout(Duration::from_secs(5), writer).await {
                 warn!(error = %e, "phishing writer did not flush within timeout");
             }
+        }
+
+        if let Some(export) = &export {
+            export.flush().await;
         }
 
         let stats = pipeline.stats();

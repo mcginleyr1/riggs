@@ -19,7 +19,60 @@ pub struct RiggsConfig {
     pub egress: EgressConfig,
     #[serde(default)]
     pub rules: RulesConfig,
+    #[serde(default)]
+    pub export: ExportConfig,
 }
+
+/// JSON-lines export of what the daemon decides, for a log collector to tail.
+/// Off until `jsonl_path` is set; see docs/EXPORT.md.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExportConfig {
+    pub jsonl_path: Option<String>,
+    /// The file is renamed to `<jsonl_path>.1` and restarted once it would grow past this.
+    pub max_bytes: u64,
+    /// Seconds between `daemon` heartbeat lines.
+    pub heartbeat_secs: NonZeroU64,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            jsonl_path: None,
+            max_bytes: 64 * 1024 * 1024,
+            heartbeat_secs: NonZeroU64::new(60).expect("nonzero"),
+        }
+    }
+}
+
+/// What happened to a policy or rules file the daemon watches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyChange {
+    Reloaded,
+    /// The file no longer loads and the old copy stays in force. Holds only the
+    /// first line of the error, which names the file and the line, never content.
+    Rejected(String),
+    /// The file is gone and the old copy stays in force (a rules file: the set is
+    /// rebuilt without it). Holds the file's path.
+    Deleted(String),
+}
+
+impl PolicyChange {
+    pub fn rejected(error: &impl std::fmt::Display) -> Self {
+        let text = error.to_string();
+        Self::Rejected(
+            text.lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect(),
+        )
+    }
+}
+
+/// Told about every `PolicyChange` of one policy; the daemon routes it to the export.
+pub type PolicyReport = std::sync::Arc<dyn Fn(PolicyChange) + Send + Sync>;
 
 /// Detection rule sources. YARA (`.yar`/`.yara`) and custom TOML rules are
 /// loaded recursively from `rules_dir` (e.g. `default/yara`, `custom/yara`)

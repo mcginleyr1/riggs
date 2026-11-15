@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use riggs_types::config::{PolicyChange, PolicyReport};
 use riggs_types::errors::RiggsError;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -15,6 +16,7 @@ pub struct RuleLoader {
     yara: Option<Arc<RwLock<YaraEngine>>>,
     local_ioc: Option<Arc<RwLock<IocMatcher>>>,
     custom: Option<Arc<RwLock<CustomRuleEngine>>>,
+    report: PolicyReport,
 }
 
 impl RuleLoader {
@@ -29,7 +31,13 @@ impl RuleLoader {
             yara,
             local_ioc,
             custom,
+            report: Arc::new(|_| {}),
         }
+    }
+
+    pub fn with_report(mut self, report: PolicyReport) -> Self {
+        self.report = report;
+        self
     }
 
     pub async fn watch(&self) -> Result<(), RiggsError> {
@@ -68,6 +76,12 @@ impl RuleLoader {
                     ) =>
                 {
                     info!(paths = ?event.paths, "rule files changed");
+                    if matches!(event.kind, EventKind::Remove(_)) {
+                        for path in event.paths.iter().filter(|p| !p.exists()) {
+                            (self.report)(PolicyChange::Deleted(path.display().to_string()));
+                        }
+                    }
+                    let report = Arc::clone(&self.report);
                     // Reading and compiling rules is blocking work; keep it off
                     // the async runtime.
                     let dir = self.rules_dir.clone();
@@ -75,7 +89,7 @@ impl RuleLoader {
                     let local_ioc = self.local_ioc.clone();
                     let custom = self.custom.clone();
                     let reload = tokio::task::spawn_blocking(move || {
-                        reload_affected(&dir, yara, local_ioc, custom, &event.paths)
+                        reload_affected(&dir, yara, local_ioc, custom, &event.paths, &*report)
                     });
                     if let Err(e) = reload.await {
                         warn!(error = %e, "rule reload task failed");
@@ -98,6 +112,7 @@ fn reload_affected(
     local_ioc: Option<Arc<RwLock<IocMatcher>>>,
     custom: Option<Arc<RwLock<CustomRuleEngine>>>,
     paths: &[PathBuf],
+    report: &(dyn Fn(PolicyChange) + Send + Sync),
 ) {
     let touches = |exts: &[&str]| paths.iter().any(|p| crate::has_extension(p, exts));
 
@@ -106,8 +121,12 @@ fn reload_affected(
             Ok(fresh) => {
                 *yara.write().unwrap_or_else(PoisonError::into_inner) = fresh;
                 info!("yara rules reloaded");
+                report(PolicyChange::Reloaded);
             }
-            Err(e) => warn!(error = %e, "failed to reload yara rules; keeping previous set"),
+            Err(e) => {
+                warn!(error = %e, "failed to reload yara rules; keeping previous set");
+                report(PolicyChange::rejected(&e));
+            }
         }
     }
 
@@ -115,12 +134,14 @@ fn reload_affected(
         let fresh = IocMatcher::load_dir(dir);
         info!(count = fresh.len(), "local IOC lists reloaded");
         *local_ioc.write().unwrap_or_else(PoisonError::into_inner) = fresh;
+        report(PolicyChange::Reloaded);
     }
 
     if let Some(custom) = custom.filter(|_| touches(crate::CUSTOM_RULE_EXTENSIONS)) {
         let fresh = CustomRuleEngine::load_dir(dir);
         *custom.write().unwrap_or_else(PoisonError::into_inner) = fresh;
         info!("custom rules reloaded");
+        report(PolicyChange::Reloaded);
     }
 }
 
@@ -143,7 +164,7 @@ mod tests {
             r#"rule fresh { strings: $a = "NEW_MARKER" condition: $a }"#,
         )
         .unwrap();
-        reload_affected(&dir, Some(Arc::clone(&yara)), None, None, &[rule]);
+        reload_affected(&dir, Some(Arc::clone(&yara)), None, None, &[rule], &|_| {});
         let matches = yara.read().unwrap().scan_file(&sample).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
@@ -159,7 +180,14 @@ mod tests {
 
         let list = dir.join("c2.ioc");
         std::fs::write(&list, "# c2\nip:203.0.113[.]7\ndomain:c2.example\n").unwrap();
-        reload_affected(&dir, None, Some(Arc::clone(&local_ioc)), None, &[list]);
+        reload_affected(
+            &dir,
+            None,
+            Some(Arc::clone(&local_ioc)),
+            None,
+            &[list],
+            &|_| {},
+        );
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(local_ioc.read().unwrap().len(), 2);

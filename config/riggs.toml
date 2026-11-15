@@ -82,6 +82,14 @@ snapshot_path = "/var/lib/riggs/snapshots"
 snapshot_max_file_mib = 64
 snapshot_retention_hours = 24
 
+# JSON-lines export for a log collector (Splunk, Elastic, Datadog agent...): threats, response
+# records, daemon start/stop/heartbeat, and policy reloads/rejections/deletions. See docs/EXPORT.md.
+# Off until jsonl_path is set. The file is created 0640.
+[export]
+# jsonl_path = "/var/log/riggs/events.jsonl"
+# max_bytes = 67108864                   # renamed to events.jsonl.1 and restarted past this size
+# heartbeat_secs = 60                    # alert on silence longer than a few of these
+
 # Behavioral detection tuning and signatures (adjust sensitivity per environment).
 [detection]
 exfil_outbound_threshold = 50            # external conns that corroborate archive staging as exfiltration

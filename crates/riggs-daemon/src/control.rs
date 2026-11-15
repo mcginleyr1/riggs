@@ -346,6 +346,17 @@ mod tests {
     }
 
     #[test]
+    fn shipped_export_is_off_and_refuses_unknown_keys() {
+        let shipped: RiggsConfig = toml::from_str(CONFIG).unwrap();
+        assert_eq!(shipped.export, riggs_types::config::ExportConfig::default());
+        assert!(shipped.export.jsonl_path.is_none());
+        assert!(
+            toml::from_str::<RiggsConfig>(&CONFIG.replace("[export]", "[export]\njsonl = 1"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn response_table_refuses_the_replaced_auto_respond_key_and_unknown_keys() {
         let with = |line: &str| CONFIG.replace("mode = \"record\"", line);
 
