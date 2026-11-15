@@ -7,7 +7,7 @@
 - Rust via `rustup`. The toolchain is pinned in `rust-toolchain.toml`, and
   rustup installs it on the first `cargo` run in the repo.
 - macOS 13+ or Linux
-- Root/sudo for sensor features (Endpoint Security, eBPF)
+- Root/sudo for sensor features (process and socket visibility on macOS, fanotify and eBPF on Linux). Endpoint Security is planned for macOS and needs an Apple entitlement.
 
 ### Murtaugh Console (Elixir)
 
@@ -144,7 +144,7 @@ mix credo
 mix test
 ```
 
-The agent runs as a daemon (requires root on macOS for Endpoint Security):
+The agent runs as a daemon (root on macOS so it can see every process's command line and sockets; the macOS sensor polls once a second and does not use Endpoint Security):
 
 ```sh
 sudo target/release/riggs-daemon
@@ -196,7 +196,7 @@ directory: `[store] db_path`, `[comms] socket_path` and `filter_socket_path`,
 cache_path`. To keep the daemon from doing anything else, as the run that
 tested this did, also switch off `[engine] static_ai_enabled`,
 `behavioral_ai_enabled` and `rules_enabled`, `[intel] enabled` and the
-`*_enabled` switches under `[intel.feeds]`, `[dlp] enabled`, and `[response] auto_respond`, `kill_on_critical`,
+`*_enabled` switches under `[intel.feeds]`, `[dlp] enabled`, and `[response] mode = "off"`, `kill_on_critical`,
 `quarantine_on_malicious` and `preemptive_snapshots`. Then:
 
 ```sh

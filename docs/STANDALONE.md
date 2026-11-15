@@ -91,7 +91,7 @@ credential_paths = []                # credential-store rule, off until your rea
 retention_days = 90                  # how long telemetry is kept
 
 [response]
-auto_respond = true                  # set false to alert-only
+mode = "record"                      # "off", "record" (store what it would do) or "act"
 quarantine_path = "/var/lib/riggs/quarantine"
 ```
 
@@ -247,7 +247,9 @@ sudo install/install.sh
 `build.sh` refuses a profile for the wrong App ID or without the content
 filter entitlement; it signs with `content-filter-provider-systemextension`, or
 `content-filter-provider` when a development profile grants only that. A
-Developer ID build for other Macs also needs notarization. `install.sh`
+Developer ID build for other Macs needs Developer ID profiles and
+notarization, and company-wide rollout goes through an installer package and MDM
+profiles: `docs/DEPLOYMENT.md`. `install.sh`
 copies the app to `/Applications` (macOS only activates system extensions from
 there) and runs its `--activate`; approve the extension in System Settings →
 General → Login Items & Extensions → Network Extensions, then allow the

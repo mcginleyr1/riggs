@@ -1,0 +1,87 @@
+#!/bin/bash
+# Runs as root from the Installer (an MDM runs it with no logged-in user, no $SUDO_USER, no tty).
+# $3 is the target volume. Everything below that touches launchd needs the running system.
+set -euo pipefail
+
+DEFAULTS=/usr/local/share/riggs/defaults
+BROWSER_NM=/Library/Google/Chrome/NativeMessagingHosts/com.riggs.browser.json
+
+# Root never acts on a path under a home directory: a user owns those and can replace any
+# component with a link. Per-user steps run as that user, by uid, so a planted link can only
+# reach what the user could already reach. Accounts come from the directory service, not from
+# directory names, so /Users/Shared and /Users/Guest never appear.
+local_users() {
+    dscl . -list /Users UniqueID | while read -r name uid; do
+        [[ "$uid" -ge 501 ]] || continue
+        printf '%s\t%s\n' "$uid" "$(dscl . -read "/Users/$name" NFSHomeDirectory | tail -n 1 | sed 's/^NFSHomeDirectory: //; s/^ //')"
+    done
+}
+as_user() { local uid="$1"; shift; sudo -u "#$uid" "$@" </dev/null; }
+
+# The payload cannot hold these: the Installer would overwrite an administrator's edits.
+install -d -o root -g wheel -m 755 /etc/riggs
+install -d -o root -g wheel -m 700 /var/lib/riggs
+install -d -o root -g wheel -m 750 /var/log/riggs
+for f in riggs.toml phishing-policy.toml; do
+    [[ -e "/etc/riggs/$f" ]] || install -o root -g wheel -m 644 "$DEFAULTS/$f" "/etc/riggs/$f"
+done
+
+# Rules are refreshed on every install, as install.sh does.
+install -d -o root -g wheel -m 755 /etc/riggs/rules
+ditto "$DEFAULTS/rules" /etc/riggs/rules
+chown -R root:wheel /etc/riggs/rules
+chmod -R u=rwX,go=rX /etc/riggs/rules
+
+# Brave documents no system-wide directory: a manifest goes into each user's own Brave
+# directory, for users who have run Brave. Written as that user, so it is theirs.
+while IFS=$'\t' read -r uid home; do
+    brave="$home/Library/Application Support/BraveSoftware/Brave-Browser"
+    as_user "$uid" test -d "$brave" || continue
+    # One account's browser manifest must not decide whether the machine is protected.
+    as_user "$uid" install -d -m 755 "$brave/NativeMessagingHosts" &&
+        as_user "$uid" install -m 644 "$BROWSER_NM" "$brave/NativeMessagingHosts/com.riggs.browser.json" ||
+        echo "riggs: could not write the Brave manifest for uid $uid; skipped."
+done < <(local_users)
+
+if [[ "$3" != "/" ]]; then
+    echo "riggs: target volume is $3, not the running system: daemon not loaded."
+    exit 0
+fi
+
+# launchctl exits 0 on success and a non-zero code otherwise (man launchctl, EXIT STATUS); the
+# manual does not say which code a bootstrap right after a bootout returns while the old
+# instance is still going away, so any failure is retried.
+bootstrap_with_retry() {
+    for _ in 1 2 3 4 5; do
+        launchctl bootstrap "$1" "$2" && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# The daemon is the product: whatever else fails, finish the remaining steps, then exit non-zero
+# so the MDM records a failed install.
+status=0
+launchctl bootout system/com.riggs.daemon 2>/dev/null || true
+if ! bootstrap_with_retry system /Library/LaunchDaemons/com.riggs.daemon.plist; then
+    echo "riggs: the daemon did not load after 5 attempts; run: launchctl bootstrap system /Library/LaunchDaemons/com.riggs.daemon.plist"
+    status=1
+fi
+
+# /Library/LaunchAgents is read at each login, so every agent below also starts at each user's
+# next login. A user already at the desktop gets them now; with nobody logged in (uid 0 owns
+# /dev/console) they start at the next login. The filter's activation agent exists only when the
+# package was built with --filter-app.
+console_uid=$(stat -f %u /dev/console)
+if [[ "$console_uid" -eq 0 ]]; then
+    echo "riggs: no user logged in; the agents start at the next login."
+else
+    for label in com.riggs.menubar com.riggs.filter-activate; do
+        plist="/Library/LaunchAgents/$label.plist"
+        [[ -f "$plist" ]] || continue
+        launchctl bootout "gui/$console_uid/$label" 2>/dev/null || true
+        bootstrap_with_retry "gui/$console_uid" "$plist" ||
+            echo "riggs: could not load $label for uid $console_uid; it starts at the next login."
+    done
+fi
+exit "$status"

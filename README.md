@@ -112,6 +112,14 @@ The Outlook for Mac sensor is opt-in: `sudo install/install.sh --outlook` also i
 only you can take (trust the bridge's certificate authority, add the add-in to your mailbox).
 See "Outlook for Mac" in `docs/PHISHING.md`.
 
+### Deploy to a fleet
+
+`install.sh` is for one machine with a toolchain. For Macs managed by an MDM,
+`install/pkg/build-pkg.sh` builds installer packages from built binaries,
+`install/mdm/` holds the configuration profile templates, and
+`docs/DEPLOYMENT.md` covers the rollout, what is not built yet and what only
+the owner can do at Apple.
+
 ### Verify
 
 ```
@@ -130,7 +138,7 @@ sudo install/uninstall.sh
 crates/
   riggs-types/            Shared types, event model, errors
   riggs-platform/         Platform sensor trait
-  riggs-platform-macos/   macOS sensor (Endpoint Security, FSEvents, sysinfo)
+  riggs-platform-macos/   macOS sensor (sysinfo and libproc polling, FSEvents; Endpoint Security planned)
   riggs-platform-linux/   Linux sensor (fanotify, inotify, sysinfo)
   riggs-sensor/           Event collection and normalization
   riggs-engine/           Detection pipeline, stage routing, verdict merging
