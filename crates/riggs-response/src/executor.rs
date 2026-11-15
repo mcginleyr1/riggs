@@ -237,21 +237,21 @@ impl ResponseExecutor {
         mode: ResponseMode,
         verdict: &MergedVerdict,
         process: &ProcessContext,
+        process_exited: bool,
         target_path: Option<&Path>,
     ) -> Vec<ResponseRecord> {
         if mode == ResponseMode::Off {
             return Vec::new();
         }
-        let protected = policy.protects(process);
+        let refusal = policy.signal_refusal(process, process_exited);
         let actions = policy.evaluate(verdict, process.pid, target_path, &verdict.storyline_id);
         let mut records = Vec::with_capacity(actions.len());
         for action in actions {
-            let (outcome, detail) = match &action {
-                ResponseAction::KillProcess { .. } | ResponseAction::SuspendProcess { .. }
-                    if protected =>
-                {
-                    (ResponseOutcome::Refused, "protected process".to_string())
-                }
+            let (outcome, detail) = match (&action, refusal) {
+                (
+                    ResponseAction::KillProcess { .. } | ResponseAction::SuspendProcess { .. },
+                    Some(reason),
+                ) => (ResponseOutcome::Refused, reason.to_string()),
                 _ if mode == ResponseMode::Record => {
                     (ResponseOutcome::Recorded, "mode is record".to_string())
                 }
@@ -476,6 +476,15 @@ mod tests {
         process_path: &str,
         config: &ResponseConfig,
     ) -> (Vec<(String, ResponseOutcome)>, Vec<u32>, bool) {
+        respond_to_process(mode, process_path, false, config).await
+    }
+
+    async fn respond_to_process(
+        mode: ResponseMode,
+        process_path: &str,
+        exited: bool,
+        config: &ResponseConfig,
+    ) -> (Vec<(String, ResponseOutcome)>, Vec<u32>, bool) {
         let dir = std::env::temp_dir().join(format!("riggs-respond-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("dropper");
@@ -492,6 +501,7 @@ mod tests {
                 mode,
                 &malicious_critical(),
                 &process(process_path),
+                exited,
                 Some(&file),
             )
             .await;
@@ -577,5 +587,26 @@ mod tests {
         let (_, killed, _) = respond_to_critical(ResponseMode::Act, "/tmp/launchd", &config).await;
 
         assert_eq!(killed, vec![4321]);
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_or_exited_process_is_never_killed() {
+        let config = ResponseConfig::default();
+        for (path, exited) in [("", false), ("unknown", false), ("/tmp/evil", true)] {
+            let (outcomes, killed, file_kept) =
+                respond_to_process(ResponseMode::Act, path, exited, &config).await;
+
+            assert_eq!(
+                kinds(&outcomes)[0],
+                ("Kill", ResponseOutcome::Refused),
+                "{path:?}"
+            );
+            assert_eq!(
+                kinds(&outcomes)[1],
+                ("Quarantine", ResponseOutcome::Executed)
+            );
+            assert!(killed.is_empty(), "{path:?}");
+            assert!(!file_kept);
+        }
     }
 }

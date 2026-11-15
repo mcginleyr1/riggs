@@ -10,7 +10,7 @@ sink and no syslog output.
 ```toml
 [export]
 jsonl_path = "/var/log/riggs/events.jsonl"   # unset (the shipped state): nothing is written or queued
-max_bytes = 67108864                         # default 64 MiB
+max_bytes = 67108864                         # default 64 MiB; 0 is refused
 heartbeat_secs = 60                          # default 60
 ```
 
@@ -50,9 +50,9 @@ One line for each merged verdict above Clean, when it is produced.
 | `process` | `pid`, `ppid`, `name`, `path`, `user`, `cmdline` |
 | `file` | the file path, only for file events |
 
-There is no `mitre` field and no parent process name: verdicts carry no
-technique, and a process context carries only the parent's pid. Both can be
-added when the detectors record them.
+`process.parent_name` is present only when the detection is a process event
+(file events carry just the parent's pid, `ppid`). There is no `mitre` field:
+verdicts carry no technique yet.
 
 ### `response`
 
@@ -68,8 +68,11 @@ none.
   (`off`, `monitor` or `warn`).
 - `state: "heartbeat"`: every `heartbeat_secs`, with `uptime_secs`,
   `events_processed` and `threats_detected`.
-- `state: "stopping"`, `reason: "signal"`: on SIGINT or SIGTERM. The daemon
-  waits up to five seconds for the file write before exiting.
+- `state: "stopping"` with a `reason`: `signal` (SIGINT or SIGTERM),
+  `event channel closed` (the sensors stopped) or `store writer exited`. The
+  daemon first waits up to five seconds for response actions in flight, so
+  their `response` lines precede the exit, and up to five seconds for the
+  file write.
 
 ### `policy`
 
@@ -85,8 +88,11 @@ none.
 - `deleted`: the file is gone and the daemon still holds its old copy, so
   protection continues until the next restart, which will not find the file:
   egress and DLP then fall back to `riggs.toml`, and phishing protection is
-  off (`file` is its path). For `rules`, a deleted rule file is followed by a
-  `reloaded` line: the set is rebuilt without it.
+  off (`file` is its path). For `rules`, only files the loader would load
+  (`.yar`, `.yara`, `.ioc`, `.toml`) are reported, so an editor's swap, backup
+  and lock files are not; a deleted rule file is followed by one `reloaded`
+  line, since the set is rebuilt without it. One change to rule files gives one
+  `reloaded` (or one `rejected` if the YARA set failed to compile).
 
 ## What is never exported
 
@@ -106,6 +112,12 @@ Writes never slow detection. Lines go through a queue of 10,000 to one writer
 thread. When the queue is full, or a write fails, the line is dropped and
 counted; the next line written carries `dropped: <count>`. A write error is
 logged once when it starts and once when writing recovers, not per line.
+
+The writer checks before every line that `jsonl_path` still names the file it
+holds, and reopens it if something else (logrotate, an operator) renamed or
+deleted it. If a write fails part-way (a full disk), the next line starts on a
+fresh line, so the fragment stays a line of its own and never corrupts a good
+one: a collector may see one unparseable line.
 
 ## Rotation
 

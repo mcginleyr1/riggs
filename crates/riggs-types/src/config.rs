@@ -30,7 +30,7 @@ pub struct RiggsConfig {
 pub struct ExportConfig {
     pub jsonl_path: Option<String>,
     /// The file is renamed to `<jsonl_path>.1` and restarted once it would grow past this.
-    pub max_bytes: u64,
+    pub max_bytes: NonZeroU64,
     /// Seconds between `daemon` heartbeat lines.
     pub heartbeat_secs: NonZeroU64,
 }
@@ -39,7 +39,7 @@ impl Default for ExportConfig {
     fn default() -> Self {
         Self {
             jsonl_path: None,
-            max_bytes: 64 * 1024 * 1024,
+            max_bytes: NonZeroU64::new(64 * 1024 * 1024).expect("nonzero"),
             heartbeat_secs: NonZeroU64::new(60).expect("nonzero"),
         }
     }
@@ -632,7 +632,33 @@ pub struct ResponseConfig {
 }
 
 /// Killing any of these ends the user's session or the machine's ability to
-/// run anything, whatever the verdict.
+/// run anything, whatever the verdict. The list differs per platform (the
+/// paths are what the sensor reports for a process's executable).
+#[cfg(not(target_os = "macos"))]
+fn default_protected_processes() -> Vec<String> {
+    [
+        // PID 1 on systemd hosts (the path /proc/PID/exe resolves to depends on
+        // whether /lib is a link to /usr/lib): its death takes the host down.
+        "/usr/lib/systemd/systemd",
+        "/lib/systemd/systemd",
+        // Tracks every login session; killing it logs everyone out.
+        "/usr/lib/systemd/systemd-logind",
+        "/lib/systemd/systemd-logind",
+        // The only way into a headless host; a package-manager or user file it
+        // writes would otherwise get it killed.
+        "/usr/sbin/sshd",
+        // The message bus desktop sessions and systemd services depend on.
+        "/usr/bin/dbus-daemon",
+        // Killed half-way they leave the package database inconsistent, and
+        // they write many files: a flagged one would select a kill.
+        "/usr/bin/dpkg",
+        "/usr/bin/rpm",
+    ]
+    .map(String::from)
+    .into()
+}
+
+#[cfg(target_os = "macos")]
 fn default_protected_processes() -> Vec<String> {
     [
         // PID 1: every process is its child; its death panics the kernel.

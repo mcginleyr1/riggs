@@ -343,6 +343,24 @@ mod tests {
             shipped.response.protected_processes,
             ResponseConfig::default().protected_processes
         );
+        let own_init = if cfg!(target_os = "macos") {
+            "/sbin/launchd"
+        } else {
+            "/usr/sbin/sshd"
+        };
+        assert!(shipped
+            .response
+            .protected_processes
+            .iter()
+            .any(|p| p == own_init));
+    }
+
+    #[test]
+    fn export_max_bytes_of_zero_is_refused() {
+        let zero = CONFIG.replace("[export]", "[export]\nmax_bytes = 0");
+        assert!(toml::from_str::<RiggsConfig>(&zero).is_err());
+        let one = CONFIG.replace("[export]", "[export]\nmax_bytes = 1");
+        assert!(toml::from_str::<RiggsConfig>(&one).is_ok());
     }
 
     #[test]

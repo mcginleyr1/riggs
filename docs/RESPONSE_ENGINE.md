@@ -281,7 +281,7 @@ above 1 (and never the daemon's own), no quarantine without a file path.
 mode = "record"                # "off", "record" or "act"
 kill_on_critical = true        # false removes the kill action from the rules
 quarantine_on_malicious = true # false removes the quarantine action from the rules
-protected_processes = ["/sbin/launchd", "..."]
+# protected_processes = [...]  # unset: the built-in list for this platform
 ```
 
 `mode` has three values:
@@ -304,13 +304,30 @@ the rules. They do not change the other action or the verdict.
 target. An entry starting with `/` must equal the acting process's path. An
 entry without one matches any process with that name or executable file
 name, which a malicious process can claim for itself, so prefer full paths.
-The shipped list is the three macOS processes whose death ends the session or
-the machine: launchd, WindowServer and loginwindow; the comments in
-`config/riggs.toml` say why. A kill or suspend the list stops is stored with
-the outcome `refused`.
 
+Left unset, the list is the built-in one for the platform: on macOS launchd,
+WindowServer and loginwindow; on Linux systemd, systemd-logind, sshd,
+dbus-daemon, dpkg and rpm (both `/usr/lib` and `/lib` paths for systemd). Each
+is a process whose death ends the session or the machine, or that leaves the
+system half-installed; the comments in `crates/riggs-types/src/config.rs` say
+why. Setting the key replaces the whole list.
+
+Kill and suspend are also refused, whatever the list says, when:
+
+- the process's path is empty or `unknown` (the sensor could not identify it,
+  so no path list can match it), and
+- the event is a process exit (the process is gone and its pid may belong to
+  something else by now).
+
+Each refusal is stored with the outcome `refused` and the reason in `detail`.
 Protection concerns the acting process only. A file in a protected
 executable's path is still quarantined.
+
+### Snapshots
+
+Preemptive snapshots (`preemptive_snapshots`) exist only so Rollback can
+restore files, and Rollback only runs in `act` mode, so files are copied only
+in `act` mode. The time-based prune of old snapshots runs in every mode.
 
 ## Response records
 

@@ -16,7 +16,7 @@ use riggs_store::RiggsStore;
 use riggs_storyline::StorylineCorrelator;
 use riggs_types::config::{ResponseMode, RiggsConfig};
 use riggs_types::errors::RiggsError;
-use riggs_types::events::{FileAction, NetworkDirection, RiggsEvent};
+use riggs_types::events::{FileAction, NetworkDirection, ProcessAction, RiggsEvent};
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 use riggs_types::Severity;
 use tokio::sync::mpsc;
@@ -213,6 +213,34 @@ fn egress_process_name(path: &str) -> Option<String> {
             .unwrap_or(path)
             .to_string(),
     )
+}
+
+/// A threat storyline opening a file may be about to change it: keep a copy so
+/// Rollback can restore it. Only `act` mode ever rolls back, so no other mode
+/// copies anything.
+fn snapshot_opened_file(
+    mode: ResponseMode,
+    snapshots: &Option<Arc<riggs_response::SnapshotStore>>,
+    event: &RiggsEvent,
+    storyline_is_threat: bool,
+    storyline: &riggs_types::events::StorylineId,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let (Some(store), RiggsEvent::File(fe)) = (snapshots, event) else {
+        return None;
+    };
+    if mode != ResponseMode::Act || fe.action != FileAction::Open || !storyline_is_threat {
+        return None;
+    }
+    let (store, path, storyline) = (
+        Arc::clone(store),
+        PathBuf::from(&fe.path),
+        storyline.clone(),
+    );
+    Some(tokio::task::spawn_blocking(move || {
+        if let Err(e) = store.snapshot(&path, &storyline) {
+            warn!(error = %e, "pre-modification snapshot failed");
+        }
+    }))
 }
 
 const CONFIG_PATHS: &[&str] = &["/etc/riggs/riggs.toml", "config/riggs.toml"];
@@ -1139,8 +1167,12 @@ impl RiggsDaemon {
         // -- Main event processing loop --
         let stage_timeout = Duration::from_millis(self.config.engine.stage_timeout_ms);
         let mut egress_warned = std::collections::HashSet::new();
-        tokio::select! {
-            _ = async {
+        // Response tasks, awaited (bounded) at shutdown so an action that ran
+        // still reaches the store and the export.
+        let mut responses = tokio::task::JoinSet::new();
+        let stop_reason = tokio::select! {
+            reason = async {
+                let mut reason = "event channel closed";
                 while let Some(mut event) = event_rx.recv().await {
                     events_processed.fetch_add(1, Ordering::Relaxed);
 
@@ -1206,20 +1238,13 @@ impl RiggsDaemon {
                         correlator.add_verdict(&storyline_id, v.clone());
                     }
 
-                    // A threat storyline opening a file may be about to change it:
-                    // keep a copy so Rollback can restore it.
-                    if let (Some(store), RiggsEvent::File(fe)) = (&snapshots, &event) {
-                        if fe.action == FileAction::Open && correlator.is_threat(&storyline_id) {
-                            let store = Arc::clone(store);
-                            let path = PathBuf::from(&fe.path);
-                            let storyline = storyline_id.clone();
-                            tokio::task::spawn_blocking(move || {
-                                if let Err(e) = store.snapshot(&path, &storyline) {
-                                    warn!(error = %e, "pre-modification snapshot failed");
-                                }
-                            });
-                        }
-                    }
+                    snapshot_opened_file(
+                        response_mode,
+                        &snapshots,
+                        &event,
+                        correlator.is_threat(&storyline_id),
+                        &storyline_id,
+                    );
 
                     if merged.final_threat_level > ThreatLevel::Clean {
                         threats_detected.fetch_add(1, Ordering::Relaxed);
@@ -1243,13 +1268,20 @@ impl RiggsDaemon {
                                 RiggsEvent::File(fe) => Some(PathBuf::from(&fe.path)),
                                 _ => None,
                             };
-                            tokio::spawn(async move {
+                            // An exit event's process is gone and its pid may be reused.
+                            let process_exited = matches!(
+                                &event,
+                                RiggsEvent::Process(pe) if pe.action == ProcessAction::Exit
+                            );
+                            while responses.try_join_next().is_some() {}
+                            responses.spawn(async move {
                                 let records = exec
                                     .respond(
                                         &policy,
                                         response_mode,
                                         &merged,
                                         &process,
+                                        process_exited,
                                         target_path.as_deref(),
                                     )
                                     .await;
@@ -1298,16 +1330,16 @@ impl RiggsDaemon {
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             error!("store writer exited; stopping daemon");
+                            reason = "store writer exited";
                             break;
                         }
                     }
                 }
-            } => {}
+                reason
+            } => reason,
             _ = shutdown_signal() => {
                 info!("shutdown signal received");
-                if let Some(export) = &export {
-                    export.emit("daemon", serde_json::json!({ "state": "stopping", "reason": "signal" }));
-                }
+                "signal"
             }
             _ = async {
                 // Restart any supervised task that has died.
@@ -1316,11 +1348,24 @@ impl RiggsDaemon {
                     interval.tick().await;
                     self.supervisor.check_health().await;
                 }
-            } => {}
-        }
+            } => "supervisor stopped",
+        };
 
         // -- Shutdown --
-        info!("shutting down...");
+        info!(reason = stop_reason, "shutting down...");
+        if let Some(export) = &export {
+            export.emit(
+                "daemon",
+                serde_json::json!({ "state": "stopping", "reason": stop_reason }),
+            );
+        }
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while responses.join_next().await.is_some() {}
+        })
+        .await;
+        if drained.is_err() {
+            warn!("response actions still running at shutdown; abandoning them");
+        }
 
         if let Err(e) = collector.stop().await {
             warn!(error = %e, "failed to stop event collector");
@@ -1377,6 +1422,42 @@ impl RiggsDaemon {
 mod tests {
     use super::*;
     use riggs_comms::EgressQuery;
+
+    #[tokio::test]
+    async fn only_act_mode_snapshots_files_a_threat_opens() {
+        use riggs_types::events::{ProcessContext, StorylineId};
+        let dir = std::env::temp_dir().join(format!("riggs-snap-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("report.docx");
+        let process = ProcessContext::new(1, 1, "p", "/p", "p", "0", StorylineId::new());
+        let event = RiggsEvent::new_file(
+            FileAction::Open,
+            process,
+            file.to_str().unwrap().to_string(),
+            None,
+        );
+
+        let mut restored = Vec::new();
+        for mode in [ResponseMode::Off, ResponseMode::Record, ResponseMode::Act] {
+            std::fs::write(&file, b"original").unwrap();
+            let store = Arc::new(riggs_response::SnapshotStore::new(
+                dir.join("snaps"),
+                1 << 20,
+            ));
+            let storyline = StorylineId::new();
+            if let Some(task) =
+                snapshot_opened_file(mode, &Some(Arc::clone(&store)), &event, true, &storyline)
+            {
+                task.await.unwrap();
+            }
+            std::fs::write(&file, b"ENCRYPTED").unwrap();
+            store.rollback(&storyline).unwrap();
+            restored.push(std::fs::read(&file).unwrap() == b"original");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(restored, [false, false, true]);
+    }
 
     /// An adapter whose startup snapshot is the empty default config, as it was
     /// when it was seeded from a riggs.toml without an [egress] table.

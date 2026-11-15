@@ -204,6 +204,21 @@ impl ResponsePolicy {
         policy
     }
 
+    /// Why kill and suspend must not target `process`, if they must not. A process
+    /// the sensor could not identify cannot be matched against the protected
+    /// list, and an exited one's pid may belong to something else by now.
+    pub fn signal_refusal(&self, process: &ProcessContext, exited: bool) -> Option<&'static str> {
+        if exited {
+            Some("process has exited; its pid may be reused")
+        } else if process.path.is_empty() || process.path == "unknown" {
+            Some("process not identified")
+        } else if self.protects(process) {
+            Some("protected process")
+        } else {
+            None
+        }
+    }
+
     pub fn protects(&self, process: &ProcessContext) -> bool {
         self.protected.iter().any(|entry| {
             if entry.starts_with('/') {
@@ -452,6 +467,41 @@ mod tests {
         assert!(policy.protects(&process("launchd", "/sbin/launchd")));
         assert!(!policy.protects(&process("launchd", "/tmp/launchd")));
         assert!(policy.protects(&process("x", "/tmp/WindowServer")));
+    }
+
+    #[test]
+    fn signal_refusal_names_why() {
+        let policy = ResponsePolicy {
+            protected: vec!["/sbin/launchd".into()],
+            ..ResponsePolicy::default()
+        };
+        let process = |path: &str| ProcessContext {
+            pid: 9,
+            ppid: 1,
+            name: "x".into(),
+            path: path.into(),
+            cmdline: String::new(),
+            user: "0".into(),
+            storyline_id: StorylineId::new(),
+        };
+
+        assert_eq!(policy.signal_refusal(&process("/tmp/a"), false), None);
+        assert_eq!(
+            policy.signal_refusal(&process("/sbin/launchd"), false),
+            Some("protected process")
+        );
+        assert_eq!(
+            policy.signal_refusal(&process(""), false),
+            Some("process not identified")
+        );
+        assert_eq!(
+            policy.signal_refusal(&process("unknown"), false),
+            Some("process not identified")
+        );
+        assert_eq!(
+            policy.signal_refusal(&process("/tmp/a"), true),
+            Some("process has exited; its pid may be reused")
+        );
     }
 
     #[test]

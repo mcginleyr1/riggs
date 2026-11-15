@@ -77,7 +77,7 @@ impl RuleLoader {
                 {
                     info!(paths = ?event.paths, "rule files changed");
                     if matches!(event.kind, EventKind::Remove(_)) {
-                        for path in event.paths.iter().filter(|p| !p.exists()) {
+                        for path in removed_rule_files(&event.paths) {
                             (self.report)(PolicyChange::Deleted(path.display().to_string()));
                         }
                     }
@@ -104,8 +104,24 @@ impl RuleLoader {
     }
 }
 
+/// The paths that are gone and that the loader would have loaded: an editor's
+/// probe, swap, backup and lock files are not rules.
+fn removed_rule_files(paths: &[PathBuf]) -> impl Iterator<Item = &PathBuf> {
+    paths.iter().filter(|p| {
+        !p.exists()
+            && [
+                crate::YARA_EXTENSIONS,
+                crate::IOC_EXTENSIONS,
+                crate::CUSTOM_RULE_EXTENSIONS,
+            ]
+            .iter()
+            .any(|exts| crate::has_extension(p, exts))
+    })
+}
+
 /// Recompile whichever rule sets the changed paths belong to. New engines are
 /// built without holding a lock, then swapped in, so scans never wait on a compile.
+/// Reports once: `Rejected` if the yara set failed, else `Reloaded`.
 fn reload_affected(
     dir: &Path,
     yara: Option<Arc<RwLock<YaraEngine>>>,
@@ -115,17 +131,18 @@ fn reload_affected(
     report: &(dyn Fn(PolicyChange) + Send + Sync),
 ) {
     let touches = |exts: &[&str]| paths.iter().any(|p| crate::has_extension(p, exts));
+    let mut outcome = None;
 
     if let Some(yara) = yara.filter(|_| touches(crate::YARA_EXTENSIONS)) {
         match YaraEngine::new(dir.to_path_buf()) {
             Ok(fresh) => {
                 *yara.write().unwrap_or_else(PoisonError::into_inner) = fresh;
                 info!("yara rules reloaded");
-                report(PolicyChange::Reloaded);
+                outcome = Some(PolicyChange::Reloaded);
             }
             Err(e) => {
                 warn!(error = %e, "failed to reload yara rules; keeping previous set");
-                report(PolicyChange::rejected(&e));
+                outcome = Some(PolicyChange::rejected(&e));
             }
         }
     }
@@ -134,14 +151,18 @@ fn reload_affected(
         let fresh = IocMatcher::load_dir(dir);
         info!(count = fresh.len(), "local IOC lists reloaded");
         *local_ioc.write().unwrap_or_else(PoisonError::into_inner) = fresh;
-        report(PolicyChange::Reloaded);
+        outcome.get_or_insert(PolicyChange::Reloaded);
     }
 
     if let Some(custom) = custom.filter(|_| touches(crate::CUSTOM_RULE_EXTENSIONS)) {
         let fresh = CustomRuleEngine::load_dir(dir);
         *custom.write().unwrap_or_else(PoisonError::into_inner) = fresh;
         info!("custom rules reloaded");
-        report(PolicyChange::Reloaded);
+        outcome.get_or_insert(PolicyChange::Reloaded);
+    }
+
+    if let Some(outcome) = outcome {
+        report(outcome);
     }
 }
 
@@ -191,5 +212,54 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(local_ioc.read().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn one_change_to_all_three_rule_kinds_is_one_report() {
+        let dir = std::env::temp_dir().join(format!("riggs-loader-report-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let yara = Arc::new(RwLock::new(YaraEngine::new(dir.clone()).unwrap()));
+        let local_ioc = Arc::new(RwLock::new(IocMatcher::load_dir(&dir)));
+        let custom = Arc::new(RwLock::new(CustomRuleEngine::load_dir(&dir)));
+        let reports = std::sync::Mutex::new(Vec::new());
+
+        reload_affected(
+            &dir,
+            Some(yara),
+            Some(local_ioc),
+            Some(custom),
+            &[dir.join("a.yar"), dir.join("b.ioc"), dir.join("c.toml")],
+            &|change| reports.lock().unwrap().push(change),
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(*reports.lock().unwrap(), vec![PolicyChange::Reloaded]);
+    }
+
+    #[test]
+    fn only_removed_rule_files_are_reported_deleted() {
+        let dir = std::env::temp_dir().join(format!("riggs-loader-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("still-here.yar"), "").unwrap();
+        let paths: Vec<PathBuf> = [
+            "gone.yar",
+            "gone.ioc",
+            "gone.toml",
+            "still-here.yar",
+            ".gone.yar.swp",
+            "gone.yar~",
+            "4913",
+            "gone.txt",
+        ]
+        .iter()
+        .map(|name| dir.join(name))
+        .collect();
+
+        let reported: Vec<_> = removed_rule_files(&paths)
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(reported, ["gone.yar", "gone.ioc", "gone.toml"]);
     }
 }

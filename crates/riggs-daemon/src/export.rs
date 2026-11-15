@@ -3,19 +3,19 @@
 //! full queue drops the line and counts it.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc as std_mpsc, Arc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use riggs_response::ResponseRecord;
 use riggs_types::config::{ExportConfig, PolicyChange, PolicyReport};
-use riggs_types::events::RiggsEvent;
+use riggs_types::events::{ProcessEvent, RiggsEvent};
 use riggs_types::verdict::MergedVerdict;
 use serde_json::{json, Map, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -27,7 +27,7 @@ const DESCRIPTION_MAX_CHARS: usize = 500;
 
 enum Message {
     Line(Map<String, Value>),
-    Flush(std_mpsc::SyncSender<()>),
+    Flush(oneshot::Sender<()>),
 }
 
 pub struct Export {
@@ -43,7 +43,7 @@ impl Export {
         let Some(path) = &config.jsonl_path else {
             return Ok(None);
         };
-        let sink = Sink::open(PathBuf::from(path), config.max_bytes)?;
+        let sink = Sink::open(PathBuf::from(path), config.max_bytes.get())?;
         let (export, queue) = Self::new(hostname(), QUEUE_CAPACITY);
         let dropped = Arc::clone(&export.dropped);
         std::thread::Builder::new()
@@ -120,6 +120,14 @@ impl Export {
         if let RiggsEvent::File(file) = event {
             fields["file"] = file.path.clone().into();
         }
+        // Only process events carry the parent.
+        if let RiggsEvent::Process(ProcessEvent {
+            parent_context: Some(parent),
+            ..
+        }) = event
+        {
+            fields["process"]["parent_name"] = parent.name.clone().into();
+        }
         self.emit("threat", fields);
     }
 
@@ -137,10 +145,10 @@ impl Export {
 
     /// Wait (bounded) until every line queued so far has been written.
     pub async fn flush(&self) {
-        let (ack, done) = std_mpsc::sync_channel(1);
+        let (ack, done) = oneshot::channel();
         let wait = async {
             if self.queue.send(Message::Flush(ack)).await.is_ok() {
-                let _ = tokio::task::spawn_blocking(move || done.recv()).await;
+                let _ = done.await;
             }
         };
         let _ = tokio::time::timeout(Duration::from_secs(5), wait).await;
@@ -222,6 +230,9 @@ struct Sink {
     path: PathBuf,
     max_bytes: u64,
     file: Option<(File, u64)>,
+    /// The file ended in a fragment of a line (a failed or interrupted write):
+    /// the next line starts on a fresh one.
+    after_fragment: bool,
 }
 
 impl Sink {
@@ -230,19 +241,42 @@ impl Sink {
             path,
             max_bytes,
             file: None,
+            after_fragment: false,
         };
         sink.file = Some(sink.open_file()?);
         Ok(sink)
     }
 
-    fn open_file(&self) -> std::io::Result<(File, u64)> {
+    fn open_file(&mut self) -> std::io::Result<(File, u64)> {
         let mut options = OpenOptions::new();
-        options.create(true).append(true);
+        options.create(true).append(true).read(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o640);
-        let file = options.open(&self.path)?;
+        let mut file = options.open(&self.path)?;
         let size = file.metadata()?.len();
+        self.after_fragment = size > 0 && {
+            let mut last = [0u8];
+            file.seek(SeekFrom::End(-1))?;
+            file.read_exact(&mut last)?;
+            last[0] != b'\n'
+        };
         Ok((file, size))
+    }
+
+    /// Whether `path` still names the file we hold: something else may have
+    /// rotated or deleted it, and appending to the old inode would be silent loss.
+    #[cfg(unix)]
+    fn holds_path(&self, file: &File) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (file.metadata(), std::fs::metadata(&self.path)) {
+            (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+            _ => false,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn holds_path(&self, _file: &File) -> bool {
+        true
     }
 
     /// Append `line` and a newline, first renaming the file to `<path>.1` when
@@ -250,8 +284,8 @@ impl Sink {
     /// by inode finishes the renamed file and then reads the new one.
     fn write_line(&mut self, line: &[u8]) -> std::io::Result<()> {
         let (mut file, mut size) = match self.file.take() {
-            Some(open) => open,
-            None => self.open_file()?,
+            Some(open) if self.holds_path(&open.0) => open,
+            _ => self.open_file()?,
         };
         let len = line.len() as u64 + 1;
         if size > 0 && size + len > self.max_bytes {
@@ -260,11 +294,14 @@ impl Sink {
             std::fs::rename(&self.path, rotated)?;
             (file, size) = self.open_file()?;
         }
-        let mut bytes = Vec::with_capacity(line.len() + 1);
+        let mut bytes = Vec::with_capacity(line.len() + 2);
+        if std::mem::take(&mut self.after_fragment) {
+            bytes.push(b'\n');
+        }
         bytes.extend_from_slice(line);
         bytes.push(b'\n');
         file.write_all(&bytes)?;
-        self.file = Some((file, size + len));
+        self.file = Some((file, size + bytes.len() as u64));
         Ok(())
     }
 }
@@ -450,6 +487,55 @@ mod tests {
 
         // Requested as 0640; the process umask can only remove bits.
         assert_eq!(mode & !0o640, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_rotated_or_deleted_by_someone_else_is_reopened_at_the_path() {
+        let dir = scratch("elsewhere");
+        let path = dir.join("riggs.jsonl");
+        let mut sink = Sink::open(path.clone(), 1 << 20).unwrap();
+        sink.write_line(b"{\"n\":1}").unwrap();
+
+        std::fs::rename(&path, dir.join("riggs.jsonl.elsewhere")).unwrap();
+        sink.write_line(b"{\"n\":2}").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        sink.write_line(b"{\"n\":3}").unwrap();
+        let at_path = std::fs::read_to_string(&path).unwrap();
+        let moved = std::fs::read_to_string(dir.join("riggs.jsonl.elsewhere")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(moved, "{\"n\":1}\n");
+        assert_eq!(at_path, "{\"n\":3}\n");
+    }
+
+    #[test]
+    fn a_line_after_a_failed_write_starts_on_a_fresh_line() {
+        let dir = scratch("fragment");
+        let path = dir.join("riggs.jsonl");
+        let mut sink = Sink::open(path.clone(), 1 << 20).unwrap();
+        sink.write_line(b"{\"n\":1}").unwrap();
+        // What a full disk leaves: the start of a line, and a handle that fails.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"n\":")
+            .unwrap();
+        sink.file = Some((File::open(&path).unwrap(), 0));
+        assert!(sink.write_line(b"{\"n\":2}").is_err());
+        sink.write_line(b"{\"n\":3}").unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let parsed: Vec<_> = written
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect();
+        assert_eq!(parsed.len(), 3, "{written:?}");
+        assert_eq!(parsed[0].as_ref().unwrap()["n"], 1);
+        assert!(parsed[1].is_none(), "the fragment stays its own line");
+        assert_eq!(parsed[2].as_ref().unwrap()["n"], 3);
     }
 
     #[test]
