@@ -22,7 +22,7 @@ protect/
   crates/
     riggs-types/          # shared types, event model, error types
     riggs-platform/       # PlatformSensor trait, platform-agnostic abstractions
-    riggs-platform-macos/ # Endpoint Security Framework bindings
+    riggs-platform-macos/ # sysinfo and libproc polling, FSEvents (Endpoint Security planned)
     riggs-platform-linux/ # fanotify + inotify file events, procfs/sysinfo processes
     riggs-platform-windows/ # ETW stub (future)
     riggs-sensor/         # sensor normalization, OCSF event emission
@@ -224,7 +224,9 @@ riggs-daemon (depends on: everything)
 
 ### Privilege Separation
 
-On macOS, the daemon runs as root to access the Endpoint Security Framework.
+On macOS, the daemon runs as root so its polling sensors can read every
+process and socket. (Endpoint Security, which is planned, also requires root
+and an Apple entitlement; the daemon does not use it today.)
 The CLI runs as the user and communicates over a Unix domain socket with
 permission checks (SO_PEERCRED or equivalent).
 
@@ -236,10 +238,10 @@ channel and cannot kill processes.
 
 ### Tamper Resistance
 
-The daemon monitors its own binary, config files, and rule directories for
-unauthorized modification. If tampering is detected, an alert is raised through
-the store and comms channels. The redb database uses checksums to detect
-corruption.
+Planned, not implemented: no code in `crates/` watches the daemon's own binary,
+config files or rule directories for modification, and nothing stops a root user
+from stopping or replacing the daemon. The redb database uses checksums to
+detect corruption.
 
 ## Configuration
 

@@ -101,16 +101,34 @@ layer in `riggs-sensor` converts them to the OCSF `EventEnvelope` type.
 
 ## macOS Implementation
 
-### Endpoint Security Framework
+### What the macOS sensor does today
 
-macOS uses the Endpoint Security (ES) framework, available since macOS 10.15.
-ES provides kernel-level visibility into process, file, network, and
+`riggs-platform-macos/src/sensor.rs` does not use the Endpoint Security
+framework. It is built from three polling or best-effort sources:
+
+- **Processes:** `sysinfo` is refreshed once a second and new and exited
+  processes are diffed. A process that starts and exits within one second is
+  missed.
+- **Files:** FSEvents through the `notify` crate, on the watched paths. FSEvents
+  reports paths, not the process that wrote them, so file events carry no
+  process.
+- **Network:** libproc polling, described under "Network events" below.
+
+Endpoint Security (below) is planned. It needs the
+`com.apple.developer.endpoint-security.client` entitlement, which only Apple
+grants (see `docs/DEPLOYMENT.md`, "What only the owner can do"). Everything from
+here to the end of "Mute Rules" describes that planned design, not shipped code.
+
+### Planned: Endpoint Security Framework
+
+macOS would use the Endpoint Security (ES) framework, available since macOS
+10.15. ES provides kernel-level visibility into process, file, network, and
 authentication events.
 
-We use the `endpoint-sec` Rust crate, which provides safe bindings to the
-ES C API.
+The plan is to use the `endpoint-sec` Rust crate, which provides safe bindings
+to the ES C API.
 
-### Initialization
+### Planned initialization
 
 ```rust
 pub struct MacOSSensor {
@@ -133,13 +151,13 @@ entitlement, which in turn requires a provisioning profile from Apple. During
 development, the daemon must run as root with SIP partially disabled, or use
 a development entitlement.
 
-If the entitlement is missing, `initialize()` returns
-`PlatformError::AuthorizationDenied` and the daemon logs a clear error message
-explaining the requirement.
+If the entitlement is missing, `initialize()` would return
+`PlatformError::AuthorizationDenied` and the daemon would log a clear error
+message explaining the requirement.
 
-### Subscribed Event Types
+### Planned event types
 
-macOS ES provides granular event types. Riggs subscribes to:
+macOS ES provides granular event types. Riggs would subscribe to:
 
 **Process events:**
 - `ES_EVENT_TYPE_NOTIFY_EXEC` — process execution
@@ -163,7 +181,7 @@ macOS ES provides granular event types. Riggs subscribes to:
 
 **Network events:**
 - `ES_EVENT_TYPE_NOTIFY_CONNECT` — outbound connection (macOS 13+)
-- These are supplemented by `pnet` for passive traffic capture where ES
+- These would be supplemented by `pnet` for passive traffic capture where ES
   coverage is limited.
 - Implemented today instead (`riggs-platform-macos/src/net.rs`): once a second
   the sensor walks every process's socket descriptors with libproc
@@ -183,7 +201,7 @@ macOS ES provides granular event types. Riggs subscribes to:
 - `ES_EVENT_TYPE_NOTIFY_MOUNT` — filesystem mount
 - `ES_EVENT_TYPE_NOTIFY_UNMOUNT` — filesystem unmount
 
-### AUTH vs NOTIFY
+### Planned: AUTH vs NOTIFY
 
 ES offers two event delivery modes:
 
@@ -201,7 +219,9 @@ daemon crashes while holding an AUTH decision, the kernel may block the
 operation indefinitely. The fail-fast architecture helps here: a crashed
 daemon restarts quickly and clears any pending AUTH decisions.
 
-### Event Processing Loop
+### Planned: event processing loop
+
+Sketch of the intended shape; no such code exists yet.
 
 ```rust
 async fn run(
@@ -229,9 +249,9 @@ async fn run(
 }
 ```
 
-### Mute Rules
+### Planned: mute rules
 
-ES supports muting events from specific processes or paths. Riggs mutes
+ES supports muting events from specific processes or paths. Riggs would mute
 its own process and the processes of known system daemons that generate
 excessive noise (e.g., `mds`, `mdworker`, `spotlight`). Mute rules are
 applied at the ES client level for zero-overhead filtering.
@@ -254,9 +274,14 @@ fn apply_default_mutes(client: &es::Client) {
 
 ## Linux Implementation
 
-### eBPF via Aya
+Implemented today (`riggs-platform-linux`): fanotify and inotify for file
+events (fanotify attributes a write to its process), procfs and `sysinfo` for
+processes and sockets. No eBPF code or `aya` dependency exists yet; the rest of
+this section is the planned design.
 
-Linux uses eBPF programs loaded via the Aya framework. eBPF provides
+### Planned: eBPF via Aya
+
+Linux would use eBPF programs loaded via the Aya framework. eBPF provides
 kernel-level event tracing without kernel modules, with strong safety
 guarantees enforced by the kernel's eBPF verifier.
 
@@ -473,13 +498,13 @@ platform APIs.
 
 macOS integration tests require:
 1. Running as root
-2. A valid endpoint security entitlement
-3. The test spawns short-lived processes and verifies the sensor captures them
+2. The test spawns short-lived processes and verifies the sensor captures them
+   (once the Endpoint Security sensor exists, also a valid endpoint security
+   entitlement)
 
-Linux integration tests require:
-1. Running as root (or `CAP_SYS_ADMIN` + `CAP_PERFMON`)
-2. Kernel 5.7+ for LSM BPF hooks
-3. Tests load eBPF programs and verify event capture
+Linux integration tests require root (fanotify needs `CAP_SYS_ADMIN`). Once the
+planned eBPF sensor exists they will also need kernel 5.7+ for LSM BPF hooks and
+will load eBPF programs to verify event capture.
 
 ### Event Replay
 

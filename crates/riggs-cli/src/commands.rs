@@ -66,6 +66,11 @@ pub async fn threats(socket_path: &Path) -> Result<(), RiggsError> {
         min_severity: "Low".into(),
     };
     let response = send(&mut client, &msg).await?;
+    let mut client = connect(socket_path).await?;
+    let responses = match send(&mut client, &ClientMessage::QueryResponses).await? {
+        DaemonMessage::Responses(responses) => responses,
+        _ => Vec::new(),
+    };
 
     match response {
         DaemonMessage::Threats(threats) => {
@@ -104,6 +109,15 @@ pub async fn threats(socket_path: &Path) -> Result<(), RiggsError> {
                     println!(
                         "    {DIM}{}:{RESET} {}",
                         verdict.source, verdict.description
+                    );
+                }
+                for r in responses
+                    .iter()
+                    .filter(|r| r.event_id == threat.event_id.to_string())
+                {
+                    println!(
+                        "    {DIM}response:{RESET} {} ({}) {DIM}{}{RESET}",
+                        r.action, r.outcome, r.detail
                     );
                 }
             }

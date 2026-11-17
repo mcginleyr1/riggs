@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Riggs network filter: approves the system extension, then activates it as a content filter.
+     Template: deploy only the copy made by render-profiles.sh (docs/DEPLOYMENT.md, "Configuration
+     profiles"). Keys: apple/device-management, mdm/profiles/TopLevel.yaml,
+     CommonPayloadKeys.yaml, com.apple.system-extension-policy.yaml, com.apple.webcontent-filter.yaml. -->
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.riggs.profile.network-filter</string>
+    <key>PayloadUUID</key>
+    <string>2AE0155E-1CE5-46CF-A0D5-810BACED93F0</string>
+    <key>PayloadDisplayName</key>
+    <string>Riggs network filter</string>
+    <key>PayloadDescription</key>
+    <string>Approves the Riggs network filter system extension and turns on its content filter.</string>
+    <key>PayloadOrganization</key>
+    <string>@ORGANIZATION@</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.system-extension-policy</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.riggs.profile.network-filter.system-extension</string>
+            <key>PayloadUUID</key>
+            <string>F81D93DE-CAC5-44D3-ACD3-D85F9725671F</string>
+            <key>PayloadDisplayName</key>
+            <string>Riggs system extension approval</string>
+            <key>AllowUserOverrides</key>
+            <false/>
+            <key>AllowedSystemExtensions</key>
+            <dict>
+                <key>@TEAM_ID@</key>
+                <array>
+                    <string>com.riggs.filter.extension</string>
+                </array>
+            </dict>
+            <key>AllowedSystemExtensionTypes</key>
+            <dict>
+                <key>@TEAM_ID@</key>
+                <array>
+                    <string>NetworkExtension</string>
+                </array>
+            </dict>
+            <key>RemovableSystemExtensions</key>
+            <dict>
+                <key>@TEAM_ID@</key>
+                <array>
+                    <string>com.riggs.filter.extension</string>
+                </array>
+            </dict>
+        </dict>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.webcontent-filter</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.riggs.profile.network-filter.content-filter</string>
+            <key>PayloadUUID</key>
+            <string>1D604FE2-5E15-421F-A2EE-C87A5B6AAC7F</string>
+            <key>PayloadDisplayName</key>
+            <string>Riggs content filter</string>
+            <key>FilterType</key>
+            <string>Plugin</string>
+            <key>UserDefinedName</key>
+            <string>Riggs</string>
+            <key>PluginBundleID</key>
+            <string>com.riggs.filter</string>
+            <key>FilterSockets</key>
+            <true/>
+            <key>FilterDataProviderBundleIdentifier</key>
+            <string>com.riggs.filter.extension</string>
+            <key>FilterDataProviderDesignatedRequirement</key>
+            <string>@FILTER_EXTENSION_DESIGNATED_REQUIREMENT@</string>
+        </dict>
+    </array>
+</dict>
+</plist>

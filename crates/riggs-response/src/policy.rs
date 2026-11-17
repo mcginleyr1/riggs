@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use riggs_types::config::ResponseConfig;
 use riggs_types::errors::RiggsError;
-use riggs_types::events::StorylineId;
+use riggs_types::events::{ProcessContext, StorylineId};
 use riggs_types::verdict::{MergedVerdict, ThreatLevel};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,9 @@ pub struct PolicyRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsePolicy {
     pub rules: Vec<PolicyRule>,
+    /// Executable paths or names kill and suspend never target.
+    #[serde(default)]
+    pub protected: Vec<String>,
 }
 
 impl Default for ResponsePolicy {
@@ -54,6 +58,7 @@ impl Default for ResponsePolicy {
                     actions: vec![],
                 },
             ],
+            protected: Vec::new(),
         }
     }
 }
@@ -179,7 +184,52 @@ impl ResponsePolicy {
             });
         }
 
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            protected: Vec::new(),
+        })
+    }
+
+    /// The default rules without the actions `[response]` switches off.
+    pub fn from_config(config: &ResponseConfig) -> Self {
+        let mut policy = Self::default();
+        for rule in &mut policy.rules {
+            rule.actions.retain(|action| match action {
+                ResponseAction::KillProcess { .. } => config.kill_on_critical,
+                ResponseAction::QuarantineFile { .. } => config.quarantine_on_malicious,
+                _ => true,
+            });
+        }
+        policy.protected = config.protected_processes.clone();
+        policy
+    }
+
+    /// Why kill and suspend must not target `process`, if they must not. A process
+    /// the sensor could not identify cannot be matched against the protected
+    /// list, and an exited one's pid may belong to something else by now.
+    pub fn signal_refusal(&self, process: &ProcessContext, exited: bool) -> Option<&'static str> {
+        if exited {
+            Some("process has exited; its pid may be reused")
+        } else if process.path.is_empty() || process.path == "unknown" {
+            Some("process not identified")
+        } else if self.protects(process) {
+            Some("protected process")
+        } else {
+            None
+        }
+    }
+
+    pub fn protects(&self, process: &ProcessContext) -> bool {
+        self.protected.iter().any(|entry| {
+            if entry.starts_with('/') {
+                *entry == process.path
+            } else {
+                *entry == process.name
+                    || Path::new(&process.path)
+                        .file_name()
+                        .is_some_and(|n| n == entry.as_str())
+            }
+        })
     }
 
     /// Select response actions for a verdict, filling placeholder targets
@@ -346,6 +396,112 @@ mod tests {
             a,
             ResponseAction::Rollback { storyline_id } if *storyline_id == storyline
         )));
+    }
+
+    fn critical_actions(config: &ResponseConfig) -> Vec<String> {
+        let mut verdict = malicious_verdict();
+        verdict.verdicts.push(Verdict::new(
+            verdict.event_id.clone(),
+            ThreatLevel::Malicious,
+            0.99,
+            riggs_types::verdict::DetectionSource::StaticAI,
+            "sample",
+        ));
+        ResponsePolicy::from_config(config)
+            .evaluate(
+                &verdict,
+                4321,
+                Some(Path::new("/tmp/evil")),
+                &StorylineId(uuid::Uuid::from_u128(1)),
+            )
+            .iter()
+            .map(|a| a.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn each_switch_removes_exactly_its_action() {
+        let all = critical_actions(&ResponseConfig::default());
+        let no_kill = critical_actions(&ResponseConfig {
+            kill_on_critical: false,
+            ..ResponseConfig::default()
+        });
+        let no_quarantine = critical_actions(&ResponseConfig {
+            quarantine_on_malicious: false,
+            ..ResponseConfig::default()
+        });
+
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            no_kill,
+            all.iter()
+                .filter(|a| !a.starts_with("Kill"))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            no_quarantine,
+            all.iter()
+                .filter(|a| !a.starts_with("Quarantine"))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn protected_entries_match_a_full_path_exactly_and_a_bare_name_by_basename() {
+        let policy = ResponsePolicy {
+            protected: vec!["/sbin/launchd".into(), "WindowServer".into()],
+            ..ResponsePolicy::default()
+        };
+        let process = |name: &str, path: &str| ProcessContext {
+            pid: 9,
+            ppid: 1,
+            name: name.into(),
+            path: path.into(),
+            cmdline: path.into(),
+            user: "0".into(),
+            storyline_id: StorylineId::new(),
+        };
+
+        assert!(policy.protects(&process("launchd", "/sbin/launchd")));
+        assert!(!policy.protects(&process("launchd", "/tmp/launchd")));
+        assert!(policy.protects(&process("x", "/tmp/WindowServer")));
+    }
+
+    #[test]
+    fn signal_refusal_names_why() {
+        let policy = ResponsePolicy {
+            protected: vec!["/sbin/launchd".into()],
+            ..ResponsePolicy::default()
+        };
+        let process = |path: &str| ProcessContext {
+            pid: 9,
+            ppid: 1,
+            name: "x".into(),
+            path: path.into(),
+            cmdline: String::new(),
+            user: "0".into(),
+            storyline_id: StorylineId::new(),
+        };
+
+        assert_eq!(policy.signal_refusal(&process("/tmp/a"), false), None);
+        assert_eq!(
+            policy.signal_refusal(&process("/sbin/launchd"), false),
+            Some("protected process")
+        );
+        assert_eq!(
+            policy.signal_refusal(&process(""), false),
+            Some("process not identified")
+        );
+        assert_eq!(
+            policy.signal_refusal(&process("unknown"), false),
+            Some("process not identified")
+        );
+        assert_eq!(
+            policy.signal_refusal(&process("/tmp/a"), true),
+            Some("process has exited; its pid may be reused")
+        );
     }
 
     #[test]

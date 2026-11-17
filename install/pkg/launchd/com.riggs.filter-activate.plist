@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- System-wide LaunchAgent, in the core package only when it is built with --filter-app. System
+     extensions are activated by the app, from a user's session, so an MDM install with nobody
+     logged in cannot do it: this runs the app's --activate at each login instead. --activate
+     installs or upgrades the extension and turns the content filter on, and finishes; it is run
+     again at every login. With the extension approved by the MDM profile it needs no prompt;
+     without, it waits for the user to approve it (docs/DEPLOYMENT.md). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.riggs.filter-activate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Riggs Filter.app/Contents/MacOS/riggs-filter</string>
+        <string>--activate</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+</dict>
+</plist>

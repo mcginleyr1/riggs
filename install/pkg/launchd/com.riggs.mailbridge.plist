@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- System-wide LaunchAgent for the package's Outlook component: launchd starts it in every
+     user's login session, and the shell resolves that user's home at run time. It exits 0 (and
+     launchd does not restart it) until the user has run `riggs-mailbridge setup`, which creates
+     the state directory. Unlike install/launchd/com.riggs.mailbridge.plist, no path is rendered
+     per user at install time. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.riggs.mailbridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>dir="$HOME/Library/Application Support/Riggs/mailbridge"; [ -d "$dir" ] || exit 0; mkdir -p "$HOME/Library/Logs/riggs"; exec /usr/local/bin/riggs-mailbridge run --dir "$dir" --assets /usr/local/share/riggs/outlook-addin &gt;&gt; "$HOME/Library/Logs/riggs/mailbridge.log" 2&gt;&amp;1</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>

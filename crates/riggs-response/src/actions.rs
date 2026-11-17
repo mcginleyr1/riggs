@@ -1,6 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use riggs_types::config::ResponseOutcome;
 use riggs_types::events::{EventId, StorylineId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -52,6 +53,6 @@ pub struct ResponseRecord {
     pub event_id: EventId,
     pub storyline_id: Option<StorylineId>,
     pub executed_at: DateTime<Utc>,
-    pub success: bool,
+    pub outcome: ResponseOutcome,
     pub detail: String,
 }

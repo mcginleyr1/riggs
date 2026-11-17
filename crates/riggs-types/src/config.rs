@@ -19,7 +19,60 @@ pub struct RiggsConfig {
     pub egress: EgressConfig,
     #[serde(default)]
     pub rules: RulesConfig,
+    #[serde(default)]
+    pub export: ExportConfig,
 }
+
+/// JSON-lines export of what the daemon decides, for a log collector to tail.
+/// Off until `jsonl_path` is set; see docs/EXPORT.md.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExportConfig {
+    pub jsonl_path: Option<String>,
+    /// The file is renamed to `<jsonl_path>.1` and restarted once it would grow past this.
+    pub max_bytes: NonZeroU64,
+    /// Seconds between `daemon` heartbeat lines.
+    pub heartbeat_secs: NonZeroU64,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            jsonl_path: None,
+            max_bytes: NonZeroU64::new(64 * 1024 * 1024).expect("nonzero"),
+            heartbeat_secs: NonZeroU64::new(60).expect("nonzero"),
+        }
+    }
+}
+
+/// What happened to a policy or rules file the daemon watches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyChange {
+    Reloaded,
+    /// The file no longer loads and the old copy stays in force. Holds only the
+    /// first line of the error, which names the file and the line, never content.
+    Rejected(String),
+    /// The file is gone and the old copy stays in force (a rules file: the set is
+    /// rebuilt without it). Holds the file's path.
+    Deleted(String),
+}
+
+impl PolicyChange {
+    pub fn rejected(error: &impl std::fmt::Display) -> Self {
+        let text = error.to_string();
+        Self::Rejected(
+            text.lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect(),
+        )
+    }
+}
+
+/// Told about every `PolicyChange` of one policy; the daemon routes it to the export.
+pub type PolicyReport = std::sync::Arc<dyn Fn(PolicyChange) + Send + Sync>;
 
 /// Detection rule sources. YARA (`.yar`/`.yara`) and custom TOML rules are
 /// loaded recursively from `rules_dir` (e.g. `default/yara`, `custom/yara`)
@@ -498,11 +551,67 @@ impl Default for CommsConfig {
     }
 }
 
+/// What the response engine does with a detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseMode {
+    /// Nothing is evaluated.
+    Off,
+    /// The policy is evaluated and every action it selects is recorded, not run.
+    Record,
+    /// Actions run and are recorded with their result.
+    Act,
+}
+
+/// What became of an action the policy selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseOutcome {
+    Executed,
+    Recorded,
+    Refused,
+    Failed,
+}
+
+impl std::fmt::Display for ResponseOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Executed => "executed",
+            Self::Recorded => "recorded only",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+        })
+    }
+}
+
+fn auto_respond_was_replaced<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> Result<Option<bool>, D::Error> {
+    Err(serde::de::Error::custom(
+        "[response] auto_respond was replaced by `mode` = \"off\", \"record\" or \"act\"",
+    ))
+}
+
+/// Unknown keys are rejected so a setting that does nothing cannot be typed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ResponseConfig {
-    pub auto_respond: bool,
+    pub mode: ResponseMode,
+    /// Only fails the load when present: see `auto_respond_was_replaced`.
+    #[serde(
+        rename = "auto_respond",
+        skip_serializing,
+        deserialize_with = "auto_respond_was_replaced"
+    )]
+    pub removed_auto_respond: Option<bool>,
+    /// When false the policy has no KillProcess action.
     pub kill_on_critical: bool,
+    /// When false the policy has no QuarantineFile action.
     pub quarantine_on_malicious: bool,
+    /// Executable paths (or, without a leading `/`, process names) that kill and
+    /// suspend never target. A name also matches any process that merely
+    /// carries it, so prefer full paths.
+    pub protected_processes: Vec<String>,
     /// Directory where quarantined files are stored.
     #[serde(default = "default_quarantine_path")]
     pub quarantine_path: String,
@@ -520,6 +629,47 @@ pub struct ResponseConfig {
     /// Snapshots older than this are discarded.
     #[serde(default = "default_snapshot_retention_hours")]
     pub snapshot_retention_hours: u64,
+}
+
+/// Killing any of these ends the user's session or the machine's ability to
+/// run anything, whatever the verdict. The list differs per platform (the
+/// paths are what the sensor reports for a process's executable).
+#[cfg(not(target_os = "macos"))]
+fn default_protected_processes() -> Vec<String> {
+    [
+        // PID 1 on systemd hosts (the path /proc/PID/exe resolves to depends on
+        // whether /lib is a link to /usr/lib): its death takes the host down.
+        "/usr/lib/systemd/systemd",
+        "/lib/systemd/systemd",
+        // Tracks every login session; killing it logs everyone out.
+        "/usr/lib/systemd/systemd-logind",
+        "/lib/systemd/systemd-logind",
+        // The only way into a headless host; a package-manager or user file it
+        // writes would otherwise get it killed.
+        "/usr/sbin/sshd",
+        // The message bus desktop sessions and systemd services depend on.
+        "/usr/bin/dbus-daemon",
+        // Killed half-way they leave the package database inconsistent, and
+        // they write many files: a flagged one would select a kill.
+        "/usr/bin/dpkg",
+        "/usr/bin/rpm",
+    ]
+    .map(String::from)
+    .into()
+}
+
+#[cfg(target_os = "macos")]
+fn default_protected_processes() -> Vec<String> {
+    [
+        // PID 1: every process is its child; its death panics the kernel.
+        "/sbin/launchd",
+        // Draws every window; killing it logs the user out.
+        "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+        // Owns the login session; killing it logs the user out.
+        "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
+    ]
+    .map(String::from)
+    .into()
 }
 
 fn default_snapshot_path() -> String {
@@ -545,9 +695,11 @@ fn default_pf_conf_path() -> String {
 impl Default for ResponseConfig {
     fn default() -> Self {
         Self {
-            auto_respond: true,
+            mode: ResponseMode::Record,
+            removed_auto_respond: None,
             kill_on_critical: true,
             quarantine_on_malicious: true,
+            protected_processes: default_protected_processes(),
             quarantine_path: default_quarantine_path(),
             pf_conf_path: default_pf_conf_path(),
             preemptive_snapshots: true,

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use riggs_types::config::{PolicyChange, PolicyReport};
 use riggs_types::errors::RiggsError;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
@@ -41,6 +42,7 @@ pub fn load_policy_file(path: &Path) -> Result<Policy, RiggsError> {
 pub async fn watch_policy(
     policy_path: PathBuf,
     policy: Arc<watch::Sender<Arc<Policy>>>,
+    report: PolicyReport,
 ) -> Result<(), RiggsError> {
     let (tx, mut rx) = mpsc::channel::<notify::Result<Event>>(32);
 
@@ -64,6 +66,7 @@ pub async fn watch_policy(
 
     info!(path = %policy_path.display(), "watching phishing policy file for changes");
     let _watcher = watcher;
+    let mut deleted = false;
 
     while let Some(result) = rx.recv().await {
         let event = match result {
@@ -82,17 +85,30 @@ pub async fn watch_policy(
             continue;
         }
 
+        // A deletion can arrive as a Remove or as a Modify; either way the old
+        // policy stays in force and the operator is told.
+        if !policy_path.exists() {
+            if !std::mem::replace(&mut deleted, true) {
+                warn!("phishing policy file deleted; keeping the current policy");
+                report(PolicyChange::Deleted(policy_path.display().to_string()));
+            }
+            continue;
+        }
+        deleted = false;
+
         if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
             match load_policy_file(&policy_path) {
                 Ok(new) => {
                     info!(mode = ?new.mode(), "phishing policy reloaded");
                     policy.send_replace(Arc::new(new));
+                    report(PolicyChange::Reloaded);
                 }
                 Err(e) => {
                     error!(
                         error = %e,
                         "phishing policy no longer loads; keeping the current policy, but the daemon will refuse to start until the file is fixed"
                     );
+                    report(PolicyChange::rejected(&e));
                 }
             }
         }
@@ -131,7 +147,7 @@ mod tests {
         let policy = Arc::new(watch::Sender::new(Arc::new(
             load_policy_file(&path).unwrap(),
         )));
-        let task = tokio::spawn(watch_policy(path.clone(), policy.clone()));
+        let task = tokio::spawn(watch_policy(path.clone(), policy.clone(), Arc::new(|_| {})));
         // Let the watcher register before the first edit.
         tokio::time::sleep(Duration::from_millis(500)).await;
 

@@ -28,11 +28,12 @@ use riggs_types::events::RiggsEvent;
 use riggs_types::phishing::{PhishingRequest, PhishingResponse};
 use riggs_types::verdict::MergedVerdict;
 
-use crate::messages::{ClientMessage, DaemonMessage, QuarantinedFile};
+use crate::messages::{ClientMessage, DaemonMessage, QuarantinedFile, ResponseEntry};
 
 pub trait StoreQuery: Send + Sync {
     fn recent_events(&self, limit: usize) -> Vec<RiggsEvent>;
     fn threats_above_clean(&self, limit: usize) -> Vec<MergedVerdict>;
+    fn recent_responses(&self, limit: usize) -> Vec<ResponseEntry>;
 }
 
 pub struct DlpFlowVerdict {
@@ -459,6 +460,15 @@ impl IpcServer {
                     .and_then(|guard| guard.as_ref().map(|s| s.threats_above_clean(100)))
                     .unwrap_or_default();
                 DaemonMessage::Threats(threats)
+            }
+            ClientMessage::QueryResponses => {
+                let responses = state
+                    .store
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.as_ref().map(|s| s.recent_responses(1000)))
+                    .unwrap_or_default();
+                DaemonMessage::Responses(responses)
             }
             ClientMessage::GetConfig => {
                 let config = state

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed login items: marks the Riggs launchd jobs as managed, which auto-enables and auto-allows
+     them (macOS 13 and later). Template: deploy only the copy made by render-profiles.sh.
+     Keys: apple/device-management, mdm/profiles/TopLevel.yaml, CommonPayloadKeys.yaml,
+     com.apple.servicemanagement.yaml. -->
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.riggs.profile.background-items</string>
+    <key>PayloadUUID</key>
+    <string>D2FCA285-7C9C-4A23-B9DE-5E8B66CF08E3</string>
+    <key>PayloadDisplayName</key>
+    <string>Riggs background items</string>
+    <key>PayloadOrganization</key>
+    <string>@ORGANIZATION@</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.servicemanagement</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.riggs.profile.background-items.rules</string>
+            <key>PayloadUUID</key>
+            <string>A69B99AB-11C2-4516-85C2-5FFB8C8CCDED</string>
+            <key>PayloadDisplayName</key>
+            <string>Riggs launchd jobs</string>
+            <key>Rules</key>
+            <array>
+                <dict>
+                    <key>RuleType</key>
+                    <string>Label</string>
+                    <key>RuleValue</key>
+                    <string>com.riggs.daemon</string>
+                    <key>TeamIdentifier</key>
+                    <string>@TEAM_ID@</string>
+                    <key>Comment</key>
+                    <string>The Riggs daemon (LaunchDaemon)</string>
+                </dict>
+                <dict>
+                    <key>RuleType</key>
+                    <string>Label</string>
+                    <key>RuleValue</key>
+                    <string>com.riggs.menubar</string>
+                    <key>TeamIdentifier</key>
+                    <string>@TEAM_ID@</string>
+                    <key>Comment</key>
+                    <string>The Riggs menubar agent (LaunchAgent)</string>
+                </dict>
+                <dict>
+                    <key>RuleType</key>
+                    <string>Label</string>
+                    <key>RuleValue</key>
+                    <string>com.riggs.mailbridge</string>
+                    <key>TeamIdentifier</key>
+                    <string>@TEAM_ID@</string>
+                    <key>Comment</key>
+                    <string>The Outlook mail bridge (LaunchAgent), only with the Outlook package</string>
+                </dict>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

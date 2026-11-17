@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- pkgbuild --component-plist: no bundle gets bundle handling, so the Installer never treats
+     Riggs Filter.app as relocatable and always writes it to /Applications. -->
+<plist version="1.0">
+<array/>
+</plist>

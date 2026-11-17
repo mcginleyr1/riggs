@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use riggs_types::config::EgressConfig;
+use riggs_types::config::{EgressConfig, PolicyChange, PolicyReport};
 use riggs_types::errors::RiggsError;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -45,6 +45,7 @@ pub fn load_policy_file(path: &Path) -> Result<EgressConfig, RiggsError> {
 pub async fn watch_policy(
     policy_path: PathBuf,
     engine: Arc<EgressEngine>,
+    report: PolicyReport,
 ) -> Result<(), RiggsError> {
     let (tx, mut rx) = mpsc::channel::<notify::Result<Event>>(32);
 
@@ -68,6 +69,7 @@ pub async fn watch_policy(
 
     info!(path = %policy_path.display(), "watching egress policy file for changes");
     let _watcher = watcher;
+    let mut deleted = false;
 
     while let Some(result) = rx.recv().await {
         let event = match result {
@@ -86,17 +88,30 @@ pub async fn watch_policy(
             continue;
         }
 
+        // A deletion can arrive as a Remove or as a Modify; either way the old
+        // policy stays in force and the operator is told.
+        if !policy_path.exists() {
+            if !std::mem::replace(&mut deleted, true) {
+                warn!("egress policy file deleted; keeping the current policy");
+                report(PolicyChange::Deleted(policy_path.display().to_string()));
+            }
+            continue;
+        }
+        deleted = false;
+
         if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
             match load_policy_file(&policy_path) {
                 Ok(config) => {
                     engine.replace_policy(EgressPolicy::from_config(&config));
                     info!(mode = %config.mode, "egress policy reloaded");
+                    report(PolicyChange::Reloaded);
                 }
                 Err(e) => {
                     error!(
                         error = %e,
                         "egress policy no longer parses; keeping the current policy, but the daemon will refuse to start until the file is fixed"
                     );
+                    report(PolicyChange::rejected(&e));
                 }
             }
         }
@@ -120,6 +135,35 @@ mod tests {
             assert!(config.enabled, "{file}");
             assert!(!config.process_rules.is_empty(), "{file}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_policy_file_is_reported_and_the_old_policy_stays_in_force() {
+        let dir = std::env::temp_dir().join(format!("riggs-egress-delete-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("egress-policy.toml");
+        std::fs::write(&path, "enabled = true\nmode = \"enforce\"\n").unwrap();
+        let engine = Arc::new(EgressEngine::new(EgressPolicy::from_config(
+            &load_policy_file(&path).unwrap(),
+        )));
+        let (changes, mut seen) = mpsc::unbounded_channel();
+        let report: PolicyReport = Arc::new(move |change| {
+            let _ = changes.send(change);
+        });
+        let task = tokio::spawn(watch_policy(path.clone(), Arc::clone(&engine), report));
+        // Let the watcher register before the deletion.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        std::fs::remove_file(&path).unwrap();
+        let change = tokio::time::timeout(std::time::Duration::from_secs(10), seen.recv()).await;
+        task.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            change.unwrap(),
+            Some(PolicyChange::Deleted(path.display().to_string()))
+        );
+        assert_eq!(engine.mode().as_str(), "enforce");
     }
 
     #[test]

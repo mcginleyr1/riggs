@@ -88,8 +88,8 @@ impl PlatformSensor for MacOsSensor {
             process_monitoring: true,
             file_monitoring: true,
             network_monitoring: true,
-            dns_monitoring: true,
-            auth_monitoring: true,
+            dns_monitoring: false,
+            auth_monitoring: false,
             kernel_monitoring: false,
         }
     }

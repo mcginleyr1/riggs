@@ -3,6 +3,7 @@ use tracing_subscriber::EnvFilter;
 
 mod control;
 mod daemon;
+mod export;
 mod phishing;
 mod supervisor;
 

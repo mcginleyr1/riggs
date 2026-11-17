@@ -5,7 +5,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use riggs_types::config::DlpConfig;
+use riggs_types::config::{DlpConfig, PolicyChange, PolicyReport};
 use riggs_types::errors::RiggsError;
 
 use crate::correlator::DlpCorrelator;
@@ -46,6 +46,7 @@ pub fn load_policy_file(path: &Path) -> Result<DlpConfig, RiggsError> {
 pub async fn watch_policy(
     policy_path: PathBuf,
     correlator: Arc<DlpCorrelator>,
+    report: PolicyReport,
 ) -> Result<(), RiggsError> {
     let (tx, mut rx) = mpsc::channel::<notify::Result<Event>>(32);
 
@@ -74,6 +75,7 @@ pub async fn watch_policy(
     );
 
     let _watcher = watcher;
+    let mut deleted = false;
 
     while let Some(result) = rx.recv().await {
         match result {
@@ -87,6 +89,17 @@ pub async fn watch_policy(
                     continue;
                 }
 
+                // A deletion can arrive as a Remove or as a Modify; either way the
+                // old policy stays in force and the operator is told.
+                if !policy_path.exists() {
+                    if !std::mem::replace(&mut deleted, true) {
+                        warn!("DLP policy file deleted; keeping the current policy");
+                        report(PolicyChange::Deleted(policy_path.display().to_string()));
+                    }
+                    continue;
+                }
+                deleted = false;
+
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         info!("DLP policy file changed, reloading");
@@ -99,12 +112,14 @@ pub async fn watch_policy(
                                     blocked_types = config.file_types.block.len(),
                                     "DLP policy reloaded"
                                 );
+                                report(PolicyChange::Reloaded);
                             }
                             Err(e) => {
                                 error!(
                                     error = %e,
                                     "DLP policy no longer parses; keeping the current policy, but the daemon will refuse to start until the file is fixed"
                                 );
+                                report(PolicyChange::rejected(&e));
                             }
                         }
                     }

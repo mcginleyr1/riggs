@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Force-installs the Riggs browser extension in Google Chrome from a CRX you host. It works only
+     on a Mac managed by MDM, and only if you pack the extension with the private key that matches
+     the "key" in extensions/riggs-browser/ext/manifest.json (docs/DEPLOYMENT.md, "Browser extension").
+     Template: deploy only the copy made by render-profiles.sh, with --update-url set to the https
+     URL of your update manifest XML. The preference payload is Apple's
+     com.apple.ManagedClient.preferences (apple/device-management,
+     mdm/profiles/com.apple.ManagedClient.preferences.yaml); the key and the entry format are
+     Google's ExtensionInstallForcelist policy (chromeenterprise.google/policies/extension-install-forcelist/). -->
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.riggs.profile.chrome-extension</string>
+    <key>PayloadUUID</key>
+    <string>91453B66-5CAA-4A8E-A649-2A24236792E2</string>
+    <key>PayloadDisplayName</key>
+    <string>Riggs extension for Chrome</string>
+    <key>PayloadOrganization</key>
+    <string>@ORGANIZATION@</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.ManagedClient.preferences</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.riggs.profile.chrome-extension.preferences</string>
+            <key>PayloadUUID</key>
+            <string>272B6D1E-25EE-4367-9615-E9C7F8D565F8</string>
+            <key>PayloadDisplayName</key>
+            <string>Chrome managed preferences</string>
+            <key>PayloadContent</key>
+            <dict>
+                <key>com.google.Chrome</key>
+                <dict>
+                    <key>Forced</key>
+                    <array>
+                        <dict>
+                            <key>mcx_preference_settings</key>
+                            <dict>
+                                <key>ExtensionInstallForcelist</key>
+                                <array>
+                                    <string>lilgnipcebaofalbkdgonmidhpdfomen;@UPDATE_MANIFEST_URL@</string>
+                                </array>
+                            </dict>
+                        </dict>
+                    </array>
+                </dict>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

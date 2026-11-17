@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Grants riggs-daemon Full Disk Access (SystemPolicyAllFiles). Template: deploy only the copy
+     made by render-profiles.sh, with --daemon-requirement set to the output of:
+     codesign -d -r- /usr/local/bin/riggs-daemon  (the text after "designated => ")
+     run on the Developer ID signed binary.
+     Keys: apple/device-management, mdm/profiles/TopLevel.yaml, CommonPayloadKeys.yaml,
+     com.apple.TCC.configuration-profile-policy.yaml. -->
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.riggs.profile.full-disk-access</string>
+    <key>PayloadUUID</key>
+    <string>B0602D56-109A-41B6-9712-0AE91A58E7D6</string>
+    <key>PayloadDisplayName</key>
+    <string>Riggs Full Disk Access</string>
+    <key>PayloadDescription</key>
+    <string>Lets the Riggs daemon read protected files, which it needs to scan and watch them.</string>
+    <key>PayloadOrganization</key>
+    <string>@ORGANIZATION@</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.TCC.configuration-profile-policy</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.riggs.profile.full-disk-access.tcc</string>
+            <key>PayloadUUID</key>
+            <string>FF64E386-84E2-44F7-A6D7-A95FB6294334</string>
+            <key>PayloadDisplayName</key>
+            <string>Riggs daemon: Full Disk Access</string>
+            <key>Services</key>
+            <dict>
+                <key>SystemPolicyAllFiles</key>
+                <array>
+                    <dict>
+                        <key>Identifier</key>
+                        <string>/usr/local/bin/riggs-daemon</string>
+                        <key>IdentifierType</key>
+                        <string>path</string>
+                        <key>CodeRequirement</key>
+                        <string>@DAEMON_CODE_REQUIREMENT@</string>
+                        <key>Authorization</key>
+                        <string>Allow</string>
+                        <key>Comment</key>
+                        <string>riggs-daemon, installed by the Riggs package</string>
+                    </dict>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Runs as root from the Installer, with no logged-in user required.
+set -euo pipefail
+
+# An upgrade replaces the binary under a running daemon; stop it first.
+launchctl bootout system/com.riggs.daemon 2>/dev/null || true

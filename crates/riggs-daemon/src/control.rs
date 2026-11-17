@@ -334,6 +334,58 @@ mod tests {
     }
 
     #[test]
+    fn shipped_response_table_is_record_mode_with_the_default_protected_list() {
+        use riggs_types::config::{ResponseConfig, ResponseMode};
+        let shipped: RiggsConfig = toml::from_str(CONFIG).unwrap();
+
+        assert_eq!(shipped.response.mode, ResponseMode::Record);
+        assert_eq!(
+            shipped.response.protected_processes,
+            ResponseConfig::default().protected_processes
+        );
+        let own_init = if cfg!(target_os = "macos") {
+            "/sbin/launchd"
+        } else {
+            "/usr/sbin/sshd"
+        };
+        assert!(shipped
+            .response
+            .protected_processes
+            .iter()
+            .any(|p| p == own_init));
+    }
+
+    #[test]
+    fn export_max_bytes_of_zero_is_refused() {
+        let zero = CONFIG.replace("[export]", "[export]\nmax_bytes = 0");
+        assert!(toml::from_str::<RiggsConfig>(&zero).is_err());
+        let one = CONFIG.replace("[export]", "[export]\nmax_bytes = 1");
+        assert!(toml::from_str::<RiggsConfig>(&one).is_ok());
+    }
+
+    #[test]
+    fn shipped_export_is_off_and_refuses_unknown_keys() {
+        let shipped: RiggsConfig = toml::from_str(CONFIG).unwrap();
+        assert_eq!(shipped.export, riggs_types::config::ExportConfig::default());
+        assert!(shipped.export.jsonl_path.is_none());
+        assert!(
+            toml::from_str::<RiggsConfig>(&CONFIG.replace("[export]", "[export]\njsonl = 1"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn response_table_refuses_the_replaced_auto_respond_key_and_unknown_keys() {
+        let with = |line: &str| CONFIG.replace("mode = \"record\"", line);
+
+        let old = toml::from_str::<RiggsConfig>(&with("auto_respond = true")).unwrap_err();
+        assert!(old.to_string().contains("`mode`"), "{old}");
+        assert!(toml::from_str::<RiggsConfig>(&with("mode = \"act\"")).is_ok());
+        assert!(toml::from_str::<RiggsConfig>(&with("mode = \"sometimes\"")).is_err());
+        assert!(toml::from_str::<RiggsConfig>(&with("kill_on_critcal = false")).is_err());
+    }
+
+    #[test]
     fn detection_table_with_one_key_takes_defaults_for_the_rest() {
         let parsed: RiggsConfig = toml::from_str(&format!(
             "{}\n[detection]\ndownload_recent_hours = 2\n",

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Force-installs the Riggs browser extension in Microsoft Edge from a CRX you host. Same
+     conditions as the Chrome profile: MDM-managed Mac, and a CRX packed with the private key that
+     matches the "key" in extensions/riggs-browser/ext/manifest.json. Template: deploy only
+     the copy made by render-profiles.sh, with --update-url set to the https URL of your update
+     manifest XML. Preference domain com.microsoft.Edge
+     (learn.microsoft.com/en-us/deployedge/configure-microsoft-edge-on-mac); key and entry format:
+     learn.microsoft.com/en-us/deployedge/microsoft-edge-browser-policies/extensioninstallforcelist. -->
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.riggs.profile.edge-extension</string>
+    <key>PayloadUUID</key>
+    <string>E318E10A-AD25-41C5-94C3-3A1A1ACC5886</string>
+    <key>PayloadDisplayName</key>
+    <string>Riggs extension for Edge</string>
+    <key>PayloadOrganization</key>
+    <string>@ORGANIZATION@</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.ManagedClient.preferences</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.riggs.profile.edge-extension.preferences</string>
+            <key>PayloadUUID</key>
+            <string>0367FB63-785E-49A7-BF80-A290F15B4799</string>
+            <key>PayloadDisplayName</key>
+            <string>Edge managed preferences</string>
+            <key>PayloadContent</key>
+            <dict>
+                <key>com.microsoft.Edge</key>
+                <dict>
+                    <key>Forced</key>
+                    <array>
+                        <dict>
+                            <key>mcx_preference_settings</key>
+                            <dict>
+                                <key>ExtensionInstallForcelist</key>
+                                <array>
+                                    <string>lilgnipcebaofalbkdgonmidhpdfomen;@UPDATE_MANIFEST_URL@</string>
+                                </array>
+                            </dict>
+                        </dict>
+                    </array>
+                </dict>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>
