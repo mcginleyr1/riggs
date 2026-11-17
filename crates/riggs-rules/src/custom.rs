@@ -226,6 +226,7 @@ mod tests {
             process_context: dummy_process_context(name, storyline),
             action: ProcessAction::Exec,
             parent_context: None,
+            download: None,
         })
     }
 

@@ -5,20 +5,24 @@ use chrono::Utc;
 use tracing::{debug, info};
 
 use riggs_engine::{DetectionStage, StageVerdict};
+use riggs_types::config::DetectionConfig;
 use riggs_types::errors::RiggsError;
 use riggs_types::events::{RiggsEvent, Severity, StorylineId};
 use riggs_types::verdict::{DetectionSource, ThreatLevel, Verdict};
 
+use crate::lure::LureRules;
 use crate::tracker::BehaviorTracker;
 
 pub struct BehavioralAiStage {
     tracker: Mutex<BehaviorTracker>,
+    lure: Mutex<LureRules>,
 }
 
 impl BehavioralAiStage {
     pub fn new() -> Self {
         Self {
             tracker: Mutex::new(BehaviorTracker::new()),
+            lure: Mutex::new(LureRules::new(&DetectionConfig::default())),
         }
     }
 
@@ -28,6 +32,7 @@ impl BehavioralAiStage {
             tracker: Mutex::new(
                 BehaviorTracker::new().with_limits(max_events_per_storyline, max_storylines),
             ),
+            lure: Mutex::new(LureRules::new(&DetectionConfig::default())),
         }
     }
 
@@ -35,7 +40,7 @@ impl BehavioralAiStage {
     pub fn configured(
         max_events_per_storyline: usize,
         max_storylines: usize,
-        detection: &riggs_types::config::DetectionConfig,
+        detection: &DetectionConfig,
     ) -> Self {
         Self {
             tracker: Mutex::new(
@@ -43,6 +48,7 @@ impl BehavioralAiStage {
                     .with_limits(max_events_per_storyline, max_storylines)
                     .with_detection(detection),
             ),
+            lure: Mutex::new(LureRules::new(detection)),
         }
     }
 }
@@ -66,7 +72,7 @@ impl DetectionStage for BehavioralAiStage {
     async fn analyze(&self, event: &RiggsEvent) -> Result<StageVerdict, RiggsError> {
         let storyline_id = extract_storyline_id(event);
 
-        let patterns = {
+        let mut patterns = {
             // Recover from a poisoned lock instead of erroring out; a single
             // panic under the lock must not disable behavioral detection forever.
             let mut tracker = self
@@ -77,6 +83,12 @@ impl DetectionStage for BehavioralAiStage {
             tracker.track(event.clone());
             tracker.check_patterns(&storyline_id)
         };
+        patterns.extend(
+            self.lure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .check(event),
+        );
 
         if patterns.is_empty() {
             debug!(storyline = ?storyline_id, "no behavioral patterns detected");

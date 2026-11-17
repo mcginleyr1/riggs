@@ -136,7 +136,10 @@ pub struct EgressProcessRule {
 /// Behavioral/heuristic detection thresholds and signatures. These are tuning
 /// for detection logic (kept separate from [engine] plumbing) so operators can
 /// adjust sensitivity and add environment-specific persistence locations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Missing keys take their defaults (an installed riggs.toml predating a key
+/// still loads); a misspelled key stops startup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DetectionConfig {
     /// External outbound connections in a storyline that corroborate archive
     /// staging as data exfiltration (volume alone never fires).
@@ -149,6 +152,23 @@ pub struct DetectionConfig {
     pub threat_score_threshold: f32,
     /// Filesystem locations treated as persistence mechanisms when written.
     pub persistence_paths: Vec<String>,
+    /// Executed-download rule: a download mark younger than this counts (0 = off).
+    pub download_recent_hours: u64,
+    /// Executable basenames of script interpreters (`python3` also matches
+    /// `python3.12`).
+    pub interpreters: Vec<String>,
+    /// Executable basenames of programs that fetch URLs.
+    pub downloaders: Vec<String>,
+    /// Executable basenames of mail, browser and chat apps a lure arrives through.
+    pub lure_parents: Vec<String>,
+    /// Directories whose direct children are flagged when executed.
+    pub temp_exec_dirs: Vec<String>,
+    /// Credential stores flagged when opened: a substring of the path in which
+    /// `*` stands for any run of characters.
+    pub credential_paths: Vec<String>,
+    /// Executable path prefixes allowed to open credential stores. Keep them
+    /// in root-owned directories, or malware can pose as a reader.
+    pub credential_readers: Vec<String>,
 }
 
 impl Default for DetectionConfig {
@@ -172,6 +192,46 @@ impl Default for DetectionConfig {
                 "/etc/rc.local".into(),
                 "/.ssh/authorized_keys".into(),
             ],
+            download_recent_hours: 24,
+            interpreters: vec![
+                "sh".into(),
+                "bash".into(),
+                "zsh".into(),
+                "dash".into(),
+                "ksh".into(),
+                "csh".into(),
+                "tcsh".into(),
+                "python3".into(),
+                "Python".into(),
+                "perl".into(),
+                "ruby".into(),
+                "osascript".into(),
+            ],
+            downloaders: vec!["curl".into(), "wget".into()],
+            lure_parents: vec![
+                "Safari".into(),
+                "Google Chrome".into(),
+                "chromium".into(),
+                "firefox".into(),
+                "firefox-esr".into(),
+                "Mail".into(),
+                "Microsoft Outlook".into(),
+                "thunderbird".into(),
+                "Slack".into(),
+                "Discord".into(),
+                "Signal".into(),
+                "Telegram".into(),
+            ],
+            temp_exec_dirs: vec![
+                "/tmp".into(),
+                "/private/tmp".into(),
+                "/var/tmp".into(),
+                "/private/var/tmp".into(),
+            ],
+            // Off until the host's own readers are listed: a reader left out
+            // alerts on every open (sourced example in config/riggs.toml).
+            credential_paths: Vec::new(),
+            credential_readers: Vec::new(),
         }
     }
 }

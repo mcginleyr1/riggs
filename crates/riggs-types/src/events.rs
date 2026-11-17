@@ -200,6 +200,7 @@ impl RiggsEvent {
             process_context,
             action,
             parent_context,
+            download: None,
         })
     }
 
@@ -401,6 +402,18 @@ pub struct ProcessEvent {
     pub process_context: ProcessContext,
     pub action: ProcessAction,
     pub parent_context: Option<ProcessContext>,
+    /// The download mark on the executable or on one of its leading operands,
+    /// read by the sensor at exec (macOS only; None elsewhere).
+    #[serde(default)]
+    pub download: Option<DownloadMark>,
+}
+
+/// A download mark as the sensor read it; detection decides what it means.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadMark {
+    pub path: String,
+    /// The raw `com.apple.quarantine` value: `flags;hex-seconds;agent;UUID`.
+    pub quarantine: String,
 }
 
 // --- File ---
@@ -503,4 +516,28 @@ pub struct KernelEvent {
     pub process_context: ProcessContext,
     pub action: KernelAction,
     pub detail: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_event_stored_without_download_deserializes() {
+        let ctx = ProcessContext::new(7, 1, "sh", "/bin/sh", "sh", "501", StorylineId::new());
+        let mut stored =
+            serde_json::to_value(RiggsEvent::new_process(ProcessAction::Exec, ctx, None)).unwrap();
+        assert!(stored["Process"]
+            .as_object_mut()
+            .unwrap()
+            .remove("download")
+            .is_some());
+
+        let event: RiggsEvent = serde_json::from_value(stored).unwrap();
+
+        assert!(matches!(
+            event,
+            RiggsEvent::Process(ProcessEvent { download: None, .. })
+        ));
+    }
 }
