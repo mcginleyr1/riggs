@@ -1,0 +1,31 @@
+[package]
+name = "riggs-phishing"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riggs-types = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+notify = { workspace = true }
+psl = "2.1"
+idna = "1.1"
+url = "2.5"
+strsim = "0.11"
+unicode-security = "0.1"
+sha2 = "0.10"
+
+[dev-dependencies]
+mail-parser = { version = "1", features = ["full_encoding"] }
+scraper = "0.29"
+
+# Cargo builds examples under `cargo test` but runs their tests only when asked.
+[[example]]
+name = "eval"
+test = true
+
+[[example]]
+name = "lookalike_fp"
+test = true

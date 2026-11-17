@@ -16,3 +16,6 @@
 # Python bytecode
 __pycache__/
 *.pyc
+
+# npm packages (riggs-browser extension tooling)
+node_modules/

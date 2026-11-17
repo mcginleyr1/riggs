@@ -3,7 +3,7 @@ mod messages;
 
 pub use ipc::{
     ControlOps, DaemonState, DlpFlowVerdict, DlpQuery, DlpQueryStatus, EgressFlowVerdict,
-    EgressQuery, EgressQueryStatus, IpcClient, IpcError, IpcServer, StoreQuery,
+    EgressQuery, EgressQueryStatus, IpcClient, IpcError, IpcServer, PhishingQuery, StoreQuery,
 };
 pub use messages::{ClientMessage, DaemonMessage, QuarantinedFile};
 

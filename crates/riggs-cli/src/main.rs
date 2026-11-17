@@ -51,6 +51,7 @@ async fn main() {
         "dlp" => commands::dlp(&socket_path, &cmd_args[1..]).await,
         "egress" => commands::egress(&socket_path, &cmd_args[1..]).await,
         "vuln" => commands::vuln(&socket_path, &cmd_args[1..]).await,
+        "phishing" => commands::phishing(&socket_path, &cmd_args[1..]).await,
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -90,5 +91,6 @@ fn print_usage() {
     println!("  dlp          Data loss prevention status and policy");
     println!("  egress       Default-deny egress allowlist (status/allow/deny/mode)");
     println!("  vuln         Vulnerability feed management");
+    println!("  phishing     Phishing protection (status/recent/stats/logins/trust/forget/mode)");
     println!("  help         Show this help message");
 }

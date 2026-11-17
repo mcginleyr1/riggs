@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
+		<title>Riggs stopped this page</title>
+		<style>
+			:root {
+				--alarm: #b3261e;
+				--safe: #0b57d0;
+				--on-safe: #fff;
+			}
+			@media (prefers-color-scheme: dark) {
+				:root {
+					--alarm: #f2b8b5;
+					--safe: #a8c7fa;
+					--on-safe: #062e6f;
+				}
+			}
+			body {
+				margin: 0;
+				font: 1rem/1.5 system-ui, sans-serif;
+			}
+			main {
+				max-width: 34rem;
+				margin: 0 auto;
+				padding: 12vh 1.5rem 3rem;
+			}
+			h1 {
+				margin: 0 0 1rem;
+				font-size: 1.75rem;
+				line-height: 1.2;
+			}
+			#blocked h1 {
+				color: var(--alarm);
+			}
+			#host {
+				padding: 0.6rem 0.8rem;
+				border: 1px solid;
+				border-radius: 0.4rem;
+				font: 1.1rem/1.4 ui-monospace, Menlo, Consolas, monospace;
+				overflow-wrap: anywhere;
+			}
+			button {
+				margin: 1rem 1rem 0 0;
+				padding: 0.6rem 1.2rem;
+				border: 0;
+				border-radius: 0.4rem;
+				font: inherit;
+				cursor: pointer;
+			}
+			button:focus-visible {
+				outline: 3px solid var(--safe);
+				outline-offset: 2px;
+			}
+			button:disabled {
+				opacity: 0.5;
+				cursor: default;
+			}
+			#close {
+				background: var(--safe);
+				color: var(--on-safe);
+				font-weight: 600;
+			}
+			#continue {
+				padding-inline: 0.4rem;
+				background: none;
+				color: inherit;
+				text-decoration: underline;
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<section id="blocked" hidden>
+				<h1>Riggs stopped this page</h1>
+				<p>
+					The page you were opening asks for a password, and it may not be the
+					site it appears to be. Its address is:
+				</p>
+				<p id="host" translate="no"></p>
+				<div id="advice">
+					<ul id="reasons"></ul>
+					<p>
+						If you are not sure, close this tab and go to the site the way you
+						usually do instead of following a link.
+					</p>
+				</div>
+				<p id="continued" hidden>
+					You chose to continue. If the page does not open by itself, open it
+					again yourself: Riggs will not stop this site again until the browser
+					is restarted.
+				</p>
+			</section>
+			<section id="clear" hidden>
+				<h1>Nothing is blocked in this tab</h1>
+				<p>Riggs has not stopped a page here. You can close this tab.</p>
+			</section>
+			<button id="close" type="button">Close this tab</button>
+			<button id="continue" type="button" hidden disabled>Continue anyway</button>
+		</main>
+		<script src="interstitial.js"></script>
+	</body>
+</html>

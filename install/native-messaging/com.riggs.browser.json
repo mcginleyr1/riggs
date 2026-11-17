@@ -1,0 +1,7 @@
+{
+  "name": "com.riggs.browser",
+  "description": "Riggs phishing sensor host: forwards browser observations to the Riggs daemon",
+  "path": "/usr/local/bin/riggs-browser-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://lilgnipcebaofalbkdgonmidhpdfomen/"]
+}

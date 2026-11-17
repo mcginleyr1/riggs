@@ -3,10 +3,10 @@
 ## Overview
 
 Riggs stores all persistent data locally using redb, an embedded key-value
-store written in Rust. There is no external database dependency. The store
-runs as a single-writer task in the daemon, receiving writes via an mpsc
-channel and serving reads via synchronous methods called by the CLI and
-shell interfaces.
+store written in Rust. There is no external database dependency. Only the
+daemon opens the database: its writer tasks commit to it and its IPC handlers
+read from it. The CLI and every other client ask the daemon over its socket
+(`docs/COMMUNICATION.md`); none of them reads the file.
 
 All store logic lives in `riggs-store`.
 
@@ -17,8 +17,9 @@ redb was chosen over alternatives for specific reasons:
 - **Pure Rust**: No C dependencies, no FFI, reproducible builds.
 - **ACID transactions**: Crash-safe writes with automatic recovery.
 - **Zero-copy reads**: Memory-mapped values avoid deserialization for lookups.
-- **Single-writer, multi-reader**: Matches our architecture (one store task
-  writes, CLI and shell read).
+- **Single-writer, multi-reader**: Matches our architecture (one write
+  transaction at a time, readers never blocked, all of them inside the
+  daemon).
 - **Embedded**: No server process. The database is a single file.
 - **Small footprint**: ~200 KB of compiled code.
 
@@ -33,6 +34,13 @@ Alternatives considered:
 The database lives at `/var/lib/riggs/riggs.db` (system mode) or
 `~/.local/share/riggs/riggs.db` (user mode). The file is created on first
 run.
+
+The file is readable and writable by its owner only (mode 0600). The daemon
+creates it that way, before redb opens it, and sets the mode again each time
+it opens the file, which tightens one that an older build created with the
+default mode. If either step fails the store does not open. The file holds
+where local users log in (see [Phishing tables](#phishing-tables)), so on an
+installed host, where the daemon runs as root, only root can read it.
 
 Typical sizes:
 - Fresh install: ~100 KB
@@ -218,6 +226,104 @@ const STORYLINES_TABLE: TableDefinition<&[u8; 16], &[u8]> =
 
 - **Key**: Storyline UUID (16 bytes).
 - **Value**: Zstd-compressed JSON of `Storyline`.
+
+### Phishing tables
+
+Three tables hold the per-user state of phishing protection
+(`docs/PHISHING.md`). They are defined in `crates/riggs-store/src/tables.rs`
+and read and written only through `crates/riggs-store/src/phishing.rs`. This
+section describes them as that code has them.
+
+```rust
+/// (uid, registrable domain) -> (first_ms, last_ms, count)
+pub const PHISHING_LOGINS_TABLE: TableDefinition<(u32, &str), (u64, u64, u32)> =
+    TableDefinition::new("phishing_logins");
+/// (uid, sender key) -> (first_ms, first_msg)
+pub const PHISHING_SENDERS_TABLE: TableDefinition<(u32, &str), (u64, u64)> =
+    TableDefinition::new("phishing_senders");
+/// UUIDv7 (16 bytes) ++ uid big-endian (4 bytes) -> encoded `StoredVerdict` JSON.
+pub const PHISHING_VERDICTS_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("phishing_verdicts");
+```
+
+Every row belongs to one local user, named by uid in its key. The two tuple
+keys compare element by element, so rows sort by uid (numerically), then by
+the string. Times are milliseconds since the Unix epoch.
+
+**`phishing_logins`**: where a user logs in.
+
+- **Key**: `(uid, registrable domain)`, for example `(501, "example.com")`.
+- **Value**: `(first_ms, last_ms, count)`: the first and the latest time a
+  login there was seen, and how often. A `count` of 0 marks a pending login:
+  one seen only on weak evidence, which the engine does not yet treat as known
+  (`docs/PHISHING.md`, "Known and pending logins").
+- A write inserts the row or replaces the one with the same key; `riggs
+  phishing forget` removes one.
+
+**`phishing_senders`**: the senders whose mail a user has opened.
+
+- **Key**: `(uid, sender key)`. The sender key is the registrable domain of
+  the sender's address. For an address at a free-mail domain, or one whose
+  domain has no registrable domain, it is the hex SHA-256 of the whole address
+  (trimmed, lowercased, a trailing dot dropped), so that two people at one
+  mail provider stay two senders without their addresses being stored.
+- **Value**: `(first_ms, first_msg)`: when the sender was first seen, and the
+  fingerprint of that first message.
+- A write inserts the row only if the key is absent, so the first sighting is
+  kept. Nothing removes a row.
+
+**`phishing_verdicts`**: the log of checks, one row for each mail opened and
+each password page checked.
+
+- **Key**: 20 bytes: a UUIDv7 minted when the row is written, then the uid as
+  4 big-endian bytes. Keys therefore sort by time of writing, like the other
+  time-keyed tables, and a read for one uid takes the rows whose key ends in
+  that uid.
+- **Value**: JSON `{"msg": <fingerprint>, "entry": {...}}`, encoded like an
+  event: zstd level 3 when `[store] compression_enabled` is on, raw JSON
+  otherwise. `entry` is a `VerdictEntry` (`crates/riggs-types/src/phishing.rs`):
+  `time_ms`, `kind` (`mail` or `page`), `domain`, `cues` (cue ids), `score`,
+  `level` and `shown`. `domain` is the registrable domain of the mail's sender
+  or of the page, and empty when the host has none (an IP address).
+- Rows are only appended. A mail opened twice gives two rows with the same
+  `msg`; a reader keeps the newest row per `msg`.
+
+A fingerprint is the first 8 bytes of a SHA-256, read as a big-endian number.
+For a mail the hash covers the provider's name, a NUL byte and the provider's
+message id; for a page it covers `page`, a NUL byte, the page's registrable
+domain and the UTC day, so that the checks of one site on one day read back as
+one entry. The message id itself is not stored.
+
+None of the three tables holds a subject, a body, a display name, a recipient,
+a link or a full address.
+
+**Writes.** The daemon keeps this state in memory and persists it from one
+task (`write_batches` in `crates/riggs-daemon/src/phishing.rs`), which takes
+up to 256 queued writes at a time and applies them in one transaction
+(`phishing_apply`): either every write of a batch lands or none does. A
+verdict row whose score is not a finite number fails its whole batch. The
+queue holds 1,024 writes. When it is full, a write caused by a sensor (a
+verdict row, a sender row, a login seen in the browser) is dropped and
+counted, and the daemon logs the count as it grows; `riggs phishing trust` or
+`forget` is refused with `the phishing store is busy; try again` before
+anything changes.
+
+**Reads.** `phishing_load` returns every login and sender row when the daemon
+starts. `phishing_verdicts(uid, limit)` returns one user's newest rows, newest
+first, for `riggs phishing recent` and `riggs phishing stats`; it walks the
+table backwards and decodes only that user's rows.
+
+**Retention.** `phishing_verdicts` is pruned by the daemon's retention sweep
+together with `events`, `verdicts` and `response_log`: a row goes when the
+time in its key is older than `[store] retention_days` (90 in the shipped
+`riggs.toml`). The sweep runs when the daemon starts and then every
+`[engine] retention_sweep_secs` (six hours as shipped). That one setting is
+all the retention the code has; the per-table settings shown under
+[Retention Policies](#retention-policies) are not read by it.
+`phishing_logins` and `phishing_senders` are never aged out. They are bounded
+per user by the phishing policy instead (`max_logins`, `max_senders`). The
+daemon also logs at most 500 verdict rows per user per UTC day; it counts
+them in memory, so a restart starts the day's count again.
 
 ## Compression
 

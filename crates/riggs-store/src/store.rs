@@ -7,7 +7,10 @@ use riggs_types::events::{EventId, RiggsEvent, StorylineId};
 use riggs_types::verdict::MergedVerdict;
 use tracing::debug;
 
-use crate::tables::{EVENTS_TABLE, RESPONSE_LOG_TABLE, VERDICTS_TABLE};
+use crate::tables::{
+    EVENTS_TABLE, PHISHING_LOGINS_TABLE, PHISHING_SENDERS_TABLE, PHISHING_VERDICTS_TABLE,
+    RESPONSE_LOG_TABLE, VERDICTS_TABLE,
+};
 
 // Re-export for use by other crates that store response records.
 pub use riggs_types::events;
@@ -20,7 +23,7 @@ pub struct RiggsStore {
 /// Decompress zstd data, falling back to the raw bytes when the value was
 /// written uncompressed (so the store reads correctly across a toggle of
 /// `compression_enabled`).
-fn decode(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn decode(bytes: &[u8]) -> Vec<u8> {
     zstd::decode_all(bytes).unwrap_or_else(|_| bytes.to_vec())
 }
 
@@ -30,6 +33,22 @@ impl RiggsStore {
     }
 
     pub fn with_compression(path: &Path, compress: bool) -> Result<Self, RiggsError> {
+        // The file holds where local users log in. Create it owner-only, so no other
+        // user can open it in the moment before the chmod, and tighten a file an older
+        // version created with the default mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
+        }
         let db = Database::create(path).map_err(|e| RiggsError::Store(e.to_string()))?;
 
         // Ensure all tables exist by opening a write transaction.
@@ -46,6 +65,15 @@ impl RiggsStore {
             let _ = write_txn
                 .open_table(RESPONSE_LOG_TABLE)
                 .map_err(|e| RiggsError::Store(e.to_string()))?;
+            let _ = write_txn
+                .open_table(PHISHING_LOGINS_TABLE)
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
+            let _ = write_txn
+                .open_table(PHISHING_SENDERS_TABLE)
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
+            let _ = write_txn
+                .open_table(PHISHING_VERDICTS_TABLE)
+                .map_err(|e| RiggsError::Store(e.to_string()))?;
         }
         write_txn
             .commit()
@@ -57,7 +85,7 @@ impl RiggsStore {
         })
     }
 
-    fn encode(&self, json: &[u8]) -> Result<Vec<u8>, RiggsError> {
+    pub(crate) fn encode(&self, json: &[u8]) -> Result<Vec<u8>, RiggsError> {
         if self.compress {
             zstd::encode_all(json, 3).map_err(|e| RiggsError::Store(e.to_string()))
         } else {
@@ -406,6 +434,22 @@ mod tests {
             got.map(|g| g.event_id().clone()),
             Some(e.event_id().clone())
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_file_is_owner_only_after_opening() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let path = tmp_db();
+
+        drop(RiggsStore::new(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(RiggsStore::new(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
         let _ = std::fs::remove_file(&path);
     }
 

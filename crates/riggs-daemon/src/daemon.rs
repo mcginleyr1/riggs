@@ -720,6 +720,44 @@ impl RiggsDaemon {
             *guard = Some(Arc::new(StoreAdapter(Arc::clone(&store))));
         }
 
+        // -- Phishing protection --
+        // Advice shown to a person: nothing here reaches the detection pipeline,
+        // the response engine or the threat counters. The policy file is its only
+        // switch; one that does not load stops startup, as a bad egress policy does.
+        let phishing_writer = match riggs_phishing::reload::find_policy_file() {
+            None => {
+                info!("no phishing policy file; phishing protection is off");
+                None
+            }
+            Some(path) => {
+                let policy = riggs_phishing::reload::load_policy_file(&path)?;
+                info!(path = %path.display(), mode = ?policy.mode(), "phishing protection initialized");
+                let policy = Arc::new(tokio::sync::watch::Sender::new(Arc::new(policy)));
+                let (adapter, writes) = crate::phishing::PhishingAdapter::new(
+                    Arc::clone(&store),
+                    Arc::clone(&policy),
+                    path.clone(),
+                    crate::phishing::QUEUE_CAPACITY,
+                )?;
+                if let Ok(mut guard) = daemon_state.phishing.write() {
+                    *guard = Some(Arc::new(adapter));
+                }
+                self.supervisor.spawn("phishing-policy-watcher", move || {
+                    let policy = Arc::clone(&policy);
+                    let path = path.clone();
+                    Box::pin(async move {
+                        if let Err(e) = riggs_phishing::reload::watch_policy(path, policy).await {
+                            tracing::error!(error = %e, "phishing policy watcher error");
+                        }
+                    })
+                });
+                Some(tokio::spawn(crate::phishing::write_batches(
+                    Arc::clone(&store),
+                    writes,
+                )))
+            }
+        };
+
         // -- Retention (prunes events/verdicts/response_log past retention_days) --
         let retention_days = self.config.store.retention_days;
         let retention_sweep = Duration::from_secs(self.config.engine.retention_sweep_secs.max(1));
@@ -1189,6 +1227,17 @@ impl RiggsDaemon {
         drop(store_tx);
         if let Err(e) = tokio::time::timeout(Duration::from_secs(5), writer_handle).await {
             warn!(error = %e, "store writer did not flush within timeout");
+        }
+
+        // Dropping the adapter closes its queue: the phishing writer stores what
+        // is queued and exits.
+        if let Ok(mut guard) = daemon_state.phishing.write() {
+            guard.take();
+        }
+        if let Some(writer) = phishing_writer {
+            if let Err(e) = tokio::time::timeout(Duration::from_secs(5), writer).await {
+                warn!(error = %e, "phishing writer did not flush within timeout");
+            }
         }
 
         let stats = pipeline.stats();
