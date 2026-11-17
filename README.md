@@ -51,6 +51,9 @@ Platform Sensors → Normalization → Detection Pipeline → Response / Store
   the pages that ask for a password; the daemon judges them against where this user logs in and
   either records what it would flag (monitor mode, the default) or shows a warning (warn mode).
   Not yet run in a real browser; what it stores and what it cannot see are in `docs/PHISHING.md`
+- **Phishing protection (Outlook for Mac, opt-in)** — an add-in pane and a per-user loopback
+  service (`riggs-mailbridge`) send the message you are reading to the same daemon; it warns
+  but cannot block links. Not yet run in Outlook; see `docs/PHISHING.md`, "Outlook for Mac"
 
 ## Quick Start
 
@@ -101,6 +104,11 @@ extension to `/usr/local/share/riggs/browser-extension`, but a browser only
 takes an unpacked extension by hand: load that directory at `chrome://extensions`
 once per browser profile. See "Enabling it" in `docs/PHISHING.md`.
 
+The Outlook for Mac sensor is opt-in: `sudo install/install.sh --outlook` also installs
+`riggs-mailbridge`, the add-in's files and a per-user LaunchAgent, and prints the two steps
+only you can take (trust the bridge's certificate authority, add the add-in to your mailbox).
+See "Outlook for Mac" in `docs/PHISHING.md`.
+
 ### Verify
 
 ```
@@ -142,11 +150,14 @@ crates/
                           native-messaging host a browser starts to reach the daemon
   riggs-daemon/           `riggs-daemon` binary, supervisor, lifecycle
   riggs-menubar/          macOS menu bar status app
+  riggs-mailbridge/       Per-user loopback HTTPS service for the Outlook for Mac add-in
 extensions/
   riggs-filter/           macOS Network Extension for egress/DLP flow blocking (Swift)
                           and its host app "Riggs Filter.app"; build.sh builds both
   riggs-browser/          Chromium extension for phishing protection (plain JavaScript, no
                           build step): ext/ is the directory a browser loads, test/ its tests
+  riggs-outlook/          Outlook for Mac add-in (plain JavaScript): addin/ is what the bridge
+                          serves, test/ its tests
 config/
   riggs.toml              Main daemon configuration
   dlp-policy.toml         Default DLP policy (hot-reloadable)
@@ -291,12 +302,14 @@ cargo test -p riggs-dlp  # test a specific crate
 swift test --package-path extensions/riggs-filter   # filter SNI/domain logic
 npm --prefix extensions/riggs-browser test          # browser extension (after one `npm ci`)
 npm --prefix extensions/riggs-browser run lint
+npm --prefix extensions/riggs-outlook test          # Outlook add-in (after one `npm ci`)
+npm --prefix extensions/riggs-outlook run lint
 ```
 
 CI runs the same checks on Linux, plus `mix format --check-formatted`,
 `mix credo` and `mix test` for Murtaugh (see `DEVELOPMENT.md`).
 
-The workspace has 26 crates. Each crate is independently testable. See
+The workspace has 27 crates. Each crate is independently testable. See
 `docs/DEVELOPMENT_PHASES.md` for the implementation roadmap.
 
 ## Documentation

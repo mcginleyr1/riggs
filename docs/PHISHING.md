@@ -21,7 +21,8 @@ Contents: [What it is](#what-it-is) · [Enabling it](#enabling-it) ·
 [What the popup says](#what-the-popup-says) · [Measuring](#measuring) ·
 [Limits and known gaps](#limits-and-known-gaps) ·
 [Not confirmed in a real browser](#not-confirmed-in-a-real-browser) ·
-[Linux](#linux) · [Browser extension contract](#browser-extension-contract)
+[Linux](#linux) · [Outlook for Mac](#outlook-for-mac) ·
+[Browser extension contract](#browser-extension-contract)
 
 ## What it is
 
@@ -446,7 +447,8 @@ Stated plainly, as found in review. None of this is hidden by a default.
 **Coverage**
 
 - Gmail is the only webmail source. Outlook on the web has no adapter yet; the
-  wire protocol has a place for one (`outlook_web`).
+  wire protocol has a place for one (`outlook_web`). Outlook for Mac has its own,
+  separate path: [Outlook for Mac](#outlook-for-mac).
 - The mail adapter reads the message layout of one capture of Gmail's page.
   Whether Gmail's page looks like that for you (other layouts, other
   languages, replies, drafts, inline images) was not captured. When the adapter
@@ -597,6 +599,404 @@ test gate, run in a `rust:1.99` container). What has not been done on Linux:
 installing the host, placing a native-messaging manifest, a browser talking to
 the host, and the manual steps below. The manual steps are in `docs/STANDALONE.md`,
 "Phishing protection (browser)".
+
+## Outlook for Mac
+
+**Nobody has run this in Outlook.** The pane, the bridge and the daemon have
+been run together without Outlook: the real bridge and a development daemon,
+with the pane loaded from the bridge in macOS's web view and a stand-in for
+Office's script. Everything that depends on Outlook itself is listed in
+[Not confirmed in a real Outlook](#not-confirmed-in-a-real-outlook), each with
+how you would confirm it. Nothing below is a promise that it works there.
+
+An Outlook add-in is a web page that Outlook shows in a side pane. It is
+installed by adding a small XML file, the manifest, to your mailbox; the
+manifest only names the page's address. Riggs's page is served by a small
+program on your own Mac, so that the page can hand the message you are reading
+to the Riggs daemon.
+
+### Who it works for
+
+- **Mailboxes that Microsoft hosts:** Microsoft 365 (work or school) and
+  Outlook.com. Microsoft's documentation says add-ins are supported for these
+  and "not supported" for other accounts.
+- **Not a Gmail, iCloud or IMAP account added to Outlook.** Microsoft states
+  that POP3 and IMAP accounts in Outlook do not support Office add-ins. On the
+  Mac such an account works only if it was added in a way that syncs it to
+  Microsoft's cloud ("IMAP CloudCache"), which copies the mail to Microsoft;
+  whether a custom add-in can be installed on it was not found. For a Gmail
+  account, use the browser extension.
+- **Outlook for Mac 16.13 or later** (the pinned pane needs it; Microsoft
+  documents the pane as pinnable on Mac from that version), with Microsoft's
+  mailbox API 1.5 or later. The manifest asks for 1.5. The new Outlook for Mac
+  offers 1.1 to 1.14, the legacy one 1.1 to 1.8 (Microsoft's notes put the end
+  of the legacy one's support in October 2026).
+- **Exchange on-premises** needs Exchange 2016 or later and is limited to API
+  1.5.
+- **A tenant administrator can stop it:** an administrator can remove the
+  "My Custom Apps" role, turn off add-ins for the mailbox, or turn off
+  optional connected experiences, and then you cannot add it, or it stops
+  working. The add-in's name, `Riggs`, is stored in the mailbox and an
+  administrator of a work account can see it.
+- Outlook must be online: Office's script, `office.js`, is loaded from
+  Microsoft's content-delivery network every time the pane opens. Without a
+  network the pane stays on its first line and checks nothing. If Riggs's
+  egress allowlist is enforcing, Outlook has to be allowed to reach
+  `*.static.microsoft`, the pattern Microsoft's CDN page asks allow lists to
+  carry.
+
+### What it does, and what it cannot do
+
+- **A pinned pane.** Outlook gives an add-in no way to start by itself on the
+  Mac. You open the Riggs pane from the ribbon once, pin it (the pin icon on
+  the pane), and from then on it checks each message you select. It checks a
+  message **only while the pane is open**. A message you open without the pane
+  open, or in a mailbox you did not add the add-in to, is not checked.
+  Whether the pin survives restarting Outlook is not known (below).
+- **One notification.** For a message the daemon flags, in warn mode, the pane
+  shows its verdict and also puts one notification bar on the message,
+  `Riggs: ` followed by the heading and the first reason, at most 150
+  characters. It is of Outlook's informational kind and is not stored (not
+  persistent). That is all. **It cannot block or rewrite a link, and a link in
+  the message stays clickable.**
+- **It checks the same things as the browser extension**, with the same engine,
+  the same policy file and the same per-user state: sender, recipients, subject,
+  body text, links and attachment names go to the daemon, which decides as
+  described in [How a verdict is reached](#how-a-verdict-is-reached). The
+  Outlook pane reports mail only. It learns no logins, so the daemon's known
+  logins come from the browser extension or from `riggs phishing trust`; without
+  known logins the lookalike rules have nothing to compare a sender or link with.
+- **Monitor mode shows nothing.** As shipped the mode is `monitor`: the daemon
+  records what it would flag and the pane shows no verdict. The mode is the same
+  setting as for the browser ([Modes](#modes)). Use `sudo riggs phishing recent`
+  to see what was checked.
+- **It never says a message is safe.** What the pane says:
+
+| State | The pane's line |
+|---|---|
+| waiting for Outlook (also if `office.js` cannot load) | Riggs is waiting for Outlook. No message is checked until this line changes. |
+| opened outside Outlook | This page is the Riggs pane for Outlook. It does nothing outside Outlook. |
+| nothing selected | No message is selected. |
+| not a message in read mode | Riggs checks messages you are reading. This item is not one. |
+| reading and sending | Checking this message. |
+| a field could not be read | Riggs could not read this message, so it was not checked. |
+| the bridge or the daemon did not answer (the daemon stopped, or has no policy file, or took over five seconds; also a bridge that is stopped) | Riggs did not check this message. It may be stopped, or phishing protection may be switched off. |
+| any other bridge status | Riggs could not check this message (bridge status 403). (with the status it gave) |
+| nothing to show (monitor mode, or level `none`) | Riggs has nothing to show for this message. That is not a promise about it. |
+| `caution` (warn mode) | Be careful with this message. and one bullet per reason |
+| `danger` (warn mode) | This message may be phishing. and one bullet per reason |
+
+Under the state, the pane always says: "Keep this pane pinned. Outlook gives an
+add-in no way to start by itself, so Riggs checks a message only while this
+pane is open." If Outlook refuses to let the pane follow your selection, that
+line says instead that only the message the pane was opened on is checked.
+
+**What the pane sends.** `message_id` is the message's internet message id, `to`
+is the To addresses followed by the Cc addresses, `attachments` are the names
+of the attachments that are not inline, and `reply_to` is the address of the
+first `Reply-To` header, taken from outside any comment or quoted string, so
+that an address written inside a display name cannot stand in for the real one.
+An unterminated comment or quoted string runs to the end of the header, so
+whatever follows it is hidden and no reply address is reported; mail clients
+disagree about such headers, and what Outlook does with one is unknown.
+`body_text` and each link's text are built by the walk of the contract's
+["Body text and link text"](#browser-extension-contract). The pane cuts the body
+at 1,000,000 characters after it has removed filler, and the bridge then caps
+every field to the daemon's limits ([Limits](#wire-protocol)).
+
+**Padding.** The limit stated for the browser applies here too: padding that the
+filler rule does not match (shorter runs, runs of whitespace) can still push a
+message's text past the 64 KiB cap, and such a message is recorded with the
+`observation_truncated` cue. The pane applies the same filler rule before its
+own cut, and the bridge applies it again before capping.
+
+### How it fits together
+
+```
+Outlook pane (web page)  --HTTPS-->  riggs-mailbridge  --Unix socket-->  riggs-daemon
+   https://localhost:41443/<token>/      127.0.0.1 only, runs as you      /var/run/riggs.sock
+```
+
+- **`riggs-mailbridge`** is a LaunchAgent that runs as you, not as root. It
+  serves the add-in's seven page files and accepts one kind of request, a mail
+  observation, on `POST /<token>/observe`. It forwards the observation to the
+  daemon's socket as your user, so the daemon keys the state by your user id,
+  never by anything in the request. Its answer is the verdict, or `null` when
+  nothing may be shown, or an empty 503 when the daemon gave no verdict.
+- **The page is served by the same program**, from `https://localhost:<port>`, so
+  the pane's request goes to its own origin and needs no cross-origin
+  permission. The bridge never sends a cross-origin (CORS) header.
+- **The port** is 41443 unless you pass `--port` to `setup`. It is a machine-wide
+  number: on a Mac with several users, the second user's bridge cannot listen
+  there and `riggs-mailbridge run` fails with `cannot listen on 127.0.0.1:41443:
+  Address already in use`. Give each user their own port with `setup --port N`
+  (it is kept after that), and sideload that user's manifest.
+- **A random token** is the first segment of every address, 32 hex characters
+  made when `setup` first runs. It exists only in the state directory and in the
+  manifest, which holds it in the addresses, so the manifest stored in your
+  mailbox contains it. A request with a wrong token gets a plain 404.
+- **Checks on every request:** the `Host` header must be `localhost:<port>` or
+  `127.0.0.1:<port>` (else 403); a POST must carry an `Origin` equal to the
+  bridge's own (else 403), a JSON content type (else 415), a body of at most
+  8 MiB (else 413) and valid JSON (else 400).
+
+### Installing it
+
+Prerequisites: the base install ([Enabling it](#enabling-it)), so the daemon runs
+and has its policy file, and a Microsoft-hosted mailbox that allows custom
+add-ins.
+
+1. **Run the installer with the option.** Nothing of the Outlook sensor is
+   installed without it.
+
+   ```
+   sudo install/install.sh --outlook
+   ```
+
+   It builds as for the base install, then installs
+   `/usr/local/bin/riggs-mailbridge` and the add-in's eight files (the seven it
+   serves and the manifest template) into a root-owned directory, runs
+   `riggs-mailbridge setup` **as you, not as root**, installs and loads the
+   LaunchAgent for you, and prints what `setup` printed. It does not trust any
+   certificate and does not add the add-in to a mailbox. Running it again keeps
+   the token and the certificate, so nothing you did in steps 2 and 3 needs
+   redoing.
+
+   `setup` prints, for your paths, two steps. These are the shapes:
+
+   ```
+   riggs-mailbridge state: /Users/you/Library/Application Support/Riggs/mailbridge
+   Certificate: new, valid for 799 more days.
+
+   Two steps only you can take; riggs-mailbridge does not run them.
+
+   1. Trust the bridge's local certificate authority for TLS in your login keychain
+      (macOS asks for your password). Run it again after every new certificate:
+
+      security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" '<state directory>/ca.pem'
+
+   2. Add the add-in to your mailbox, again after --renew or a new port: in a browser
+      signed in to the mailbox, open https://aka.ms/olksideload, choose My add-ins,
+      then under Custom Addins choose Add a custom add-in, Add from File, and pick:
+
+      <state directory>/manifest.xml
+   ```
+
+2. **Trust the certificate authority** by running the command of step 1, in a
+   Terminal window, as yourself (no `sudo`).
+
+   *The prompt:* macOS shows an authentication dialog and asks for your
+   password, because the command changes your own trust settings and adds the
+   certificate to your login keychain. Decline, and nothing changes.
+
+   *What you are trusting:* a certificate authority named "Riggs mail bridge
+   local CA", made by `setup`, for TLS server certificates only (`-p ssl`) and
+   only in your user's trust settings. The authority is **constrained to
+   `localhost`**: its certificate carries a critical name constraint that
+   permits only `localhost` and `127.0.0.1`. **Its private key is never written
+   to disk**: `setup` makes the authority and signs one certificate for
+   `localhost` and `127.0.0.1`, then drops the key. Both are ECDSA P-256 and
+   valid for 800 days.
+
+   *What that allows:* anything on your Mac that checks TLS against your trust
+   settings (Safari, Outlook's web view) accepts the one certificate `setup`
+   made, for `localhost` and `127.0.0.1`. *What it does not allow:* a
+   certificate from this authority for any other name. The constraint is
+   enforced by macOS's evaluator: the bridge's author checked it with
+   `security verify-cert` against a test authority with the same constraints,
+   which refused a certificate for `example.com` and accepted one for
+   `localhost`. The authority cannot sign anything new either, since its key is
+   gone. It is not trusted for code signing, mail or other purposes. What stays
+   possible: the certificate's own private key, `key.pem`, is a file of yours
+   (mode 0600), so a program running as you, or root, can read it and pose as
+   `localhost` to your other programs. Same-user malware is not stopped by any
+   of this.
+
+   Check it by opening the page in Safari, from the state directory:
+
+   ```
+   cd "$HOME/Library/Application Support/Riggs/mailbridge"
+   open "https://localhost:$(cat port)/$(cat token)/taskpane.html"
+   ```
+
+   You should see a page titled "Riggs" and no certificate warning, with the
+   line "This page is the Riggs pane for Outlook. It does nothing outside
+   Outlook." A certificate warning means the trust did not take effect.
+
+3. **Add the add-in to your mailbox**, once for each mailbox: in a browser
+   signed in to it, open `https://aka.ms/olksideload` (Outlook on the web opens
+   "Add-Ins for Outlook"), choose **My add-ins**, then under **Custom Addins**
+   **Add a custom add-in**, **Add from File**, and pick the state directory's
+   `manifest.xml` (in the file dialog, Cmd+Shift+G lets you paste a path). The
+   steps are Microsoft's, from its sideloading page; the dialog was not
+   exercised.
+
+   *What this does:* it stores the manifest in your mailbox on Microsoft's
+   servers, where it shows up in every Outlook client that opens the mailbox.
+   On any other computer the add-in's button appears and fails, because nothing
+   listens on that machine's `localhost`. A browser may ask whether the page may
+   reach devices on your local network; that has no bearing on the Mac add-in.
+   A mailbox that refuses custom add-ins, or an account of a kind that does not
+   support them, ends here.
+
+4. **Use it in Outlook for Mac.** Turn the Reading Pane on (View, Reading Pane,
+   Right or Below); without it add-ins are unavailable. Select a message in the
+   mailbox you added the add-in to. Click the **Riggs** button on the ribbon (under
+   the `...` button if it is not shown, where **Customize Toolbar** lets you place
+   it; a new add-in may take a while to appear and restarting Outlook may help).
+   When the pane opens, its first line should change from "Riggs is waiting for
+   Outlook." Click the pin icon on the pane, then select other messages: the
+   pane should follow your selection.
+
+5. **Switch to warn mode when you want to see verdicts:**
+   `sudo riggs phishing mode warn`. Check what has been checked with
+   `sudo riggs phishing recent`.
+
+### What is stored where
+
+| What | Where | Owner, mode |
+|---|---|---|
+| the bridge | `/usr/local/bin/riggs-mailbridge` | root, 755 |
+| the add-in's eight files (seven served, plus `manifest.template.xml`, which is never served) | `/usr/local/share/riggs/outlook-addin/` | root:wheel, readable, writable by root only |
+| the state: `token`, `port`, `key.pem` (the leaf certificate's private key), `cert.pem` (leaf, then authority), `ca.pem`, `manifest.xml` | `~/Library/Application Support/Riggs/mailbridge/` | you; directory 0700, every file 0600 |
+| the LaunchAgent | `~/Library/LaunchAgents/com.riggs.mailbridge.plist` | you, 644 |
+| the bridge's log | `~/Library/Logs/riggs/mailbridge.log` | you |
+| the authority's certificate and your trust setting | your login keychain | you; made by your command |
+| the manifest, with the token in its addresses, and the add-in's name | your mailbox, at Microsoft | the mailbox |
+
+The files that the bridge serves are root-owned so that a process running as
+you cannot change the page Outlook loads. The log holds only fixed phrases and
+status numbers (`listening on 127.0.0.1:<port>`, `answered 404`,
+`TLS handshake failed, client alert: UnknownCA` and a few more) and nothing from
+a request: no mail, no address, no token. `TLS handshake failed, client alert:
+UnknownCA` is the line to look for when the pane stays blank: Outlook's web view
+does not trust the certificate. Mail goes from the pane to `127.0.0.1` and to
+the daemon's socket; the bridge writes none of it to disk. What the daemon
+records is what [What is recorded](#what-is-recorded) says for the browser.
+
+**Connections.** The bridge serves at most 64 connections at once, closes an
+idle one after 30 seconds, and ends any connection 60 seconds after it was
+accepted, after letting a request in flight finish (up to 15 more seconds).
+Further connections wait. Another local user cannot pass the token check but
+can still hold every one of the 64 places, over and over, and so delay or
+starve your checks; the bridge itself stays up and recovers when they stop. A
+check that cannot connect in time gets no verdict, and the pane shows nothing
+for that message (the line for "did not answer").
+
+### Renewing the certificate
+
+The certificate and its authority are valid for 800 days (under Apple's limit of
+825 for TLS server certificates). **Nothing renews them by itself, and nothing
+warns you.** When the certificate has expired, `riggs-mailbridge run` refuses to
+start, launchd starts it again about every 10 seconds, and each time it logs the
+same error, so the pane cannot load. To renew, as yourself:
+
+```
+riggs-mailbridge setup --dir "$HOME/Library/Application Support/Riggs/mailbridge" --assets /usr/local/share/riggs/outlook-addin
+```
+
+`setup` makes a new certificate and authority when the old certificate is
+within 30 days of its end, or is past it, and keeps the token and the port.
+Then:
+
+1. Run the trust command it printed again (step 2 above). A new authority is a
+   new certificate, and macOS has to be told to trust it. The old authority stays
+   trusted until you remove it: list the authorities with
+   `security find-certificate -a -c "Riggs mail bridge local CA" -Z "$HOME/Library/Keychains/login.keychain-db"`,
+   compare with the hash of the current one
+   (`openssl x509 -in ca.pem -noout -fingerprint -sha256`, without the colons), and delete
+   each other with `security delete-certificate -t -Z <hash> "$HOME/Library/Keychains/login.keychain-db"`.
+2. Restart the bridge so that it reads the new certificate (an expired one
+   restarts by itself):
+   `launchctl unload "$HOME/Library/LaunchAgents/com.riggs.mailbridge.plist"` and then
+   `launchctl load "$HOME/Library/LaunchAgents/com.riggs.mailbridge.plist"`.
+
+The manifest does not change when only the certificate does, so you need not add
+the add-in again. `setup --renew` replaces the token, the key and both
+certificates; then the manifest changes too, so remove the add-in from the
+mailbox and add the new `manifest.xml` (step 3). What Outlook does when a
+manifest with the same add-in id is added again is unknown. `--port` also changes
+the manifest.
+
+### Removing it completely
+
+```
+sudo install/uninstall.sh
+```
+
+The uninstaller always removes the Outlook sensor, whether or not it was
+installed with `--outlook`: it unloads and deletes the LaunchAgent, the binary,
+`/usr/local/share/riggs/outlook-addin` and the state directory. It then prints
+two things for you to do, and runs neither:
+
+1. A `security delete-certificate -t -Z <hash> "$HOME/Library/Keychains/login.keychain-db"`
+   command that removes the authority's certificate and, with `-t`, your trust
+   setting for it, and a `security find-certificate` command that lists any
+   authority left (one for each `setup --renew`). The hash is that of the
+   authority in the state directory, read just before it was deleted. That
+   `-t` removes a trust setting that `add-trusted-cert` made was read from
+   `man security`, not tried.
+2. The reminder to remove the add-in from the mailbox, which lives there and
+   not on this Mac: at `https://aka.ms/olksideload`, My add-ins, Custom Addins,
+   the ellipsis on `Riggs`, Remove, in each mailbox you added it to.
+
+### Not confirmed in a real Outlook
+
+Everything inside Outlook is unconfirmed. The pane's behaviour was shown in
+macOS's web view against a stand-in for Office's script, and the whole path
+(pane, bridge, daemon) was run together; no step below was run in Outlook for
+Mac. The real pane shows no counters and no field values, and the bridge logs
+none, so each item is confirmed by what you see in Outlook and by
+`sudo riggs phishing recent` (one row per message checked: its time, the
+sender's domain, the level, whether it was shown, and the cue ids).
+
+| # | Not confirmed | How you would confirm it |
+|---|---|---|
+| 1 | "Add from File" accepts Riggs's manifest | step 3 ends without an error, and Custom Addins lists `Riggs` |
+| 2 | The button appears for a selected message | step 4: `Riggs` on the ribbon, or under `...` |
+| 3 | Outlook's web view loads a page from `https://localhost:<port>` once the authority is trusted for SSL in your user trust settings (the trust command uses `-p ssl` and no admin domain; that this is enough is unverified) and accepts an ECDSA P-256 leaf under a name-constrained authority, sent leaf then authority | click the button: the pane's first line changes. If it stays blank, `~/Library/Logs/riggs/mailbridge.log` shows `TLS handshake failed, client alert: UnknownCA`, or no new line at all if Outlook never reached the bridge |
+| 4 | `office.js` loads in that page and reports Outlook | the pane leaves "Riggs is waiting for Outlook." |
+| 5 | The pane's POST carries `Host: localhost:<port>` and `Origin: https://localhost:<port>`, which the bridge's 403 rules require | the pane never shows `(bridge status 403)`; the log shows `answered 200`, not `answered 403` |
+| 6 | The pane can be pinned | the pin icon is on the pane |
+| 7 | Pinned, Outlook reports each newly selected message once and the pane then holds that message | select five messages in turn; `recent` has a row for each |
+| 8 | The same for different messages inside one conversation | as 7, within a conversation |
+| 9 | With nothing selected the pane is told | select an empty folder: "No message is selected." |
+| 10 | A message in its own window has a working pane | double-click a message, open the pane there |
+| 11 | A message in Junk Email reaches the pane | select one; `recent` has a row |
+| 12 | A pinned pane is back after Outlook restarts, without a click | quit and reopen Outlook, select a message; if the pane is gone, it is one click per launch |
+| 13 | Sender and subject are the message's own | `recent`'s domain column is the sender's domain |
+| 14 | Link targets in the HTML body are the message's own, or wrapped by Safe Links | `sudo riggs phishing trust microsoft.com`, then send yourself a message linking to `micorsoft-support.com` (a lookalike from the cue catalogue) and read the message in warn mode: the pane should say `danger` with a reason |
+| 15 | The headers API is there and `Reply-To` is read correctly | send yourself two copies of a message whose display name shares a word with its address, one with a `Reply-To` on an unrelated address: only that copy should show `display_name_address_mismatch` in `recent`'s cues |
+| 16 | No Office call fails on real mail | the pane never says "Riggs could not read this message, so it was not checked." |
+| 17 | The notification appears as a bar, informational and not stored | in warn mode, select a flagged message: one bar on it, gone when you return after another message |
+| 18 | Removing the notification works | after a flagged message, `sudo riggs phishing mode monitor` and reselect: the bar goes |
+| 19 | With the bridge stopped the pane says so | `launchctl unload "$HOME/Library/LaunchAgents/com.riggs.mailbridge.plist"`, select a message: "Riggs did not check this message. ..." (load it again afterwards) |
+| 20 | What Outlook shows for a pane that cannot load (bridge stopped, pane reopened) | as 19, close and reopen the pane |
+| 21 | Without a network the page loads and `office.js` does not | network off, reopen the pane: the line stays "Riggs is waiting for Outlook." |
+| 22 | All of this for an Outlook.com mailbox; Microsoft documents pinning as not available for Outlook.com | repeat 4 to 12 there, or whether it pins inside Outlook for Mac at all |
+| a | Whether Outlook adds a query string to the pane's address | works either way: the bridge ignores a query |
+| b | `cc`, the item type and the inline-attachment filter on real items | no direct view; a failure would show as "Riggs could not read this message, so it was not checked." on a message with a Cc and an attachment |
+| c | That Outlook lists Riggs's notification by its key, which the removal in 18 relies on | 18 |
+| d | What the body walk gives for real HTML mail, and what the cues make of it | no direct view; compare `recent`'s cues for a mail whose text you know |
+| e | That Outlook hands over a body of several hundred kilobytes whole, and that a request of that size leaves its web view | a very long message; `recent` has its row, with `observation_truncated` only if over the cap |
+| f | How the bar reads with the `Riggs:` prefix and the 150-character cut, and whether replacing it flickers | look at it |
+| g | That the `nosniff` and `Referrer-Policy: same-origin` headers change nothing in Outlook's web view | the pane loads (3 and 4) |
+| h | That the pane follows light and dark appearance | switch appearance, reopen the pane |
+| i | Whether an item that is not a read-mode message ever reaches the pane | select a meeting request or a draft |
+| j | Whether Outlook reuses a cached page or script in spite of `no-store` | matters only after an update: reopen the pane after reinstalling |
+| k | What Outlook does when the same add-in id is added again after `setup --renew` | remove, then add the new manifest, and see whether two buttons appear |
+| l | That Safe Links is judged correctly: a link it rewrote is judged by its wrapper's address, not its destination, because the policy's Safe Links entry is commented out until its query parameter is checked against a real wrapped link | read a wrapped link's address in Outlook; see the policy file |
+| m | That the bridge's cap of 64 connections is enough for Outlook's web view (WebKit's documented default is six per host; Outlook's is unknown) | the pane keeps checking while several are open |
+| n | That `launchd`'s default limit of 256 open files is enough at the cap (about 148 are needed by an estimate) | not seen to matter |
+| o | That a listener on `0.0.0.0` of the same port does not let the bridge bind and mislead | not tested; only a listener on `127.0.0.1` was |
+| p | That the installer and uninstaller work on a real Mac | run them; neither has been executed, and neither the trust nor the delete command has been run |
+| q | That the daemon, running as root, and the bridge, running as you, agree on your user id | `sudo riggs phishing logins` lists the logins you expect for your own id; the run so far was one user |
+
+The pane has no Content-Security-Policy, because Office's script loads further
+code from Microsoft's network and only Outlook can show whether a policy would
+break it. The icons are plain blue squares. The pane does not time out on an
+Outlook call that never answers: it stays on "Checking this message." until you
+select another message.
 
 ## Browser extension contract
 
@@ -840,7 +1240,10 @@ Values and optional fields:
   `reasons[].text` is the sentence to display.
 
 **`CheckMail` fields.** A mail adapter always sends the first ten. The
-eleventh, `truncated`, is set by the worker and never by an adapter.
+eleventh, `truncated`, is set by the worker and never by an adapter. (The
+Outlook for Mac path does not go through the worker: there the pane sets
+`truncated` and the mail bridge keeps it and sets it when it cuts; see
+[Outlook for Mac](#outlook-for-mac).)
 
 | Field | Type | Meaning |
 |---|---|---|

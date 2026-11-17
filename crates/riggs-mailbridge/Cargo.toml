@@ -1,0 +1,28 @@
+[package]
+name = "riggs-mailbridge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riggs-types = { workspace = true }
+riggs-comms = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+hyper = { version = "1.12", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+subtle = "2.6"
+getrandom = "0.4"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+x509-parser = "0.18"
+time = "0.3.55"
+
+[dev-dependencies]
+libc = { workspace = true }
+tempfile = "3.27"

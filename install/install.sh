@@ -13,6 +13,25 @@ info()  { echo -e "${GREEN}[riggs]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[riggs]${NC} $*"; }
 error() { echo -e "${RED}[riggs]${NC} $*" >&2; }
 
+usage() {
+    echo "Usage: sudo install/install.sh [--outlook]"
+    echo ""
+    echo "  --outlook   Also install the Outlook for Mac sensor: riggs-mailbridge, the add-in's"
+    echo "              files and a per-user LaunchAgent. Nothing of it is installed without this"
+    echo "              option. The installer neither trusts a certificate nor sideloads the"
+    echo "              add-in: it shows the two steps you take yourself (docs/PHISHING.md,"
+    echo "              \"Outlook for Mac\")."
+}
+
+WITH_OUTLOOK=0
+for arg in "$@"; do
+    case "$arg" in
+        --outlook) WITH_OUTLOOK=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) error "Unknown argument: $arg"; usage >&2; exit 1 ;;
+    esac
+done
+
 if [[ $EUID -ne 0 ]]; then
     error "This script must be run as root (use sudo)."
     exit 1
@@ -107,7 +126,7 @@ chmod 644 /Library/LaunchDaemons/com.riggs.daemon.plist
 
 info "Installing launchd menubar agent plist..."
 AGENT_DIR="$REAL_HOME/Library/LaunchAgents"
-mkdir -p "$AGENT_DIR"
+sudo -u "$REAL_USER" mkdir -p "$AGENT_DIR"
 cp "$SCRIPT_DIR/launchd/com.riggs.menubar.plist" "$AGENT_DIR/com.riggs.menubar.plist"
 chown "$REAL_USER" "$AGENT_DIR/com.riggs.menubar.plist"
 chmod 644 "$AGENT_DIR/com.riggs.menubar.plist"
@@ -119,6 +138,50 @@ launchctl load /Library/LaunchDaemons/com.riggs.daemon.plist || warn "Failed to 
 info "Loading launchd menubar agent..."
 sudo -u "$REAL_USER" launchctl unload "$AGENT_DIR/com.riggs.menubar.plist" 2>/dev/null || true
 sudo -u "$REAL_USER" launchctl load "$AGENT_DIR/com.riggs.menubar.plist" || warn "Failed to load menubar plist."
+
+# Outlook for Mac sensor: opt-in, per user. The bridge serves the add-in's files, so they are
+# root-owned like the browser extension. Its state (token, certificates, manifest) is the real
+# user's and 0700. Two steps are never taken here: trusting the bridge's certificate authority in
+# the user's keychain, and adding the add-in to a mailbox. `setup` prints both for the user.
+MAILBRIDGE_ASSETS=/usr/local/share/riggs/outlook-addin
+MAILBRIDGE_STATE="$REAL_HOME/Library/Application Support/Riggs/mailbridge"
+if [[ $WITH_OUTLOOK -eq 1 ]]; then
+    MAILBRIDGE_PLIST="$AGENT_DIR/com.riggs.mailbridge.plist"
+    info "Installing riggs-mailbridge to /usr/local/bin/..."
+    cp "$PROJECT_ROOT/target/release/riggs-mailbridge" /usr/local/bin/riggs-mailbridge
+    chmod 755 /usr/local/bin/riggs-mailbridge
+
+    info "Installing the Outlook add-in files to $MAILBRIDGE_ASSETS..."
+    (umask 022 && mkdir -p /usr/local/share/riggs)
+    rm -rf "$MAILBRIDGE_ASSETS"
+    ditto "$PROJECT_ROOT/extensions/riggs-outlook/addin" "$MAILBRIDGE_ASSETS"
+    chown -R root:wheel "$MAILBRIDGE_ASSETS"
+    chmod -R u=rwX,go=rX "$MAILBRIDGE_ASSETS"
+
+    # setup keeps an existing token and certificate; it is not given --renew.
+    info "Setting up the bridge's state as $REAL_USER..."
+    sudo -u "$REAL_USER" /usr/local/bin/riggs-mailbridge setup \
+        --dir "$MAILBRIDGE_STATE" --assets "$MAILBRIDGE_ASSETS"
+
+    # Paths are put into the plist XML-escaped (a home directory may hold an &); perl takes the
+    # values from the environment so that no character of a path is read as a replacement.
+    info "Installing launchd mailbridge agent plist..."
+    MAILBRIDGE_BIN=/usr/local/bin/riggs-mailbridge STATE_DIR="$MAILBRIDGE_STATE" \
+        ASSETS_DIR="$MAILBRIDGE_ASSETS" LOG_FILE="$REAL_HOME/Library/Logs/riggs/mailbridge.log" \
+        perl -pe 's/\{\{(MAILBRIDGE_BIN|STATE_DIR|ASSETS_DIR|LOG_FILE)\}\}/$ENV{$1} =~ s{&}{&amp;}gr =~ s{<}{&lt;}gr =~ s{>}{&gt;}gr/ge' \
+        "$SCRIPT_DIR/launchd/com.riggs.mailbridge.plist" > "$MAILBRIDGE_PLIST"
+    if grep -qE '\{\{(MAILBRIDGE_BIN|STATE_DIR|ASSETS_DIR|LOG_FILE)\}\}' "$MAILBRIDGE_PLIST"; then
+        error "A placeholder is left in $MAILBRIDGE_PLIST."
+        exit 1
+    fi
+    plutil -lint "$MAILBRIDGE_PLIST" >/dev/null
+    chown "$REAL_USER" "$MAILBRIDGE_PLIST"
+    chmod 644 "$MAILBRIDGE_PLIST"
+
+    info "Loading launchd mailbridge agent..."
+    sudo -u "$REAL_USER" launchctl unload "$MAILBRIDGE_PLIST" 2>/dev/null || true
+    sudo -u "$REAL_USER" launchctl load "$MAILBRIDGE_PLIST" || warn "Failed to load mailbridge plist."
+fi
 
 # The network filter enforces egress/DLP verdicts. It needs signing with
 # provisioning profiles, so it is built separately (extensions/riggs-filter/build.sh).
@@ -152,4 +215,15 @@ echo "    1. Open chrome://extensions and turn on \"Developer mode\"."
 echo "    2. Click \"Load unpacked\" and choose $BROWSER_EXT_DIR"
 echo "  The extension's popup shows its state; docs/PHISHING.md explains each one."
 echo ""
+if [[ $WITH_OUTLOOK -eq 1 ]]; then
+    echo "  Outlook for Mac: the bridge is running, but nothing works until you take the two"
+    echo "  steps printed above (trust its certificate authority; add the add-in to your"
+    echo "  mailbox). To see them again, run as yourself, not with sudo:"
+    echo "    riggs-mailbridge setup --dir \"$MAILBRIDGE_STATE\" --assets $MAILBRIDGE_ASSETS"
+    echo "  docs/PHISHING.md, \"Outlook for Mac\", explains each prompt."
+    echo ""
+else
+    echo "  Outlook for Mac sensor: not installed. Add it with: sudo $SCRIPT_DIR/install.sh --outlook"
+    echo ""
+fi
 echo "  To uninstall: sudo $SCRIPT_DIR/uninstall.sh"

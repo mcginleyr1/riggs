@@ -229,12 +229,63 @@ installer's system-wide one also exists, are both unverified. The daemon
 rereads the policy file when it changes, so editing the mode in
 `/tmp/riggs-dev/config/phishing-policy.toml` takes effect without a restart.
 
+### 6. Outlook add-in and mail bridge
+
+The add-in (`extensions/riggs-outlook`) is plain JavaScript like the browser
+extension, with the same tooling. `addin/` holds what the bridge serves; `test/`
+loads the real page in jsdom against a stand-in for Office's script.
+
+```sh
+npm --prefix extensions/riggs-outlook ci
+npm --prefix extensions/riggs-outlook test
+npm --prefix extensions/riggs-outlook run lint
+```
+
+The bridge is the crate `riggs-mailbridge`, tested with `cargo test -p riggs-mailbridge`.
+To run it by hand against the development daemon of section 5 (nothing here
+touches your keychain or Outlook), build it and give it its own state directory
+and a port that is not the installed bridge's 41443:
+
+```sh
+cargo build -p riggs-mailbridge
+target/debug/riggs-mailbridge setup --dir /tmp/riggs-dev/bridge --assets extensions/riggs-outlook/addin --port 41445
+RIGGS_SOCKET=/tmp/riggs-dev/riggs.sock target/debug/riggs-mailbridge run --dir /tmp/riggs-dev/bridge --assets extensions/riggs-outlook/addin
+```
+
+`setup` prints the trust and sideload steps; skip them. `run` reads
+`RIGGS_SOCKET` (the daemon's socket; the default is `/var/run/riggs.sock`) and
+logs only fixed phrases. In another shell, `curl` can stand in for the pane,
+trusting the generated authority for that one command with `--cacert`. The
+token is the file `/tmp/riggs-dev/bridge/token`, and a POST must carry the
+bridge's own `Origin` and a JSON content type:
+
+```sh
+curl --cacert /tmp/riggs-dev/bridge/ca.pem https://localhost:41445/<token>/taskpane.html
+curl --cacert /tmp/riggs-dev/bridge/ca.pem -X POST -H "Origin: https://localhost:41445" \
+  -H "Content-Type: application/json" --data @mail.json https://localhost:41445/<token>/observe
+```
+
+`mail.json` is one observation, for example:
+
+```json
+{"provider": "outlook_addin", "message_id": "<example-1@example.com>", "from_name": "Example Sender",
+ "from_addr": "sender@example.com", "reply_to": null, "to": ["you@example.org"], "subject": "Example",
+ "body_text": "\nHello\n", "links": [{"text": "example", "href": "https://example.com/"}], "attachments": []}
+```
+
+The answer is `null` when nothing may be shown (monitor mode, or level `none`),
+a verdict object when the daemon is in warn mode and flags the mail, and an
+empty 503 when the daemon gave no verdict (not running, no policy file, or
+slower than five seconds). `riggs --socket /tmp/riggs-dev/riggs.sock phishing recent`
+shows the check. Stop the bridge with `kill`; it has no shutdown handler. With
+the same port, an installed bridge and a development one cannot both listen.
+
 ## Project Layout
 
 ```
 riggs/
 ├── Cargo.toml                 # Rust workspace root
-├── crates/                    # 26 Rust crates (agent)
+├── crates/                    # 27 Rust crates (agent)
 │   ├── riggs-daemon/          #   Daemon binary
 │   ├── riggs-cli/             #   CLI binary
 │   ├── riggs-dlp/             #   DLP module
@@ -248,7 +299,8 @@ riggs/
 │   └── proto/                 #   gRPC protobuf definitions
 ├── extensions/
 │   ├── riggs-filter/          #   macOS System Extension (Swift): NEFilterDataProvider (egress + DLP), host app, build.sh
-│   └── riggs-browser/         #   Chromium extension for phishing protection (JavaScript): ext/ is what a browser loads
+│   ├── riggs-browser/         #   Chromium extension for phishing protection (JavaScript): ext/ is what a browser loads
+│   └── riggs-outlook/         #   Outlook for Mac add-in (JavaScript): addin/ is what riggs-mailbridge serves
 ├── config/                    # Agent configuration
 │   ├── riggs.toml             #   Main agent config
 │   ├── phishing-policy.toml   #   Phishing policy (mode, thresholds, weights, phrases)

@@ -27,6 +27,7 @@ members = [
     "crates/riggs-cloud",
     "crates/riggs-egress",
     "crates/riggs-phishing",
+    "crates/riggs-mailbridge",
 ]
 
 [workspace.package]
@@ -134,3 +135,4 @@ riggs-dlp = { path = "crates/riggs-dlp" }
 riggs-cloud = { path = "crates/riggs-cloud" }
 riggs-egress = { path = "crates/riggs-egress" }
 riggs-phishing = { path = "crates/riggs-phishing" }
+riggs-mailbridge = { path = "crates/riggs-mailbridge" }

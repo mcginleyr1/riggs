@@ -35,6 +35,31 @@ else
     warn "Daemon was not loaded."
 fi
 
+# The Outlook for Mac sensor goes whether or not install.sh was given --outlook. The CA's hash is
+# read before the state directory goes: it names the certificate in the keychain commands printed
+# at the end, which this script never runs.
+MAILBRIDGE_STATE="$REAL_HOME/Library/Application Support/Riggs/mailbridge"
+CA_NAME="Riggs mail bridge local CA"
+CA_HASH=""
+if [[ -f "$MAILBRIDGE_STATE/ca.pem" ]]; then
+    CA_HASH=$(openssl x509 -in "$MAILBRIDGE_STATE/ca.pem" -noout -fingerprint -sha256 2>/dev/null |
+        sed 's/.*=//; s/://g') || CA_HASH=""
+fi
+MAILBRIDGE_PLIST="$REAL_HOME/Library/LaunchAgents/com.riggs.mailbridge.plist"
+info "Unloading launchd mailbridge agent..."
+if sudo -u "$REAL_USER" launchctl list com.riggs.mailbridge &>/dev/null; then
+    sudo -u "$REAL_USER" launchctl unload "$MAILBRIDGE_PLIST" 2>/dev/null || true
+    info "Mailbridge agent unloaded."
+else
+    warn "Mailbridge agent was not loaded."
+fi
+info "Removing the Outlook for Mac sensor's files..."
+rm -f "$MAILBRIDGE_PLIST"
+rm -f /usr/local/bin/riggs-mailbridge
+rm -rf /usr/local/share/riggs/outlook-addin
+rm -rf "$MAILBRIDGE_STATE"
+rmdir "$REAL_HOME/Library/Application Support/Riggs" 2>/dev/null || true
+
 info "Unloading launchd menubar agent..."
 AGENT_PLIST="$REAL_HOME/Library/LaunchAgents/com.riggs.menubar.plist"
 if sudo -u "$REAL_USER" launchctl list com.riggs.menubar &>/dev/null; then
@@ -93,6 +118,7 @@ echo "    - Network filter:  deactivated and removed (if it was installed)"
 echo "    - Launchd plists:  removed"
 echo "    - Binaries:        removed"
 echo "    - Browser:         extension files and native-messaging manifests removed"
+echo "    - Outlook sensor:  bridge, agent, add-in files and its state removed (if it was installed)"
 echo "    - Logs:            removed"
 if [[ "$remove_data" =~ ^[Yy]$ ]]; then
     echo "    - Data:            removed"
@@ -107,3 +133,26 @@ fi
 echo ""
 echo "  A browser keeps its entry for the Riggs extension until you remove it there:"
 echo "  open chrome://extensions in each profile it was loaded into."
+echo ""
+echo "  If you ever set up the Outlook for Mac sensor, two things are left that only you can"
+echo "  remove. This script does not run either."
+echo ""
+echo "  1. The bridge's certificate authority and its trust setting, in your login keychain"
+echo "     (macOS asks for your password). -t deletes the trust setting with the certificate:"
+echo ""
+if [[ -n "$CA_HASH" ]]; then
+    echo "     security delete-certificate -t -Z $CA_HASH \"\$HOME/Library/Keychains/login.keychain-db\""
+else
+    echo "     security delete-certificate -t -c \"$CA_NAME\" \"\$HOME/Library/Keychains/login.keychain-db\""
+fi
+echo ""
+echo "     Every 'setup --renew' made a new authority with the same name, so the command above"
+echo "     can name more than one. List what is left, and delete each by the SHA-256 hash this"
+echo "     prints (-Z <hash> in place of -c <name>) until nothing is listed:"
+echo ""
+echo "     security find-certificate -a -c \"$CA_NAME\" -Z \"\$HOME/Library/Keychains/login.keychain-db\""
+echo ""
+echo "  2. The add-in in your mailbox. It lives there, not on this Mac. In a browser signed in to"
+echo "     the mailbox, open https://aka.ms/olksideload, choose My add-ins, find \"Riggs\" under"
+echo "     Custom Addins, choose its ellipsis (...), then Remove. Do it for each mailbox you added"
+echo "     it to; restart Outlook if its button lingers."
